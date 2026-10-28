@@ -1,0 +1,62 @@
+# Секреты — никогда не коммитить
+secrets.h
+secret-telegram.txt
+*.credentials
+*.env
+
+# Архивы и дампы
+firmware-archive/
+firmware-archive.json
+flash-dumps/
+*.bak
+*.bak[0-9]*
+*.bak-*
+
+# Сборка
+build/
+*.bin
+*.elf
+*.map
+__pycache__/
+*.pyc
+
+# Логи и базы
+*.log
+*.db
+*.sqlite
+
+# Временные профили и аудиты
+chrome-prof/
+audit_*/
+
+# Скриншоты: в репозиторий попадают только явно разрешённые
+shots/
+*.png
+!docs/screenshots/*.png
+!docs/screenshots/**/*.png
+!docs/assets/*.png
+
+# Данные с карты и отчёты
+backup-sd/
+energy-log.csv
+energy-*.csv
+status.json
+monitor-report.json
+# конфиг приложения (SSID и IP платы)
+DomMonitor.json
+settings.json
+
+# документы и отчёты
+*.pdf
+*.docx
+*.xlsx
+*.zip
+publish-report.txt
+
+# секреты в любом регистре
+*secret*
+*Secret*
+# История потребления — никогда
+energy.csv
+*.peak
+*.tmp
