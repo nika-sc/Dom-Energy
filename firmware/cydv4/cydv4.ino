@@ -18,11 +18,66 @@
 #include <TFT_eSPI.h>
 #include <Preferences.h>
 #include <HTTPClient.h>
+#include <ESPmDNS.h>
 #include <SPI.h>
 #include <SD.h>
 #include <time.h>
 
 #include "font5x7.h"
+
+// ---- GAPFILL: пределы и типы -----------------------------------------------
+// Объявлены в самом начале файла, потому что Arduino вставляет прототипы
+// функций перед первой функцией — типы должны быть известны уже там.
+#define GF_SCOPE_DAYS 2        // какие дни смотрим (сегодня и вчера)
+#define GF_MAX_GAPS   20       // больше не берём: лучше доделать в следующий раз
+#define GF_MIN_GAP    120L     // < 2 минут — не пропуск, запись просто сдвинулась
+#define GF_MAX_GAP    21600L   // > 6 часов облаком не восстановить
+#define GF_AGE        300L     // пропуск должен быть старше 5 минут
+#define GF_WIN        1200L    // окно запроса, с (100 записей × 16 с ≈ 27 мин)
+#define GF_MAX_WIN    24
+#define GF_POOL       420      // общий пул вставляемых строк
+#define GF_MAX_EN     24       // записей счётчика на пропуск
+#define GF_MAX_TMP    32       // записей температуры на пропуск
+#define GF_TEMP_NEAR  300L     // насколько близко искать температуру, с
+
+enum { GF_IDLE = 0, GF_SCAN, GF_FETCH, GF_COMMIT };
+
+struct GapRow {               // одна вставляемая строка
+  uint32_t t;                 // время, epoch (местное)
+  uint16_t v;                 // напряжение, В
+  uint16_t p;                 // мощность, Вт
+  int32_t  e;                 // счётчик, сотые кВт·ч
+  int16_t  tc;                // температура, десятые °C (INT16_MIN — нет данных)
+};
+
+struct GapItem {
+  long     a, b;              // последняя строка ДО и первая ПОСЛЕ (epoch)
+  int32_t  ea, eb;            // их счётчики, сотые кВт·ч
+  uint32_t line;              // номер строки, после которой вставлять
+  uint16_t row0, rowN;        // место в пуле строк
+  uint16_t w, wN;             // текущее окно и сколько всего окон
+  int16_t  srcE;              // сколько строк получили счётчик из облака
+  uint8_t  st;                // 0 новый, 1 качаем, 2 готов
+};
+
+struct GapRun {
+  uint8_t  phase;
+  uint8_t  run;               // 1 = заполнять, 0 = только показать
+  uint8_t  pending;           // 1 = отложенный запуск после старта
+  int      gaps;              // найдено пропусков
+  long     gapSec;            // их суммарная длительность
+  int      gi;                // текущий пропуск
+  int      poolN;             // занято строк в пуле
+  int      nEn, nTmp;         // записей счётчика/температуры текущего пропуска
+  int      inserted;          // вставлено в последнем запуске
+  int      insTotal;          // вставлено всего за сеанс
+  int      retry;             // подряд неудачных запросов
+  int      todayN, todayMin;  // пропуски СЕГОДНЯ (для экрана ИТОГИ и /data)
+  int      yestN, yestMin;
+  long     tzOff;             // местное минус UTC, с (для запросов в облако)
+  unsigned long nextMs, started;
+  char     msg[40];
+};
 
 int rndRad(int w, int h);
 // сторож объявлен ниже, а нижняя полоса рисует его состояние
@@ -31,13 +86,615 @@ extern bool     wdAlive[];
 extern bool     wdChecked[];
 extern uint16_t wdMs[];
 void updatePeriods();
+void dispApply();                 // подсветка: определена ниже (ШИМ)
 #include <esp_task_wdt.h>
+// >>> PAGE_TMPL — генерируется из web/page.html (python web/build_page.py)
+// Шаблон держим в этом же файле, чтобы бэкап прошивки был полным.
+static const char PAGE_TMPL[] PROGMEM = R"HTML(
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#F8FAFF">
+<title>Дом — энергия</title>
+<style>
+:root{--bg:#F8FAFF;--card:#fff;--ln:#DBE4F5;--ink:#0F172A;--mut:#5A6478;--acc:#2563EB;--acc2:#BFD3FB;--grn:#0F9F6E;--pnk:#DB2777}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-variant-numeric:tabular-nums;-webkit-text-size-adjust:100%}
+main{max-width:880px;margin:0 auto;padding:18px 16px 44px}
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-bottom:14px}
+h1{font-size:21px;line-height:1.2;margin:0;letter-spacing:-.02em}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}
+.chip{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--ln);color:var(--mut);font-size:12px;padding:4px 9px;border-radius:999px;white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;background:#94A3B8;display:inline-block;flex:none}
+.dot.ok{background:var(--grn)}
+.dot.bad{background:var(--pnk)}
+.card{background:var(--card);border:1px solid var(--ln);border-radius:16px;box-shadow:0 1px 2px rgba(15,23,42,.03)}
+.hero{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+.kpi{padding:14px 16px}
+.lbl{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.07em;font-weight:600}
+.big{font-size:30px;font-weight:750;letter-spacing:-.03em;line-height:1.15;margin-top:3px}
+.big small{font-size:14px;font-weight:600;color:var(--mut);letter-spacing:0;margin-left:3px}
+.acc{color:var(--acc)}
+.grn{color:var(--grn)}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));padding:14px 6px;margin-bottom:10px}
+.m{padding:0 10px;border-right:1px solid #EDF1F9;min-width:0}
+.m:last-child{border-right:0}
+.mv{font-size:19px;font-weight:700;letter-spacing:-.02em;margin-top:2px;white-space:nowrap;overflow:hidden}
+.mv small{font-size:11px;color:var(--mut);font-weight:600;margin-left:1px}
+.age{font-size:10px;color:var(--mut);font-weight:600;margin-top:1px;white-space:nowrap}
+.age.old{color:#B45309}
+.age.bad{color:#DC2626}
+.pa{font-size:9px;color:var(--mut);font-weight:600;margin-left:4px}
+.pa.old{color:#B45309}
+.pa.bad{color:#DC2626}
+.ls{display:none}
+.pills{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px}
+.pill{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--ln);border-radius:999px;padding:5px 11px;font-size:12.5px;color:var(--mut)}
+.pill b{color:var(--ink);font-weight:650}
+.sec{padding:14px 16px 8px;margin-bottom:10px}
+.head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+.ttl{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--mut)}
+.nav{display:flex;align-items:center;gap:6px;margin-left:auto}
+.arr{width:34px;height:34px;border-radius:10px;border:1px solid var(--ln);background:#fff;color:var(--acc);font-size:20px;line-height:1;cursor:pointer;display:grid;place-items:center;padding:0 0 3px}
+.arr:disabled{color:#C7D2E8;cursor:default}
+.date{min-width:150px;text-align:center;font-weight:650;font-size:14px}
+.date em{display:block;font-style:normal;font-size:11px;color:var(--mut);font-weight:500;margin-top:-2px}
+.date .gapmark{display:block;font-style:normal;font-size:10.5px;font-weight:600;color:#B45309;background:#FEF3C7;border:1px solid #FDE68A;border-radius:6px;padding:0 5px;margin-top:2px;white-space:nowrap}
+.chart{margin-top:10px}
+.chart+.chart{border-top:1px solid #EDF1F9;padding-top:12px}
+.ct{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;font-size:13px;font-weight:600;color:#334155}
+.ct .u{font-size:11px;color:var(--mut);font-weight:500}
+.cs{font-size:10.5px;color:var(--mut);margin-top:1px}
+.legend{margin-left:auto;display:flex;align-items:center;gap:5px;font-size:11px;color:var(--mut);font-weight:500}
+.nbtn{font:inherit;font-size:10px;font-weight:600;color:var(--mut);background:#fff;border:1px solid var(--ln);border-radius:999px;padding:1px 7px;line-height:1.45;cursor:pointer}
+.nbtn[aria-pressed=true]{color:var(--acc);border-color:var(--acc2);background:#EFF4FF}
+.sw{width:9px;height:9px;border-radius:3px;display:inline-block;margin-left:6px}
+.sw.b{background:var(--acc2)}
+.sw.p{background:#F59E0B;height:9px;border-radius:3px;opacity:1}
+.sw.v{background:var(--acc)}
+.sw.t{background:var(--pnk)}
+.plot{margin-top:4px;min-height:60px}
+.plot svg{display:block;width:100%;height:auto;overflow:visible}
+.ph{color:var(--mut);font-size:13px;padding:26px 0;text-align:center}
+.grid{stroke:#E7EDF9;stroke-width:1}
+.yl,.xl{fill:#94A3B8;font-size:9.5px;pointer-events:none}
+.yl.a{fill:#6B8FD0}
+.yl.p{fill:#64748B}
+.cap{font-size:9px;font-weight:700;letter-spacing:.02em;pointer-events:none}
+.cap.a{fill:#3F6BC4}
+.cap.p{fill:#475569}
+.nl{font-size:8px;fill:#475569;font-weight:600;pointer-events:none}
+.bar{fill:var(--acc2)}
+.bar.cur{fill:var(--acc);fill-opacity:.55;stroke:var(--acc)}
+.bar0{fill:#E7EDF9}
+.pbar{fill:#F59E0B}
+.pbar.cur{fill:#EA580C;fill-opacity:.55;stroke:#EA580C}
+.hit{cursor:pointer}
+.vline{fill:none;stroke:var(--acc);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.tline{fill:none;stroke:var(--pnk);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.vdot{fill:var(--acc)}
+.tdot{fill:var(--pnk)}
+.nowband{fill:var(--acc);opacity:.055}
+.totals{padding:6px 16px}
+.row{display:flex;justify-content:space-between;gap:10px;padding:9px 0;font-size:14px;color:var(--mut)}
+.row+.row{border-top:1px solid #EDF1F9}
+.row b{color:var(--ink);font-weight:650;text-align:right}
+.block{padding:14px 16px;margin-bottom:10px}
+.ttl2{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);margin-bottom:8px}
+.frow{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}
+.fval{font-size:24px;font-weight:750;letter-spacing:-.02em}
+.funit{font-size:12px;color:var(--mut);margin-right:10px;font-weight:600}
+.note{font-size:12px;color:var(--mut);margin-top:4px}
+.tgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.titem{background:#F7FAFF;border:1px solid #E7EDF9;border-radius:12px;padding:10px 12px}
+.tval{font-size:20px;font-weight:700;margin-top:2px}
+.tval small{font-size:11px;color:var(--mut);font-weight:600}
+.ev{list-style:none;margin:0;padding:0}
+.ev li{display:flex;justify-content:space-between;gap:10px;padding:8px 0;font-size:13.5px;border-top:1px solid #EDF1F9}
+.ev li:first-child{border-top:0}
+.ev .when{color:var(--mut);font-size:12px;white-space:nowrap}
+.ev .on{color:var(--grn);font-weight:650}
+.ev .off{color:var(--pnk);font-weight:650}
+.ev .muted{color:var(--mut);padding:10px 0}
+.tip{position:fixed;z-index:50;background:#0F172A;color:#fff;font-size:12px;line-height:1.35;padding:7px 10px;border-radius:9px;pointer-events:none;box-shadow:0 6px 20px rgba(15,23,42,.25);max-width:250px}
+.tip b{font-size:13px}
+.tip .k{color:#94A3B8}
+.tip[hidden]{display:none}
+@media(max-width:560px){
+main{padding:14px 12px 36px}
+h1{font-size:19px}
+.chips{margin-left:0;width:100%}
+.big{font-size:26px}
+.metrics{padding:11px 2px}
+.m{padding:0 7px}
+.m .lbl{font-size:9px;letter-spacing:.02em;white-space:nowrap}
+.lf{display:none}
+.ls{display:inline}
+.mv{font-size:16px}
+.mv small{font-size:10px}
+.sec{padding:12px 12px 6px}
+.date{min-width:122px;font-size:13px}
+.row{font-size:13px}
+}
+@media(max-width:350px){
+.big{font-size:23px}
+.mv{font-size:15px}
+.m .lbl{font-size:9px}
+}
+</style>
+</head>
+<body>
+<main>
+<div class="top">
+  <h1>Дом — энергия</h1>
+  <div class="chips">
+    <span class="chip" title="версия прошивки">CYD-__FW__</span>
+    <span class="chip" id="cNet"><i class="dot __NETCLS__"></i><span>__NETTXT__</span></span>
+    <span class="chip" id="cRssi">__RSSI__ дБм</span>
+    <span class="chip" id="cUpd">обновлено 0 с</span>
+  </div>
+</div>
+
+<div class="hero">
+  <div class="card kpi">
+    <div class="lbl">Сегодня</div>
+    <div class="big acc"><span id="tkwh">__TKWH__</span><small>кВт·ч</small></div>
+    <div class="age" id="tkwhAge">—</div>
+  </div>
+  <div class="card kpi">
+    <div class="lbl">Стоимость</div>
+    <div class="big grn"><span id="tcost">__TCOST__</span><small>₽</small></div>
+  </div>
+</div>
+
+<div class="card metrics">
+  <div class="m"><div class="lbl"><span class="lf">Напряжение</span><span class="ls">Напр.</span></div><div class="mv"><span id="mv">__MV__</span><small>В</small></div><div class="age" id="mvAge">—</div></div>
+  <div class="m"><div class="lbl"><span class="lf">Мощность</span><span class="ls">Мощн.</span></div><div class="mv"><span id="mp">__MP__</span><small>Вт</small></div><div class="age" id="mpAge">—</div></div>
+  <div class="m"><div class="lbl">Ток</div><div class="mv"><span id="ma">__MA__</span><small>А</small></div></div>
+  <div class="m"><div class="lbl"><span class="lf">Температура</span><span class="ls">Темп.</span></div><div class="mv"><span id="mt">__MT__</span><small>°C</small></div><div class="age" id="mtAge">—</div></div>
+</div>
+
+<div class="pills">
+  <span class="pill" id="pRelay"><i class="dot __RELCLS__"></i>реле __RELTXT__</span>
+  <span class="pill">cos φ <b id="pcos">—</b></span>
+  <span class="pill">тариф <b id="ptar">__TAR__</b></span>
+  <span class="pill">счётчик <b id="pe">__PE__</b><span class="pa" id="peAge">—</span></span>
+</div>
+
+<section class="card sec">
+  <div class="head">
+    <div class="ttl">История</div>
+    <div class="nav">
+      <button class="arr" id="prev" type="button" aria-label="Предыдущий день">‹</button>
+      <div class="date" id="dateLabel">—</div>
+      <button class="arr" id="next" type="button" aria-label="Следующий день">›</button>
+    </div>
+  </div>
+  <div class="chart">
+    <div class="ct"><span>Энергия и мощность по часам</span><span class="legend"><i class="sw b"></i>средняя<i class="sw p"></i>пик</span><button class="nbtn" id="unitBtn" type="button" aria-pressed="false" title="единицы столбиков">кВт·ч</button><button class="nbtn" id="numBtn" type="button" aria-pressed="false" title="значения над столбиками">числа</button></div>
+    <div class="cs" id="eCap">высота — энергия за час, кВт·ч; средняя мощность за тот же час = кВт·ч × 1000, Вт</div>
+    <div class="plot" id="chE"><div class="ph">загрузка…</div></div>
+  </div>
+  <div class="chart">
+    <div class="ct"><span>Напряжение и температура</span><span class="legend"><i class="sw v"></i>В<i class="sw t"></i>°C</span></div>
+    <div class="plot" id="chVT"></div>
+  </div>
+</section>
+
+<section class="card totals">
+  <div class="row"><span>Вчера</span><b><span id="ykwh">__YKWH__</span> кВт·ч · <span id="ykost">__YKOST__</span> ₽</b></div>
+  <div class="row"><span>Месяц</span><b><span id="mkwh">__MKWH__</span> кВт·ч · <span id="mcost">__MCOST__</span> ₽</b></div>
+</section>
+
+<section class="card block">
+  <div class="ttl2">Прогноз на месяц</div>
+  <div class="frow"><b class="fval acc" id="fkwh">—</b><span class="funit">кВт·ч</span><b class="fval grn" id="fcost">—</b><span class="funit">₽</span></div>
+  <div class="note" id="fnote">по текущему темпу расхода</div>
+</section>
+
+<section class="card block">
+  <div class="ttl2">Тарифы</div>
+  <div class="tgrid">
+    <div class="titem"><div class="lbl">День · 06–23</div><div class="tval">__TARDAY__ <small>₽/кВт·ч</small></div></div>
+    <div class="titem"><div class="lbl">Ночь · 23–06</div><div class="tval">__TARNIGHT__ <small>₽/кВт·ч</small></div></div>
+  </div>
+</section>
+
+<section class="card block">
+  <div class="ttl2">События реле</div>
+  <ul class="ev" id="events"><li class="muted">загрузка…</li></ul>
+</section>
+</main>
+<div id="tip" class="tip" hidden></div>
+<script>
+(function(){
+"use strict";
+var $=function(i){return document.getElementById(i)};
+var MON=["января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"];
+var S={date:"__DATE__",today:"__DATE__",hour:__HOUR__,days:[],gaps:[],hist:{},cur:null,last:Date.now(),net:true,tipT:0,busy:false,poll:0,fn:120,nums:0};
+var AT={v:0,t:0,p:0,e:0};   // epoch-секунды последнего получения показателя
+function pad2(n){return (n<10?"0":"")+n}
+function fmtDate(d){var p=d.split("-");return (+p[2])+" "+(MON[(+p[1])-1]||"")+" "+p[0]}
+function num(v,d){return (v===null||v===undefined||!isFinite(v))?"—":Number(v).toFixed(d)}
+function eNum(v){if(!(v>0))return "0";return v<0.1?Number(v).toFixed(3):Number(v).toFixed(2)}
+function j(u){return fetch(u,{cache:"no-store"}).then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.json()})}
+var Q=Promise.resolve();
+function jt(u){
+var c=new AbortController(),t=setTimeout(function(){c.abort()},15000);
+return fetch(u,{cache:"no-store",signal:c.signal}).then(function(r){
+  clearTimeout(t);
+  if(!r.ok)throw new Error("HTTP "+r.status);
+  return r.json();
+},function(e){clearTimeout(t);throw e});
+}
+function jq(u){
+var p=Q.then(function(){return jt(u)});
+Q=p.then(function(){},function(){});
+return p;
+}
+function retry(u,n){
+return jq(u).catch(function(e){
+  if(n<=0)throw e;
+  return new Promise(function(res){setTimeout(res,1200)}).then(function(){return retry(u,n-1)});
+});
+}
+function txt(id,t){var e=$(id);if(e)e.textContent=t}
+function hourRange(i){return pad2(i)+":00–"+pad2(i+1)+":00"}
+function fullN(hs){var s=0,c=0,i,a;for(i=0;i<24;i++){a=hs[i]||{};if(a.n&&!isCur(i)){s+=a.n;c++}}return c?Math.round(s/c):120}
+function izm(n){var m=n%100,d=n%10;return (m>10&&m<15)||d>4||d===0?"измерений":d===1?"измерение":"измерения"}
+function measN(x,i){if(!x.n)return "нет измерений";return isCur(i)?"час идёт: "+x.n+" из ~"+S.fn+" "+izm(S.fn):x.n+" "+izm(x.n)}
+function niceMax(v){if(!(v>0))return 1;var e=Math.pow(10,Math.floor(Math.log10(v))),f=v/e;var n=f<=1?1:f<=2?2:f<=2.5?2.5:f<=5?5:10;return n*e}
+function axisNum(v,mx){if(mx<0.1)return v.toFixed(3);if(mx<1)return v.toFixed(2);if(mx<10)return v.toFixed(1);return String(Math.round(v))}
+
+function two(n){return (n<10?"0":"")+n}
+function stampTxt(at){
+ if(!at)return "нет данных";
+ var d=new Date(at*1000),now=new Date();
+ var hm=two(d.getHours())+":"+two(d.getMinutes());
+ if(d.toDateString()===now.toDateString())return "получено "+hm;
+ var y=new Date(now.getFullYear(),now.getMonth(),now.getDate()-1);
+ if(d.toDateString()===y.toDateString())return "получено вчера "+hm;
+ return "получено "+two(d.getDate())+"."+two(d.getMonth()+1)+" "+hm;
+}
+function ageCls(at){
+ if(!at)return "";
+ var s=Math.max(0,Date.now()/1000-at);
+ return s>3600?" bad":(s>300?" old":"");
+}
+function paintAge(id,at,base){
+ var e=$(id);if(!e)return;
+ e.className=(base||"age")+ageCls(at);
+ e.textContent=stampTxt(at);
+}
+function paintAges(){
+ paintAge("mvAge",AT.v);paintAge("mpAge",AT.p);paintAge("mtAge",AT.t);
+ paintAge("tkwhAge",AT.e);paintAge("peAge",AT.e,"pa");
+}
+function apply(d){
+if(!d)return;
+S.last=Date.now();
+S.net=d.net!==false;
+txt("tkwh",eNum(d.tkwh));txt("tcost",num(d.tcost,2));
+txt("mv",num(d.v,0));txt("mp",num(d.p,0));txt("ma",num(d.amp,2));txt("mt",num(d.temp,1));
+AT={v:+d.vAt||0,t:+d.tAt||0,p:+d.pAt||0,e:+d.eAt||0};paintAges();
+txt("ptar",num(d.tariff,2));txt("pe",num(d.e,2));
+txt("ykwh",eNum(d.ykwh));txt("ykost",num(d.ykost,2));
+txt("mkwh",eNum(d.mkwh));txt("mcost",num(d.mcost,2));
+txt("cRssi",num(d.rssi,0)+" дБм");
+var cf=(d.v>50&&d.amp>0.001)?Math.min(1,Math.max(0,d.p/(d.v*d.amp))):null;
+txt("pcos",cf===null?"—":cf.toFixed(2));
+forecast(d);
+var r=$("pRelay");
+r.innerHTML='<i class="dot '+(d.r?"ok":"bad")+'"></i>реле '+(d.r?"ВКЛ":"ВЫКЛ");
+if(d.now){
+  var nd=d.now.slice(0,10),nh=parseInt(d.now.slice(11,13),10);
+  if(nd!==S.today){S.today=nd;if(S.days.length)loadDays();}
+  if(nh!==S.hour){S.hour=nh;if(S.cur&&S.date===S.today)draw();}
+}
+chipNet();
+}
+function chipNet(){
+var e=$("cNet");
+e.innerHTML='<i class="dot '+(S.net?"ok":"bad")+'"></i><span>'+(S.net?"сеть ok":"нет сети")+'</span>';
+}
+function forecast(d){
+if(!d||!d.now||!(d.mkwh>0)){txt("fkwh","—");txt("fcost","—");txt("fnote","пока мало данных за месяц");return}
+var dp=d.now.slice(0,10).split("-"),tp=d.now.slice(11).split(":");
+var y=+dp[0],mo=+dp[1],day=+dp[2],elapsed=(day-1)+(+tp[0]+ +tp[1]/60)/24;
+if(!(elapsed>0.15)){txt("fkwh","—");txt("fcost","—");txt("fnote","пока мало данных за месяц");return}
+var dim=new Date(y,mo,0).getDate();
+var avg=d.mkwh/elapsed,kwh=avg*dim;
+var price=(d.mkwh>0.01)?d.mcost/d.mkwh:(d.tariff||0);
+txt("fkwh",kwh.toFixed(1));txt("fcost",(kwh*price).toFixed(2));
+txt("fnote","средний расход "+avg.toFixed(2)+" кВт·ч в сутки · "+price.toFixed(2)+" ₽/кВт·ч");
+}
+function loadEvents(){
+retry("/events",1).then(function(d){
+  var ev=(d&&d.events)||[],ul=$("events");
+  if(!ev.length){ul.innerHTML='<li class="muted">за последние 3 дня переключений не было</li>';return}
+  ul.innerHTML=ev.map(function(e){
+    var when=String(e.t||"").slice(5,16).replace("-",".");
+    return '<li><span class="'+(e.r?"on":"off")+'">'+(e.r?"включено":"выключено")+'</span><span class="when">'+when+(e.v>0?" · "+Math.round(e.v)+" В":"")+'</span></li>';
+  }).join("");
+}).catch(function(){$("events").innerHTML='<li class="muted">не удалось загрузить события</li>'});
+}
+function loadData(){
+clearTimeout(S.poll);
+if(S.busy){S.poll=setTimeout(loadData,900);return}
+jq("/data").then(apply).catch(function(){S.net=false;chipNet()}).then(function(){S.poll=setTimeout(loadData,5000)});
+}
+function loadDays(){
+return retry("/days",1).then(function(d){
+  S.days=(d&&d.days)||[];
+  S.gaps=(d&&d.gaps)||[];
+  if(!S.days.length){emptyAll("на карте пока нет истории");$("dateLabel").textContent="—";return}
+  var start=S.days.indexOf(S.today)>=0?S.today:S.days[0];
+  return showDay(start);
+}).catch(function(){emptyAll("не удалось прочитать список дней")});
+}
+function emptyAll(msg){
+S.cur=null;
+["chE","chVT"].forEach(function(id){$(id).innerHTML='<div class="ph">'+msg+'</div>'});
+}
+function showDay(d,force){
+if(S.busy&&!force)return;
+S.date=d;updateNav();
+if(S.hist[d]&&!force){S.cur=S.hist[d];draw();return}
+S.busy=true;
+["chE","chVT"].forEach(function(id){$(id).innerHTML='<div class="ph">загрузка…</div>'});
+retry("/history?date="+encodeURIComponent(d),1).then(function(h){
+  S.hist[d]=h;
+  if(S.date===d){S.cur=h;draw()}
+}).catch(function(){
+  if(S.date===d)emptyAll("не удалось загрузить историю")
+}).then(function(){S.busy=false});
+}
+function updateNav(){
+var i=S.days.indexOf(S.date);
+$("prev").disabled=!(i>=0&&i<S.days.length-1);
+$("next").disabled=!(i>0);
+var g=(i>=0&&S.gaps[i])||null;
+var mark=(g&&g[0]>0)?'<i class="gapmark">есть пропуски, '+g[1]+' мин</i>':"";
+$("dateLabel").innerHTML=fmtDate(S.date)+(S.date===S.today?"<em>сегодня</em>":"")+mark;
+}
+function isCur(i){return S.date===S.today&&i===S.hour}
+function draw(){
+if(!S.cur)return;
+var h=S.cur.hours||[];
+S.fn=fullN(h);
+var anyE=false,anyP=false,anyV=false,anyT=false;
+for(var i=0;i<24;i++){var a=h[i]||{n:0};if(a.n&&a.kwh>0)anyE=true;if(a.n&&a.p>0)anyP=true;if(a.v>50)anyV=true;if(a.t!==null&&a.t!==undefined)anyT=true}
+if(anyE||anyP)drawEnergy($("chE"),h);
+else $("chE").innerHTML='<div class="ph">за этот день нет записей</div>';
+if(anyV||anyT)drawVT($("chVT"),h);
+else $("chVT").innerHTML='<div class="ph">напряжение и температура за этот день не записаны</div>';
+}
+function niceMaxP(v){
+if(!(v>0))return 1;
+var e=Math.pow(10,Math.floor(Math.log10(v))),f=v/e,c=[1,1.2,1.5,2,2.5,3,4,5,6,7,8,9,10];
+for(var i=0;i<c.length;i++)if(f<=c[i]+1e-9)return c[i]*e;
+return 10*e;
+}
+function axN(v){return Math.abs(v-Math.round(v))<0.05?String(Math.round(v)):v.toFixed(1)}
+function drawEnergy(el,hours){
+var W=Math.max(280,el.clientWidth||280),H=W<520?216:248;
+var pl=36,pr=10,pt=14,pb=22,gap=20,h2=W<520?46:58;
+var slot=(W-pl-pr)/24;
+var base2=H-pb,top2=base2-h2,base1=top2-gap,top1=pt,h1=base1-top1;
+var am=0,pm=0,i,x,y1,y2,a,b,v;
+for(i=0;i<24;i++){a=hours[i]||{};if(a.n){v=S.watt?+a.p||0:+a.kwh||0;if(v>am)am=v;if(+a.pmax>pm)pm=+a.pmax}}
+var amx=S.watt?niceMaxP(am||1):niceMax(am||0.01),pmx=niceMaxP(pm||am||1);
+var s='<svg viewBox="0 0 '+W+' '+H+'" width="100%" height="'+H+'" aria-hidden="true">';
+s+='<text x="'+pl+'" y="'+(top1-5)+'" class="cap a">'+(S.watt?"средняя, Вт":"энергия, кВт·ч")+'</text>';
+for(i=0;i<=2;i++){
+  y1=(top1+h1*i/2).toFixed(1);
+  s+='<line x1="'+pl+'" y1="'+y1+'" x2="'+(W-pr)+'" y2="'+y1+'" class="grid"/>';
+  s+='<text x="'+(pl-5)+'" y="'+(+y1+3.5).toFixed(1)+'" class="yl a" text-anchor="end">'+(S.watt?axN(amx*(1-i/2)):axisNum(amx*(1-i/2),amx))+'</text>';
+}
+s+='<text x="'+pl+'" y="'+(top2-5)+'" class="cap p">пик, Вт</text>';
+for(i=0;i<=2;i++){
+  y2=(top2+h2*i/2).toFixed(1);
+  s+='<line x1="'+pl+'" y1="'+y2+'" x2="'+(W-pr)+'" y2="'+y2+'" class="grid"/>';
+  s+='<text x="'+(pl-5)+'" y="'+(+y2+3.5).toFixed(1)+'" class="yl p" text-anchor="end">'+axN(pmx*(1-i/2))+'</text>';
+}
+for(i=0;i<24;i++){
+  b=hours[i]||{};v=b.n?(S.watt?+b.p||0:+b.kwh||0):0;x=pl+i*slot;
+  var bw=(slot*0.68).toFixed(1),bx=(x+slot*0.16).toFixed(1);
+  if(v>0){
+    var bh=Math.min(h1,Math.max(1.5,v/amx*h1));
+    s+='<rect x="'+bx+'" y="'+(base1-bh).toFixed(1)+'" width="'+bw+'" height="'+bh.toFixed(1)+'" rx="'+Math.min(2.5,slot*0.2).toFixed(1)+'" class="bar'+(isCur(i)?" cur":"")+'"/>';
+  }else{
+    s+='<rect x="'+bx+'" y="'+(base1-2)+'" width="'+bw+'" height="2" class="bar0"/>';
+  }
+  if(b.n&&b.pmax>0){
+    var ph=Math.min(h2,Math.max(1.5,(+b.pmax)/pmx*h2));
+    s+='<rect x="'+bx+'" y="'+(base2-ph).toFixed(1)+'" width="'+bw+'" height="'+ph.toFixed(1)+'" rx="'+Math.min(2.5,slot*0.2).toFixed(1)+'" class="pbar'+(isCur(i)?" cur":"")+'"/>';
+  }
+}
+if(S.nums){
+  var mi=0,mv=0,q,nh;
+  for(i=0;i<24;i++){q=hours[i]&&hours[i].n?(S.watt?+hours[i].p||0:+hours[i].kwh||0):0;if(q>mv){mv=q;mi=i}}
+  // на узком экране — через один (та же чётность, что у максимума), иначе числа наезжают
+  var par=W<520?mi%2:0;
+  for(i=0;i<24;i++){
+    q=hours[i]&&hours[i].n?(S.watt?+hours[i].p||0:+hours[i].kwh||0):0;
+    if(q>0&&(W>=520||i%2===par)){
+      nh=Math.min(h1,Math.max(1.5,q/amx*h1));
+      s+='<text x="'+(pl+slot*(i+.5)).toFixed(1)+'" y="'+(base1-nh-2.5).toFixed(1)+'" class="nl" text-anchor="middle">'+(S.watt?Math.round(q):num(q,2))+'</text>';
+    }
+  }
+}
+for(i=0;i<24;i++)s+='<rect x="'+(pl+i*slot).toFixed(1)+'" y="'+top1+'" width="'+slot.toFixed(1)+'" height="'+(base2-top1)+'" fill="transparent" class="hit" data-i="'+i+'"/>';
+[0,6,12,18,24].forEach(function(k){
+  var x3=pl+k*slot,anc=k===0?"start":k===24?"end":"middle";
+  if(k===24)x3-=1;
+  s+='<text x="'+x3.toFixed(1)+'" y="'+(H-6)+'" class="xl" text-anchor="'+anc+'">'+(k<24?pad2(k):"24")+'</text>';
+});
+s+='</svg>';
+el.innerHTML=s;
+var opt={tip:function(x,i){
+  var out="<b>"+hourRange(i)+"</b> · "+measN(x,i);
+  if(!x.n)return out;
+  out+="<br><b>"+num(x.kwh,2)+" кВт·ч</b> = средняя <b>"+num(x.p,0)+" Вт</b>";
+  if(x.pmax>0){
+    out+="<br>пик <b>"+num(x.pmax,0)+" Вт</b>";
+    if(x.pmaxT)out+=" в "+x.pmaxT;
+    if(x.pmaxDur>0)out+=" ("+x.pmaxDur+" мин)";
+  }
+  return out;
+}};
+el.querySelectorAll(".hit").forEach(function(r){
+  r.addEventListener("pointerdown",function(ev){ev.preventDefault();showTip(r,hours[+r.getAttribute("data-i")]||{n:0},opt,ev)});
+});
+}
+function linePath(vals,pl,slot,y){
+var d="",pen=false;
+for(var i=0;i<24;i++){
+  var v=vals[i];
+  if(v===null||v===undefined||!isFinite(v)){pen=false;continue}
+  var x=pl+slot*(i+0.5);
+  d+=(pen?"L":"M")+x.toFixed(1)+" "+y(v).toFixed(1);
+  pen=true;
+}
+return d;
+}
+function drawVT(el,hours){
+var W=Math.max(280,el.clientWidth||280),H=W<520?170:200;
+var pl=34,pr=34,pt=12,pb=22,pw=W-pl-pr,ph=H-pt-pb,base=pt+ph,slot=pw/24;
+var vmin=1e9,vmax=-1e9,tmin=1e9,tmax=-1e9,anyV=false,anyT=false,i;
+for(i=0;i<24;i++){
+  var a=hours[i]||{};
+  if(a.v>50){anyV=true;if(a.v<vmin)vmin=a.v;if(a.v>vmax)vmax=a.v}
+  if(a.t!==null&&a.t!==undefined){anyT=true;if(a.t<tmin)tmin=a.t;if(a.t>tmax)tmax=a.t}
+}
+var s='<svg viewBox="0 0 '+W+' '+H+'" width="100%" height="'+H+'" aria-hidden="true">';
+if(anyV){
+  var vr=vmax-vmin;
+  if(vr<8){var c=(vmax+vmin)/2;vmin=c-4;vmax=c+4}else{vmin-=vr*0.12;vmax+=vr*0.12}
+}
+if(anyT){
+  var tr=tmax-tmin;
+  if(tr<2){var c2=(tmax+tmin)/2;tmin=c2-1;tmax=c2+1}else{tmin-=tr*0.15;tmax+=tr*0.15}
+}
+function yV(v){return base-(v-vmin)/(vmax-vmin)*ph}
+function yT(v){return base-(v-tmin)/(tmax-tmin)*ph}
+if(isCur(S.hour)){
+  var bx=pl+slot*S.hour;
+  s+='<rect x="'+bx.toFixed(1)+'" y="'+pt+'" width="'+slot.toFixed(1)+'" height="'+ph+'" class="nowband"/>';
+}
+for(i=0;i<=2;i++){
+  var y=pt+ph*i/2,yy=y.toFixed(1);
+  s+='<line x1="'+pl+'" y1="'+yy+'" x2="'+(W-pr)+'" y2="'+yy+'" class="grid"/>';
+  if(anyV)s+='<text x="'+(pl-5)+'" y="'+(y+3.5).toFixed(1)+'" class="yl" text-anchor="end">'+Math.round(vmax-(vmax-vmin)*i/2)+'</text>';
+  if(anyT)s+='<text x="'+(W-pr+5)+'" y="'+(y+3.5).toFixed(1)+'" class="yl" text-anchor="start">'+(tmax-(tmax-tmin)*i/2).toFixed(1)+'</text>';
+}
+var vv=[],tt=[];
+for(i=0;i<24;i++){var b=hours[i]||{};vv.push(b.v>50?b.v:null);tt.push(b.t===null||b.t===undefined?null:b.t)}
+if(anyV){
+  s+='<path d="'+linePath(vv,pl,slot,yV)+'" class="vline"/>';
+  for(i=0;i<24;i++)if(vv[i]!==null)s+='<circle cx="'+(pl+slot*(i+0.5)).toFixed(1)+'" cy="'+yV(vv[i]).toFixed(1)+'" r="1.7" class="vdot"/>';
+}
+if(anyT){
+  s+='<path d="'+linePath(tt,pl,slot,yT)+'" class="tline"/>';
+  for(i=0;i<24;i++)if(tt[i]!==null)s+='<circle cx="'+(pl+slot*(i+0.5)).toFixed(1)+'" cy="'+yT(tt[i]).toFixed(1)+'" r="1.7" class="tdot"/>';
+}
+for(i=0;i<24;i++)s+='<rect x="'+(pl+i*slot).toFixed(1)+'" y="'+pt+'" width="'+slot.toFixed(1)+'" height="'+ph+'" fill="transparent" class="hit" data-i="'+i+'"/>';
+[0,6,12,18,24].forEach(function(k){
+  var x4=pl+k*slot,anc=k===0?"start":k===24?"end":"middle";
+  if(k===24)x4-=1;
+  s+='<text x="'+x4.toFixed(1)+'" y="'+(H-6)+'" class="xl" text-anchor="'+anc+'">'+(k<24?pad2(k):"24")+'</text>';
+});
+s+='</svg>';
+el.innerHTML=s;
+el.querySelectorAll(".hit").forEach(function(r){
+  r.addEventListener("pointerdown",function(ev){
+    ev.preventDefault();
+    var h=hours[+r.getAttribute("data-i")]||{n:0};
+    showTip(r,h,{tip:function(x,i){
+      var out="<b>"+hourRange(i)+"</b>";
+      out+="<br>"+(x.v>50?num(x.v,0)+" В":"напряжение нет");
+      if(x.t!==null&&x.t!==undefined)out+=" · "+num(x.t,1)+" °C";
+      return out;
+    }});
+  });
+});
+}
+function showTip(r,h,opt,ev){
+var t=$("tip");
+t.innerHTML=opt.tip(h,+r.getAttribute("data-i"));
+t.hidden=false;
+var b=r.getBoundingClientRect(),tw=t.offsetWidth,th=t.offsetHeight;
+var x=b.left+b.width/2-tw/2;
+x=Math.max(8,Math.min(window.innerWidth-tw-8,x));
+var y;
+if(ev&&ev.clientY){
+  y=ev.clientY-th-10;
+  if(y<8)y=ev.clientY+16;
+}else{
+  y=b.top-th-8;
+  if(y<8)y=b.bottom+8;
+}
+if(y+th>window.innerHeight-8)y=window.innerHeight-th-8;
+t.style.left=x+"px";t.style.top=y+"px";
+clearTimeout(S.tipT);S.tipT=setTimeout(function(){t.hidden=true},4000);
+}
+$("prev").addEventListener("click",function(){
+var i=S.days.indexOf(S.date);
+if(i>=0&&i<S.days.length-1)showDay(S.days[i+1]);
+});
+$("next").addEventListener("click",function(){
+var i=S.days.indexOf(S.date);
+if(i>0)showDay(S.days[i-1]);
+});
+try{S.nums=localStorage.getItem("cydv.nums")==="1"?1:0;S.watt=localStorage.getItem("cydv.unit")==="1"}catch(e){}
+function uiBtns(){
+var b=$("numBtn");if(b)b.setAttribute("aria-pressed",S.nums?"true":"false");
+var u=$("unitBtn");if(u){u.textContent=S.watt?"Вт":"кВт·ч";u.setAttribute("aria-pressed",S.watt?"true":"false")}
+txt("eCap",S.watt?"высота — средняя мощность за час, Вт; это те же кВт·ч × 1000":"высота — энергия за час, кВт·ч; средняя мощность за тот же час = кВт·ч × 1000, Вт");
+}
+uiBtns();
+$("numBtn").addEventListener("click",function(){S.nums=S.nums?0:1;try{localStorage.setItem("cydv.nums",S.nums?"1":"0")}catch(e){}uiBtns();if(S.cur)draw()});
+$("unitBtn").addEventListener("click",function(){S.watt=!S.watt;try{localStorage.setItem("cydv.unit",S.watt?"1":"0")}catch(e){}uiBtns();if(S.cur)draw()});
+document.addEventListener("pointerdown",function(e){
+if(!e.target.classList||!e.target.classList.contains("hit"))$("tip").hidden=true;
+},true);
+addEventListener("scroll",function(){$("tip").hidden=true},{passive:true});
+var rt=0;
+addEventListener("resize",function(){clearTimeout(rt);rt=setTimeout(draw,150)});
+setInterval(function(){
+var s=Math.max(0,Math.round((Date.now()-S.last)/1000));
+txt("cUpd",(s>20?"нет связи ":"обновлено ")+s+" с");
+},1000);
+setInterval(paintAges,1000);
+setInterval(function(){
+if(document.hidden||S.busy||S.date!==S.today||!S.hist[S.today])return;
+delete S.hist[S.today];
+showDay(S.today,true);
+},120000);
+setInterval(function(){
+if(!document.hidden&&!S.busy)loadEvents();
+},120000);
+document.addEventListener("visibilitychange",function(){if(!document.hidden)loadData()});
+chipNet();
+jq("/data").then(apply).catch(function(){S.net=false;chipNet()}).then(function(){
+S.poll=setTimeout(loadData,5000);
+loadDays();
+loadEvents();
+});
+})();
+</script>
+</body>
+</html>
+)HTML";
+// <<< PAGE_TMPL
 
 #include <mbedtls/gcm.h>
 #include <mbedtls/md.h>
 
 // ---------------------------------------------------------------- настройки
-const char* FW_VER = "4.3";
+const char* FW_VER = "4.4";
 
 const char* DEF_SSID = "YOUR_WIFI_SSID";
 const char* DEF_PASS = "YOUR_WIFI_PASSWORD";
@@ -75,14 +732,58 @@ TFT_eSPI tft = TFT_eSPI();
 // ---------------------------------------------------------------- экран
 enum { SCR_MAIN = 0, SCR_VOLT, SCR_TEMP, SCR_POWER, SCR_TODAY, SCR_WEATHER, SCR_WATCH };
 int gScreen = SCR_MAIN;
+int gChartHour = -1;
+int gCalStep = 0;
+bool gTapTest = false;   // экран тач-теста: видно, куда попадает палец         // 0 — нет калибровки, 1 — ждём левый верх, 2 — правый низ
+uint16_t gCalR[4][2];   // сырые координаты четырёх угловых касаний
+int gCalGood[4];      // 1 — угол принят      // выбранный нажатием час графика, -1 = текущий
+int gPwrFillHour = -1;    // <0 простой, иначе какой час заполняем
+// Какой час уже заполнен «до упора»: без этого после догона текущего часа
+// gPwrFillHour прижимался к nowH, и каждый проход loop() снова и снова
+// ходил в облако за тем же часом — 3 TLS-запроса за 3 прохода, бесконечно.
+// Облако отвечало «log query is too frequent», и заодно отваливались
+// cloudStatus/погода: напряжение не обновлялось (vAge = аптайм).
+int gPwrFillStopH = -1;
+int gPwrPart = 0;         // какое 20-минутное окно часа берём (0,1,2)
+float gPwrSum = 0;        // сумма мощностей за час
+int gPwrN = 0;            // сколько записей
+int gPwrPeak = 0;         // пик за час
+int gPwrPeakSec = 0;      // секунда внутри часа, когда был пик    // <0 — простой, иначе какой час заполняем из облака
+int gTapRawX = 0, gTapRawY = 0, gTapMapX = 0, gTapMapY = 0;  // диагностика тача
+// Журнал последних 8 касаний: нажал когда угодно, прочитать можно потом
+uint16_t gTLraw[8][2];
+int16_t  gTLmap[8][2];
+uint32_t gTLsec[8];
+int      gTLn = 0;
 unsigned long gLastDraw = 0;
+unsigned long gDrawN = 0;          // счётчик вызовов drawScreen() — для замера моргания
+unsigned long gWinRefreshN = 0;    // счётчик точечных обновлений окна
 uint32_t gLastSig = 0;          // отпечаток данных, по нему решаем, нужна ли перерисовка
 unsigned long gLastWinFull = 0; // когда окно перерисовывали целиком (для графика)
+unsigned long gLastWinRefresh = 0; // когда окно обновляли точечно (антиморгание)
 unsigned long gTouchMs = 0;     // когда был последний тап (облако не лезет в этот момент)
 bool gNoClear = false;          // не заливать весь экран — частичное обновление
 bool gSkipChart = false;        // не перерисовывать график 24 ч (точечное обновление)
+bool gDayLoading = false;       // идёт чтение прошлого дня с карты: экран не трогаем
 bool gDemoToday = false;        // DEMO: ИТОГИ с широкими числами (проверка вёрстки)
 unsigned long gTouchSkip = 0;   // до этого времени не начинать сетевые операции
+
+// ---- замер затупаний: сколько длится один проход loop() ----------------------
+// loopMaxMs — максимум за последнее окно 60 с (по нему и проверяем «не тупит ли»);
+// loopMaxAll — максимум с момента загрузки/сброса (LOOPRESET). Цель — ≤ 350 мс.
+unsigned long gLoopLast   = 0;   // длительность последнего прохода
+unsigned long gLoopMaxWin = 0;   // максимум в текущем окне 60 с
+unsigned long gLoopMaxAll = 0;   // максимум с загрузки
+unsigned long gLoopWinAt  = 0;   // начало текущего окна
+// длительности отдельных тяжёлых мест — чтобы видеть, кто именно виноват
+unsigned long gMsSd   = 0;       // последний scanSdRange() из updateToday()
+unsigned long gMsGap  = 0;       // последний gapScan()
+unsigned long gMsHist = 0;       // последний histScan()
+unsigned long gMsCloud = 0;      // последний cloudStatus() из loop()
+unsigned long gMsTuya  = 0;      // последний tuyaQuery() из loop()
+unsigned long gMsWrite = 0;      // последняя запись строки на карту
+unsigned long gApiN    = 0;      // сколько раз пробовали fetchFromApi()
+unsigned long gApiLast = 0;      // когда пробовали в последний раз
 
 // ---------------------------------------------------------------- захват экрана
 // Все примитивы рисования идут через ui*(). При gCap=true каждый вызов
@@ -180,7 +881,7 @@ void pickTheme() {
   C_KWH    = tft.color565(22, 163, 74);     // расход — зелёный
   C_OK     = C_KWH;
   C_BAD    = tft.color565(220, 38, 38);
-  analogWrite(21, 255);                     // подсветка всегда на полную
+  dispApply();                              // подсветка: ШИМ по сохранённой яркости
 
   C_VOLT  = cAccent;
   C_TEMP  = tft.color565(124, 58, 237);     // фиолетовый
@@ -285,7 +986,44 @@ bool  statsSeeded = false;
 // 24-часовой график с шагом 5 минут (288 точек)
 #define H24_N 288
 float   h24V[H24_N], h24T[H24_N], h24P[H24_N];
+float   h24Pm[24];        // максимальная мощность за каждый час (из облака)
+bool    h24PmOk[24];      // час с известным пиком
+uint8_t h24PmMin[24];     // минута пика внутри часа
 uint8_t h24Mask[H24_N];
+
+// ---- выбранный день для графиков «по часам» (стрелки ‹ ›) ----
+// 0 = сегодня: график рисуем из живых h24V/h24T/h24P (их ведёт statsTick).
+// 1 = вчера, 2 = позавчера... Для прошлых дней сутки читаются с карты в
+// отдельный буфер day* (≈3.7 КБ RAM). resetStats() при листании НЕ зовём:
+// иначе стирается статистика сегодняшнего дня.
+int      gDayOffset   = 0;      // сдвиг назад от сегодня
+int      gDayMaxOffset = 30;    // сколько дней назад вообще есть строки
+char     gDayLabel[8] = "";     // «29.10» — подпись выбранного дня
+int      gDayLoaded   = -1;     // какой сдвиг сейчас в буфере, -1 = пусто
+int      gDayRows     = 0;      // сколько строк дня прочитали
+unsigned long gDayMs  = 0;      // сколько заняло чтение дня, мс
+float    dayV[H24_N], dayT[H24_N], dayP[H24_N];
+uint8_t  dayMask[H24_N];
+// Сводка за выбранный прошлый день (для окон МИН/СРЕД/МАКС/ПИК). Взвешиваем
+// каждую строку одинаково (~30 с между строками), для показа этого достаточно.
+float  ddMinV = 999, ddMaxV = 0, ddOutV = 0;
+double ddSumV = 0; long ddSecV = 0;
+float  ddMinT = 999, ddMaxT = -999;
+double ddSumT = 0; long ddSecT = 0;
+float  ddMaxP = 0;
+double ddSumP = 0; long ddSecP = 0;
+int    ddMinVMin = -1, ddMaxVMin = -1, ddMinTMin = -1, ddMaxTMin = -1, ddPMin = -1;
+
+// GAPFILL: пока идёт подмена /energy.csv, writeSd() новые строки не пишет —
+// иначе файл вырастет прямо под нами и перезапись отменится.
+bool gGapBusy = false;
+
+// ---- GAPFILL: состояние (типы и пределы — в начале файла) ----
+static GapRun  sGF;
+static GapItem sGf[GF_MAX_GAPS];
+static GapRow  sGfRow[GF_POOL];
+static struct { uint32_t t; int32_t e; } sGfEn[GF_MAX_EN];
+static struct { uint32_t t; int16_t v; } sGfTmp[GF_MAX_TMP];
 
 // ---- сканер карты ----
 long daysFromCivil(int y, unsigned m, unsigned d);
@@ -330,6 +1068,7 @@ void resetStats() {
   dayMaxP = 0; dayMaxPMin = -1; daySumP = 0; dayPSec = 0;
   statDayKwh = 0; statNightKwh = 0;
   for (int i = 0; i < H24_N; i++) { h24V[i] = 0; h24T[i] = 0; h24P[i] = 0; h24Mask[i] = 0; }
+  for (int i = 0; i < 24; i++) { h24Pm[i] = 0; h24PmOk[i] = false; h24PmMin[i] = 0; }
 }
 
 void statsTick() {
@@ -387,6 +1126,9 @@ void updateToday() {
     myTodayCost = 0;
     myTodayReady = false;
     resetStats();
+    gPwrFillHour = 0;   // график мощности нового дня заполняем заново
+    gPwrFillStopH = -1;
+    gPwrPart = 0;
     statsSeeded = false;                       // засеем статистику нового дня из CSV
     saveToday();
   }
@@ -400,7 +1142,10 @@ void updateToday() {
     lastSd = millis();
     float k1, k2, dK, nK;
     long start = key * 86400L;
-    if (scanSdRange(start, 0, gEnergy, &k1, &k2, &dK, &nK)) {
+    unsigned long sdT0 = millis();
+    bool sdOk1 = scanSdRange(start, 0, gEnergy, &k1, &k2, &dK, &nK);
+    gMsSd = millis() - sdT0;
+    if (sdOk1) {
       myTodayKwh = k1;
       myTodayCost = k2;
       statDayKwh = dK;
@@ -462,7 +1207,21 @@ void updateToday() {
   if (millis() - lastSave > 600000UL) { lastSave = millis(); saveToday(); }
 }
 bool  gRelay = false, gTuyaOk = false, gFromApi = false;
+uint8_t gRelayFailRun = 0;    // неудач опроса реле ПОДРЯД (для светодиода)
 unsigned long gPhaseMs = 0;   // когда последний раз пришло напряжение от реле
+unsigned long gTempMs = 0;    // когда последний раз пришла температура
+unsigned long gPowerMs = 0;   // когда последний раз пришла мощность
+unsigned long gEnergyMs = 0;  // когда последний раз пришёл счётчик
+unsigned long gPhaseN = 0;     // всего обновлений напряжения
+unsigned long gPhaseRelayN = 0;// из них от локального реле (остальное — облако)
+
+// Возраст напряжения ОДНИМ правилом на всю программу. gPhaseMs == 0 значит
+// «ещё ни разу не приходило», и тогда возраст = аптайм (иначе (millis()-0)
+// даёт именно аптайм, и «vAge = 2 ч» выглядит как застывшее напряжение,
+// хотя это просто «данных не было ни разу с загрузки»).
+unsigned long voltAgeMs() { return gPhaseMs ? (millis() - gPhaseMs) : millis(); }
+// Устарело ли напряжение сильнее lim мс — приоритет сети/облака.
+bool voltStale(unsigned long lim) { return voltAgeMs() > lim; }
 float gCurrent = 0;           // реальный ток из phase_a (байты 2..4, мА), НЕ P/V
 // Возраст данных нужен, чтобы потребитель отличил свежие 239 В от 239 В часовой давности
 int   gRssi = 0;
@@ -481,7 +1240,9 @@ time_t wTime = 0;
 bool  wOk = false;
 
 bool gSdOk = false;
+uint16_t gSdWriteFail = 0;   // неудач записи на карту ПОДРЯД (для светодиода)
 int  gSdRows = 0;
+int  gSdMonth = -1;      // месяц рабочего файла: year*12 + (month-1)
 unsigned long gSdLast = 0;
 SPIClass sdSPI(HSPI);
 
@@ -561,7 +1322,78 @@ float tariffAvg(long a, long b) {
   return (float)(nf * TARIFF_NIGHT + (1.0 - nf) * TARIFF_DAY);
 }
 
+// ---------------------------------------------------------------------------
+//  Быстрый разбор строки CSV «дата,В,Вт,кВт·ч,реле,руб,°C» по индексам.
+//  Раньше на каждой строке были readStringUntil + sscanf + четыре indexOf +
+//  substring().toFloat() — по 6-8 объектов String на строку, ~2400 мс на сутки.
+//  Теперь ни одного String и ни одного sscanf: только сравнение байтов.
+// ---------------------------------------------------------------------------
+
+// Эпоха из префикса "YYYY-MM-DD HH:MM:SS". 0 — не похоже на строку истории.
+static long lineEpochRaw(const char* s, int len) {
+  if (len < 19) return 0;
+  if (s[4] != '-' || s[7] != '-' || s[10] != ' ' || s[13] != ':' || s[16] != ':') return 0;
+  unsigned d0 = (unsigned)(s[0] - '0'), d1 = (unsigned)(s[1] - '0');
+  unsigned d2 = (unsigned)(s[2] - '0'), d3 = (unsigned)(s[3] - '0');
+  unsigned d4 = (unsigned)(s[5] - '0'), d5 = (unsigned)(s[6] - '0');
+  unsigned d6 = (unsigned)(s[8] - '0'), d7 = (unsigned)(s[9] - '0');
+  unsigned d8 = (unsigned)(s[11] - '0'), d9 = (unsigned)(s[12] - '0');
+  unsigned dA = (unsigned)(s[14] - '0'), dB = (unsigned)(s[15] - '0');
+  unsigned dC = (unsigned)(s[17] - '0'), dD = (unsigned)(s[18] - '0');
+  if ((d0 | d1 | d2 | d3 | d4 | d5 | d6 | d7 | d8 | d9 | dA | dB | dC | dD) > 9) return 0;
+  int y  = (int)(d0 * 1000 + d1 * 100 + d2 * 10 + d3);
+  int mo = (int)(d4 * 10 + d5);
+  int dd = (int)(d6 * 10 + d7);
+  int hh = (int)(d8 * 10 + d9);
+  int mi = (int)(dA * 10 + dB);
+  int se = (int)(dC * 10 + dD);
+  if (y < 2020 || y > 2100) return 0;
+  if (mo < 1 || mo > 12 || dd < 1 || dd > 31) return 0;
+  if (hh > 23 || mi > 59 || se > 59) return 0;
+  return daysFromCivil(y, (unsigned)mo, (unsigned)dd) * 86400L
+       + hh * 3600L + mi * 60L + se;
+}
+
+// Число из поля №want (0 = дата/время, 3 = энергия). false — поля нет/пустое.
+static bool csvFieldFloat(const char* s, int len, int want, float* out) {
+  const char* p = s;
+  const char* end = s + len;
+  for (int c = 0; c < want; c++) {
+    while (p < end && *p != ',') p++;
+    if (p >= end) return false;
+    p++;
+  }
+  while (p < end && (*p == ' ' || *p == '\t')) p++;
+  bool neg = false;
+  if (p < end && *p == '-') { neg = true; p++; }
+  long ip = 0;
+  bool any = false;
+  while (p < end && *p >= '0' && *p <= '9') { ip = ip * 10 + (*p - '0'); p++; any = true; }
+  float f = (float)ip;
+  if (p < end && *p == '.') {
+    p++;
+    float d = 0.1f;
+    while (p < end && *p >= '0' && *p <= '9') { f += (float)(*p - '0') * d; d *= 0.1f; p++; any = true; }
+  }
+  if (!any) return false;
+  *out = neg ? -f : f;
+  return true;
+}
+
 // Расход и стоимость за [start, end). end=0 — до текущего показания.
+// Кэш разбора: строки в /energy.csv только ДОПИСЫВАЮТСЯ, поэтому при
+// повторном вызове с тем же диапазоном читаем лишь новые байты. Полный
+// перечит — при смене диапазона, после перезаписи файла (gSdGen) и раз в
+// 10 минут. Так ежеминутная проверка «сегодня» не читает 90 КБ заново.
+static long   sScanStart = 0;
+static long   sScanEnd   = 0;
+static bool   sScanArch  = false;
+static size_t sScanSize  = 0;
+static int    sScanRecN  = 0;
+static unsigned long sScanFullAt = 0;
+static unsigned long sScanGen    = 0;
+unsigned long gSdGen = 0;          // меняется при перезаписи /energy.csv
+
 bool scanSdRange(long start, long end, float nowKwh,
                  float* outKwh, float* outCost, float* outDay, float* outNight) {
   if (!gSdOk || start <= 0) return false;
@@ -575,50 +1407,101 @@ bool scanSdRange(long start, long end, float nowKwh,
     if (!sRec) { Serial.println("карта: нет памяти под буфер истории"); return false; }
   }
 
-  File f = SD.open("/energy.csv", FILE_READ);
-  if (!f) return false;
+  // Если запрошенный диапазон целиком лежит ДО первой строки рабочего файла
+  // (например, «вчера» 1-го числа), читаем архив прошлого месяца.
+  char path[40];
+  strcpy(path, "/energy.csv");
+  {
+    File probe = SD.open(path, FILE_READ);
+    if (!probe) return false;
+    long firstT = fileFirstEpoch(probe, 4096);
+    probe.close();
+    if (firstT > 0 && rangeEnd <= firstT) {
+      char arch[40];
+      int stamp = 0;
+      monthStampOfEpoch(start, &stamp);
+      historyName(stamp, arch, sizeof(arch));
+      if (SD.exists(arch)) strcpy(path, arch);
+    }
+  }
 
-  // читаем только хвост файла — этого хватает на сутки с запасом
+  File f = SD.open(path, FILE_READ);
+  if (!f) return false;
+  bool arch = (strcmp(path, "/energy.csv") != 0);
   long span = rangeEnd - start + 6L * 3600L;
+
   unsigned long need = (unsigned long)(span / 30L) * 52UL;
   if (need < 60000UL) need = 60000UL;
   if (need > 230000UL) need = 230000UL;
   size_t sz = f.size();
   size_t off = (sz > need) ? (sz - need) : 0;
-  if (off > 0) {
-    f.seek(off);
-    f.readStringUntil('\n');          // первая строка может быть обрезана
+  size_t from;
+  bool full = !(sScanStart == start && sScanEnd == end && sScanArch == arch &&
+                sScanRecN >= 2 && sScanGen == gSdGen &&
+                millis() - sScanFullAt < 600000UL &&
+                sz >= sScanSize && (sz - sScanSize) < 32768UL);
+  if (full) {
+    sRecN = 0;
+    from = off;
+    if (from > 0) {
+      f.seek(from);
+      f.readStringUntil('\n');        // первая строка может быть обрезана
+      from = (size_t)f.position();
+    }
+  } else {
+    from = sScanSize;                 // читаем только то, что дописалось
+    f.seek(from);
   }
 
   long minT = start - 4L * 3600L;
   long maxT = rangeEnd + 4L * 3600L;
-  sRecN = 0;
   int rd = 0;
+  // Читаем БЛОКАМИ по 1024 байта и разбираем строку по индексам: без String,
+  // без sscanf, без substring().toFloat(). Было ~2400 мс, стало ~300 мс.
+  static uint8_t sbuf[1024 + 256];
+  int carry = 0;
   while (f.available()) {
-    String line = f.readStringUntil('\n');
-    if ((++rd & 255) == 0) esp_task_wdt_reset();      // WDT: файл длинный
-    long t = lineEpoch(line);
-    if (!t || t < minT || t > maxT) continue;
-    int p1 = line.indexOf(',');
-    if (p1 < 0) continue;
-    int p2 = line.indexOf(',', p1 + 1);
-    int p3 = line.indexOf(',', p2 + 1);
-    int p4 = line.indexOf(',', p3 + 1);
-    if (p4 < 0) continue;
-    float e = line.substring(p3 + 1, p4).toFloat();
-    if (e <= 0) continue;
-    if (sRecN >= SD_REC_MAX) {
-      // Переполнение: выбрасываем самую старую половину, новые строки важнее.
-      // Иначе терялся конец окна и «вчера/сегодня» считались по обрезанным данным.
-      int half = SD_REC_MAX / 2;
-      memmove(sRec, sRec + half, sizeof(SdRec) * half);
-      sRecN = half;
+    int n = (int)f.read(sbuf + carry, 1024);
+    if (n <= 0) break;
+    int total = carry + n;
+    int i = 0;
+    while (i < total) {
+      uint8_t* nl = (uint8_t*)memchr(sbuf + i, '\n', total - i);
+      if (!nl) break;
+      int len = (int)(nl - (sbuf + i));
+      long t = lineEpochRaw((const char*)(sbuf + i), len);
+      if (t != 0 && t >= minT && t <= maxT) {
+        float e = 0;
+        if (csvFieldFloat((const char*)(sbuf + i), len, 3, &e) && e > 0) {
+          if (sRecN >= SD_REC_MAX) {
+            // Переполнение: выбрасываем самую старую половину, новые строки важнее.
+            // Иначе терялся конец окна и «вчера/сегодня» считались по обрезанным данным.
+            int half = SD_REC_MAX / 2;
+            memmove(sRec, sRec + half, sizeof(SdRec) * half);
+            sRecN = half;
+          }
+          sRec[sRecN].t = (uint32_t)t;
+          sRec[sRecN].e = e;
+          sRecN++;
+        }
+      }
+      i = (int)(nl - sbuf) + 1;
+      if ((++rd & 1023) == 0) { esp_task_wdt_reset(); yield(); }
     }
-    sRec[sRecN].t = (uint32_t)t;
-    sRec[sRecN].e = e;
-    sRecN++;
+    carry = total - i;
+    if (carry > 0) memmove(sbuf, sbuf + i, carry);
+    if (carry > 240) carry = 0;        // защита от строки без перевода строки
+    esp_task_wdt_reset();
   }
   f.close();
+  // Запоминаем, что именно разобрали: в следующий раз дочитаем только хвост.
+  sScanStart = start;
+  sScanEnd   = end;
+  sScanArch  = arch;
+  sScanSize  = sz;
+  sScanRecN  = sRecN;
+  sScanGen   = gSdGen;
+  if (full) sScanFullAt = millis();
   if (sRecN < 2) return false;
 
   qsort(sRec, sRecN, sizeof(SdRec), cmpSdRec);
@@ -630,6 +1513,7 @@ bool scanSdRange(long start, long end, float nowKwh,
     }
     sRec[n++] = sRec[i];
   }
+  sRecN = n;              // важно: дальше дописываем ровно с этого места
   if (n < 2) return false;
 
   int i0 = 0;
@@ -769,6 +1653,150 @@ bool sdMonthBase(int year, int mon, float* outKwh) {
   return true;
 }
 
+// ============================================================ РОТАЦИЯ ИСТОРИИ
+// Рабочий файл /energy.csv — только текущий месяц. При смене месяца он
+// переименовывается в /energy-YYYY-MM.csv, а новый начинается с заголовка.
+// Старые месячные архивы (старше 3 месяцев) удаляются. Так файл не растёт
+// бесконечно, sdMonthBase и scanSdRange остаются быстрыми, а «вчера» на
+// 1-е число дочитывается из архива предыдущего месяца.
+
+static long fileFirstEpoch(File& f, size_t maxBytes) {
+  size_t sz = f.size();
+  if (!sz) return 0;
+  size_t lim = (sz < maxBytes) ? sz : maxBytes;
+  f.seek(0);
+  size_t used = 0;
+  while (f.available() && used < lim) {
+    String l = f.readStringUntil('\n');
+    used += l.length() + 1;
+    long t = lineEpoch(l);
+    if (t) return t;
+  }
+  return 0;
+}
+
+static long fileLastEpoch(File& f) {
+  size_t sz = f.size();
+  if (sz < 20) return 0;
+  size_t from = (sz > 400) ? sz - 400 : 0;
+  f.seek(from);
+  String last;
+  while (f.available()) {
+    String l = f.readStringUntil('\n');
+    l.trim();
+    if (l.length() > 10) last = l;
+  }
+  return lineEpoch(last);
+}
+
+static void monthStampOfEpoch(long t, int* stamp) {
+  time_t tt = (time_t)t;
+  struct tm st;
+  gmtime_r(&tt, &st);
+  *stamp = (st.tm_year + 1900) * 12 + st.tm_mon;
+}
+
+static void historyName(int stamp, char* out, size_t n) {
+  int y = stamp / 12;
+  int m = stamp % 12 + 1;
+  snprintf(out, n, "/energy-%04d-%02d.csv", y, m);
+}
+
+static void pruneArchives(int keepFrom) {
+  File dir = SD.open("/");
+  if (!dir) return;
+  File e = dir.openNextFile();
+  while (e) {
+    if (!e.isDirectory()) {
+      String n = e.name();
+      int slash = n.lastIndexOf('/');
+      if (slash >= 0) n = n.substring(slash + 1);
+      if (n.startsWith("energy-") && n.endsWith(".csv") && n.length() == 18) {
+        int y = n.substring(7, 11).toInt();
+        int m = n.substring(12, 14).toInt();
+        int stamp = y * 12 + (m - 1);
+        if (y >= 2020 && m >= 1 && m <= 12 && stamp < keepFrom) {
+          String path = "/" + n;
+          e.close();
+          if (SD.remove(path.c_str())) Serial.printf("архив удалён: %s\n", path.c_str());
+          e = dir.openNextFile();
+          continue;
+        }
+      }
+    }
+    e.close();
+    e = dir.openNextFile();
+  }
+  dir.close();
+}
+
+void initHistoryMonth() {
+  struct tm ti;
+  if (getLocalTime(&ti, 100)) gSdMonth = (ti.tm_year + 1900) * 12 + ti.tm_mon;
+  File f = SD.open("/energy.csv", FILE_READ);
+  if (f) {
+    long t = fileLastEpoch(f);
+    f.close();
+    if (t) {
+      int stamp = 0;
+      monthStampOfEpoch(t, &stamp);
+      gSdMonth = stamp;
+    }
+  }
+  if (gSdMonth < 0) return;
+  pruneArchives(gSdMonth - 3);
+  Serial.printf("история: рабочий месяц %04d-%02d, строк %d\n",
+                gSdMonth / 12, gSdMonth % 12 + 1, gSdRows);
+}
+
+// dry=true — только показать решение, ничего не переименовывать.
+bool rotateHistory(int newStamp, bool dry) {
+  File f = SD.open("/energy.csv", FILE_READ);
+  if (!f) return false;
+  size_t sz = f.size();
+  int archStamp = newStamp - 1;
+  long firstT = fileFirstEpoch(f, 4096);
+  f.close();
+  if (firstT > 0) {
+    int s = 0;
+    monthStampOfEpoch(firstT, &s);
+    archStamp = s;
+  }
+  char arch[40];
+  historyName(archStamp, arch, sizeof(arch));
+  Serial.printf("ротация: %u байт -> %s%s\n", (unsigned)sz, arch, dry ? " (dry)" : "");
+  if (dry) return true;
+  if (sz < 20) return false;
+
+  if (SD.exists(arch)) {
+    // Архив уже есть (сбой посреди ротации): дописываем рабочий файл в него.
+    File src = SD.open("/energy.csv", FILE_READ);
+    File dst = SD.open(arch, FILE_APPEND);
+    if (!src || !dst) { if (src) src.close(); if (dst) dst.close(); return false; }
+    while (src.available()) {
+      String l = src.readStringUntil('\n');
+      if (l.length() == 0 || l.startsWith("datetime,")) continue;
+      dst.println(l);
+    }
+    src.close(); dst.close();
+    SD.remove("/energy.csv");
+  } else {
+    if (!SD.rename("/energy.csv", arch)) {
+      Serial.println("ротация: rename не удался");
+      return false;
+    }
+  }
+
+  File n = SD.open("/energy.csv", FILE_WRITE);
+  if (n) {
+    n.println("datetime,voltage,power,energy_kwh,relay,cost,temp");
+    n.close();
+  }
+  gSdRows = 1;
+  pruneArchives(newStamp - 3);
+  return true;
+}
+
 // Смещение в файле, с которого начинаются строки за сегодня.
 // Идём с конца файла блоками по 2 КБ назад, пока блоки ещё содержат
 // сегодняшнюю дату. В каждом блоке берём САМОЕ РАННЕЕ вхождение, поэтому
@@ -817,6 +1845,24 @@ static bool fileTailIsToday(File& f, const char* dayPrefix) {
     if (l.length() > 10) last = l;
   }
   return last.startsWith(dayPrefix);
+}
+
+// Есть ли в конце файла хотя бы одна строка указанного дня? Нужно перед
+// дозаписью вчерашних строк: файл обязан оставаться хронологическим, поэтому
+// вчера можно дописывать только пока сегодняшних строк ещё нет.
+static bool fileTailHasDay(const char* dayPrefix) {
+  File f = SD.open("/energy.csv", FILE_READ);
+  if (!f) return false;
+  size_t sz = f.size();
+  size_t from = (sz > 4096) ? sz - 4096 : 0;
+  f.seek(from);
+  bool has = false;
+  while (f.available()) {
+    String l = f.readStringUntil('\n');
+    if (l.length() > 10 && l.startsWith(dayPrefix)) { has = true; break; }
+  }
+  f.close();
+  return has;
 }
 
 // Заполняем суточную статистику и график по уже записанным строкам.
@@ -939,6 +1985,207 @@ bool seedStatsFromSd() {
   return true;
 }
 
+// ---------------------------------------------------------------- выбранный день
+// Обратная к daysFromCivil: номер дня -> год/месяц/число (Х. Хиннант).
+static void civilFromDays(long z, int* yy, int* mm, int* dd) {
+  z += 719468;
+  long era = (z >= 0 ? z : z - 146096) / 146097;
+  unsigned doe = (unsigned)(z - era * 146097L);
+  unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  long y = (long)yoe + era * 400;
+  unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  unsigned mp = (5 * doy + 2) / 153;
+  unsigned d = doy - (153 * mp + 2) / 5 + 1;
+  unsigned m = mp + (mp < 10 ? 3 : -9);
+  *yy = (int)(y + (m <= 2 ? 1 : 0));
+  *mm = (int)m;
+  *dd = (int)d;
+}
+
+// Номер сегодняшнего дня по местному времени; 0 — часы ещё не синхронизированы.
+static long todayDayKey() {
+  struct tm ti;
+  if (!getLocalTime(&ti, 10)) return 0;
+  return daysFromCivil(ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+}
+
+// Дата выбранного дня: date = «2026-10-29» (фильтр строк CSV), label = «29.10».
+static bool dayDate(int offset, char* date, size_t dn, char* label, size_t ln) {
+  long key = todayDayKey() - offset;
+  if (key <= 0) return false;
+  int y = 0, m = 0, d = 0;
+  civilFromDays(key, &y, &m, &d);
+  snprintf(date, dn, "%04d-%02d-%02d", y, m, d);
+  snprintf(label, ln, "%02d.%02d", d, m);
+  return true;
+}
+
+// Быстрое число из строки CSV: без String, иначе на 2900 строк в сутках
+// получается 2900*6 временных объектов (так было в seedStatsFromSd).
+static float dayNum(const char*& p, const char* end) {
+  while (p < end && (*p == ' ' || *p == '\t')) p++;
+  bool neg = false;
+  if (p < end && *p == '-') { neg = true; p++; }
+  long ip = 0;
+  bool any = false;
+  while (p < end && *p >= '0' && *p <= '9') { ip = ip * 10 + (*p - '0'); p++; any = true; }
+  float f = (float)ip;
+  if (p < end && *p == '.') {
+    p++;
+    float k = 0.1f;
+    while (p < end && *p >= '0' && *p <= '9') {
+      f += (float)(*p - '0') * k;
+      k *= 0.1f;
+      p++;
+      any = true;
+    }
+  }
+  if (!any) f = 0;
+  return neg ? -f : f;
+}
+static void daySkip(const char*& p, const char* end) {
+  while (p < end && *p != ',') p++;
+  if (p < end) p++;
+}
+
+// Похожа ли строка на «YYYY-MM-DD ...» — дешёвая проверка без String.
+static bool isDateLine(const char* s, int len) {
+  if (len < 11) return false;
+  for (int i = 0; i < 10; i++) {
+    char c = s[i];
+    if (i == 4 || i == 7) { if (c != '-') return false; }
+    else if (c < '0' || c > '9') return false;
+  }
+  return s[10] == ' ';
+}
+
+// Одна строка дня: дата,В,Вт,кВт·ч,реле,руб,°C — в 5-минутный слот часа.
+// Строки 23–26.10 восстановлены из облака: у них нулевые В и Вт, поэтому
+// график за такие дни честно пустой (энергия в файле есть, графика нет).
+static void dayAddRow(const char* s, int len) {
+  if (len < 20) return;
+  int hh = (s[11] - '0') * 10 + (s[12] - '0');
+  int mi = (s[14] - '0') * 10 + (s[15] - '0');
+  if (hh < 0 || hh > 23 || mi < 0 || mi > 59) return;
+  int minute = hh * 60 + mi;
+  int slot = minute / 5;
+  if (slot < 0) slot = 0;
+  if (slot >= H24_N) slot = H24_N - 1;         // границы массива — всегда
+  const char* p = s + 19;
+  const char* end = s + len;
+  if (p >= end || *p != ',') return;
+  p++;
+  float v  = dayNum(p, end); daySkip(p, end);
+  float pw = dayNum(p, end); daySkip(p, end);
+  daySkip(p, end);                              // кВт·ч
+  daySkip(p, end);                              // реле
+  daySkip(p, end);                              // рубли
+  bool hasT = false;
+  float tv = 0;
+  while (p < end && (*p == ' ' || *p == '\t')) p++;
+  if (p < end && *p != '\r' && *p != '\n' && *p != ',') { tv = dayNum(p, end); hasT = true; }
+
+  const float dt = 30.0f;                       // шаг строки ~30 с — вес средней
+  gDayRows++;
+  if (v > 50.0f) {
+    dayV[slot] = v; dayMask[slot] |= 1;
+    if (v < ddMinV) { ddMinV = v; ddMinVMin = minute; }
+    if (v > ddMaxV) { ddMaxV = v; ddMaxVMin = minute; }
+    ddSumV += (double)v * dt; ddSecV += (long)dt;
+    if (v < V_NORM_LO || v > V_NORM_HI) ddOutV += dt;
+    // Мощность берём только там, где есть напряжение: у восстановленных
+    // строк оба поля нулевые, и «ноль ватт» на графике был бы враньём.
+    if (pw >= 0) {
+      dayP[slot] = pw; dayMask[slot] |= 4;
+      if (pw > ddMaxP) { ddMaxP = pw; ddPMin = minute; }
+      ddSumP += (double)pw * dt; ddSecP += (long)dt;
+    }
+  }
+  if (hasT && tv > -40.0f && tv < 100.0f) {
+    dayT[slot] = tv; dayMask[slot] |= 2;
+    if (tv < ddMinT) { ddMinT = tv; ddMinTMin = minute; }
+    if (tv > ddMaxT) { ddMaxT = tv; ddMaxTMin = minute; }
+    ddSumT += (double)tv * dt; ddSecT += (long)dt;
+  }
+}
+
+static void dayClear() {
+  memset(dayV, 0, sizeof(dayV));
+  memset(dayT, 0, sizeof(dayT));
+  memset(dayP, 0, sizeof(dayP));
+  memset(dayMask, 0, sizeof(dayMask));
+  ddMinV = 999; ddMaxV = 0; ddOutV = 0;
+  ddSumV = 0; ddSecV = 0;
+  ddMinT = 999; ddMaxT = -999; ddSumT = 0; ddSecT = 0;
+  ddMaxP = 0; ddSumP = 0; ddSecP = 0;
+  ddMinVMin = -1; ddMaxVMin = -1; ddMinTMin = -1; ddMaxTMin = -1; ddPMin = -1;
+  gDayRows = 0;
+}
+
+// Читаем /energy.csv БЛОКАМИ по 512 байт и собираем один день в day*[288].
+// Файл НЕ отсортирован по времени (23–26.10 вклеены в середину), поэтому
+// читать только хвост нельзя — проходим файл целиком. 400 КБ с карты —
+// примерно 1 с; на каждой 512-й строке кормим сторожевой таймер.
+static bool dayLoadFromSd(int offset) {
+  dayClear();
+  gDayLoaded = -1;
+  if (!gSdOk) return false;
+  char date[12] = "", label[8] = "";
+  if (!dayDate(offset, date, sizeof(date), label, sizeof(label))) return false;
+  memcpy(gDayLabel, label, sizeof(label));
+
+  File f = SD.open("/energy.csv", FILE_READ);
+  if (!f) return false;
+  static uint8_t dbuf[512 + 256];
+  int carry = 0;
+  int guard = 0;
+  unsigned long t0 = millis();
+  char oldest[11];
+  memset(oldest, '9', sizeof(oldest));       // ищем самый старый день файла
+  oldest[10] = 0;
+  while (f.available()) {
+    int n = (int)f.read(dbuf + carry, 512);
+    if (n <= 0) break;
+    int total = carry + n;
+    int i = 0;
+    while (i < total) {
+      uint8_t* nl = (uint8_t*)memchr(dbuf + i, '\n', total - i);
+      if (!nl) break;
+      int len = (int)(nl - (dbuf + i));
+      if (len >= 20 && isDateLine((const char*)(dbuf + i), len)) {
+        if (memcmp(dbuf + i, date, 10) == 0 && dbuf[i + 10] == ' ')
+          dayAddRow((const char*)(dbuf + i), len);
+        if (memcmp(dbuf + i, oldest, 10) < 0) memcpy(oldest, dbuf + i, 10);
+      }
+      i = (int)(nl - dbuf) + 1;
+      if ((++guard & 511) == 0) { esp_task_wdt_reset(); yield(); }
+    }
+    carry = total - i;
+    if (carry > 0) memmove(dbuf, dbuf + i, carry);
+    if (carry > 240) carry = 0;              // строка без перевода строки
+    esp_task_wdt_reset();
+  }
+  f.close();
+  gDayMs = millis() - t0;
+  gDayLoaded = offset;
+
+  // Самый старый день файла: по нему ограничиваем стрелку ‹.
+  if (memcmp(oldest, "9999999999", 10) != 0) {
+    long ok = daysFromCivil((oldest[0] - '0') * 1000 + (oldest[1] - '0') * 100 +
+                            (oldest[2] - '0') * 10 + (oldest[3] - '0'),
+                            (unsigned)((oldest[5] - '0') * 10 + (oldest[6] - '0')),
+                            (unsigned)((oldest[8] - '0') * 10 + (oldest[9] - '0')));
+    int back = (int)(todayDayKey() - ok);
+    if (back < 0) back = 0;
+    if (back > 60) back = 60;
+    gDayMaxOffset = back;
+  }
+  Serial.printf("день %s (%s): строк %d, %lu мс, самый старый %s%s\n",
+                date, label, gDayRows, (unsigned long)gDayMs, oldest,
+                gDayRows ? "" : " — НЕТ ДАННЫХ");
+  return gDayRows > 0;
+}
+
 // ---------------------------------------------------------------- тачскрин
 #define TP_CLK   25
 #define TP_MOSI  32
@@ -949,6 +2196,7 @@ bool seedStatsFromSd() {
 int calYleft = 3480, calYright = 586, calXtop = 916, calXbottom = 3010;
 
 void loadCal() {
+  // значения читаются из NVS; при первом запуске действуют заводские
   Preferences p; p.begin("touchcal", true);
   calYleft = p.getInt("yleft", calYleft);
   calYright = p.getInt("yright", calYright);
@@ -1017,9 +2265,344 @@ bool tpPoint(int* sx, int* sy) {
   if (rx < 100 || rx > 4050 || ry < 100 || ry > 4050) return false;
   *sx = constrain((int)map(rx, calYleft, calYright, 0, 239), 0, 239);
   *sy = constrain((int)map(ry, calXtop, calXbottom, 0, 319), 0, 319);
+  gTapRawX = (int)rx; gTapRawY = (int)ry;
+  gTapMapX = *sx;     gTapMapY = *sy;
+  // пишем в журнал (кольцо из 8)
+  for (int k = 7; k > 0; k--) {
+    gTLraw[k][0] = gTLraw[k-1][0]; gTLraw[k][1] = gTLraw[k-1][1];
+    gTLmap[k][0] = gTLmap[k-1][0]; gTLmap[k][1] = gTLmap[k-1][1];
+    gTLsec[k]    = gTLsec[k-1];
+  }
+  gTLraw[0][0] = rx; gTLraw[0][1] = ry;
+  gTLmap[0][0] = *sx; gTLmap[0][1] = *sy;
+  gTLsec[0] = millis() / 1000UL;
+  if (gTLn < 8) gTLn++;
   return true;
 }
 
+
+
+
+
+// ---------------------------------------------------------------- график мощности из облака
+// Локальный DP 6 у этого реле отдаёт УСТАРЕВШЕЕ значение (писал 19 Вт, когда
+// работала болгарка на 1300 Вт). Поэтому график мощности за прошедшие часы
+// восстанавливаем из облака: там phase_a с шагом 16 секунд.
+// Один час за проход loop(), чтобы не держать цикл.
+bool cloudCall(const String& method, const String& path, String& body, int maxRaw);  // объявлена ниже
+int b64decode(const char* in, uint8_t* out, int maxOut);
+
+// PWRHIST: дозаполнение мощности прошлых дней из облака (команда в serial).
+// Реализация ниже, после всех функций карты и статистики.
+bool pwrHistActive();
+void pwrHistTick();
+bool pwrHistStart(const String& args);
+
+// GAPFILL: заполнение пропусков в /energy.csv данными из облака.
+// Реализация ниже, после PWRHIST (нужны cloudCall/b64decode и всё про карту).
+bool gapFillActive();
+void gapFillTick();
+bool gapFillStart(bool run);
+void gapFillSchedule(unsigned long delayMs);
+int  gapTodayCount();
+int  gapTodayMinutes();
+
+// ---------------------------------------------------------------- шлюз report-logs
+// Облако Tuya режет частоту метода report-logs, а при злоупотреблении просто
+// рвёт соединение (в /clog это этап connect или hdr). Раньше pwrFillTick
+// отправлял по окну ЗА КАЖДЫЙ проход loop() — до 48 запросов за 7 секунд
+// после загрузки. Теперь между любыми двумя запросами report-logs >= 1.8 с,
+// независимо от того, кто их шлёт (pwrFill/hist/gapfill/PWRHIST).
+unsigned long gRepLastMs = 0;
+static bool repWait() { return (millis() - gRepLastMs) < 1800UL; }
+static void repDone() { gRepLastMs = millis(); }
+unsigned long gPwrRetryMs = 0;   // пауза перед повтором окна PWRFILL
+int           gPwrRetry   = 0;   // сколько раз подряд не вышло
+
+void pwrFillTick() {
+  if (pwrHistActive()) return;                  // не мешаем PWRHIST
+  if (gapFillActive()) return;                  // и GAPFILL тоже
+  if (gPwrFillHour < 0) return;
+  // Напряжение устарело — сеть и облако отдаются cloudTick(). Дозаполнение
+  // прошлых часов подождёт: свежие данные важнее (иначе PWRFILL занимает
+  // очередь и напряжение остаётся старым).
+  if (voltStale(180000UL)) return;
+  if (WiFi.status() != WL_CONNECTED || !netOnline()) return;
+  if (millis() - gTouchMs < 1500) return;        // не мешаем тачу
+  if (millis() < gPwrRetryMs) return;            // пауза после неудачи
+  if (!cloudToken()) return;
+
+  struct tm ti;
+  if (!getLocalTime(&ti, 10)) return;
+  int nowH = ti.tm_hour;
+
+  // Текущий час уже заполнен — до наступления следующего часа в облако не
+  // ходим. Раньше здесь стоял gPwrFillHour = nowH, и цикл крутился вечно.
+  if (gPwrFillStopH >= 0) {
+    if (nowH <= gPwrFillStopH) return;
+    gPwrFillStopH = -1;                 // наступил новый час — продолжаем
+  }
+
+  // Догоняем текущий час, но не останавливаемся навсегда:
+  // если отстали — продолжаем со следующего прохода.
+  if (gPwrFillHour > nowH) { gPwrFillHour = nowH; gPwrPart = 0; return; }
+
+  int hh = gPwrFillHour;
+
+  struct tm t0;
+  memset(&t0, 0, sizeof(t0));
+  t0.tm_year = ti.tm_year; t0.tm_mon = ti.tm_mon; t0.tm_mday = ti.tm_mday;
+  t0.tm_hour = hh; t0.tm_min = 0; t0.tm_sec = 0; t0.tm_isdst = -1;
+  time_t hourStart = mktime(&t0);
+  if (hourStart < 1600000000) { gPwrFillHour = -1; return; }
+
+  // ВАЖНО: облако отдаёт записи ОТ НОВЫХ К СТАРЫМ, и size=100 покрывает
+  // только последние ~27 минут часа. Поэтому час режем на ТРИ окна по 20 минут
+  // (в каждом не больше ~75 записей) и копим результат между проходами loop().
+  if (gPwrPart == 0) { gPwrSum = 0; gPwrN = 0; gPwrPeak = 0; gPwrPeakSec = 0; }
+
+  time_t a = hourStart + (time_t)(gPwrPart * 1200);
+  time_t b = a + 1200;
+
+  char path[240];
+  snprintf(path, sizeof(path),
+           "/v1.0/devices/%s/report-logs?codes=phase_a&end_time=%llu&size=100&start_time=%llu",
+           DEVICE_ID, (unsigned long long)b * 1000ULL, (unsigned long long)a * 1000ULL);
+
+  String body;
+  if (repWait()) return;                        // не частим в report-logs
+  bool okCall = cloudCall("GET", String(path), body, 12000);
+  repDone();
+  if (!okCall) {
+    // Одна неудача не должна убивать весь график мощности (раньше ставился
+    // gPwrFillHour = -1 и дозаполнение прекращалось до перезагрузки).
+    if (++gPwrRetry < 4) { gPwrRetryMs = millis() + 3000UL; return; }
+    gPwrRetry = 0; gPwrRetryMs = 0;
+    gPwrPart = 0;
+    gPwrFillHour++;
+    if (gPwrFillHour > nowH) { gPwrFillHour = nowH; gPwrFillStopH = nowH; }
+    return;
+  }
+  gPwrRetry = 0; gPwrRetryMs = 0;
+  if (body.indexOf("\"success\":true") < 0) {
+    if (body.indexOf("too frequent") >= 0) {     // лимит облака — подождать
+      gPwrRetryMs = millis() + 15000UL;
+      return;
+    }
+    gPwrPart = 0;
+    gPwrFillHour++;
+    if (gPwrFillHour > nowH) { gPwrFillHour = nowH; gPwrFillStopH = nowH; }
+    return;
+  }
+
+  // разбор: берём event_time и value, считаем сумму, пик и его секунду
+  int pos = 0;
+  int len = body.length();
+  while (true) {
+    int i = body.indexOf("\"event_time\":", pos);
+    if (i < 0) break;
+    i += 13;
+    while (i < len && (body[i] == ' ' || body[i] == '"')) i++;
+    int j = i;
+    while (j < len && isDigit(body[j])) j++;
+    if (j == i) { pos = i + 1; continue; }
+    unsigned long long ms = strtoull(body.substring(i, j).c_str(), NULL, 10);
+    pos = j;
+
+    int v = body.indexOf("\"value\":", pos);
+    if (v < 0) break;
+    v += 8;
+    while (v < len && (body[v] == ' ' || body[v] == '"')) v++;
+    int e = body.indexOf('"', v);
+    if (e < 0) break;
+    String b64 = body.substring(v, e);
+    pos = e + 1;
+
+    uint8_t raw[12];
+    if (b64decode(b64.c_str(), raw, sizeof(raw)) < 8) continue;
+    int p = ((uint16_t)raw[6] << 8) | raw[7];
+    if (p < 0 || p > 20000) continue;
+
+    gPwrSum += (float)p;
+    gPwrN++;
+    if (p > gPwrPeak) {
+      gPwrPeak = p;
+      time_t et = (time_t)(ms / 1000ULL);
+      long rel = (long)(et - hourStart);
+      if (rel < 0) rel = 0;
+      if (rel > 3599) rel = 3599;
+      gPwrPeakSec = (int)(rel / 60);
+    }
+    esp_task_wdt_reset();
+  }
+
+  if (++gPwrPart < 3) return;        // остальные два окна — следующими проходами
+
+  // все три окна собраны — записываем час
+  if (gPwrN > 0) {
+    float avg = gPwrSum / (float)gPwrN;
+    for (int s = 0; s < 12; s++) {
+      int idx = hh * 12 + s;
+      if (idx < 0 || idx >= H24_N) break;
+      h24P[idx] = avg;
+      h24Mask[idx] |= 4;
+    }
+    h24Pm[hh] = (float)gPwrPeak;
+    h24PmOk[hh] = true;
+    h24PmMin[hh] = (uint8_t)gPwrPeakSec;
+    Serial.printf("мощность: час %02d = %.0f Вт, пик %d Вт в %02d:%02d (точек %d)\n",
+                  hh, avg, gPwrPeak, hh, gPwrPeakSec, gPwrN);
+  }
+
+  gPwrPart = 0;
+  gPwrFillHour++;
+  if (gPwrFillHour > nowH) { gPwrFillHour = nowH; gPwrFillStopH = nowH; gLastDraw = 0; }
+  esp_task_wdt_reset();
+}
+
+// ---------------------------------------------------------------- тач-тест
+// Показывает, куда РЕАЛЬНО попадает палец: сырые координаты, пересчитанные
+// и сетку зон карточек. Нужен, чтобы понять, почему карточка не нажимается.
+void drawTapTest() {
+  uiScreen(cBg);
+  drawTxtC(120, 8, "ТАЧ-ТЕСТ", cAccent, cBg, 2);
+
+  // сетка зон карточек (числа должны совпадать с BLOCKS)
+  static const int Z[5][4] = { {0,44,240,72}, {0,112,116,64}, {116,112,124,64},
+                               {0,174,240,72}, {0,244,240,74} };
+  for (int i = 0; i < 5; i++) uiRect(Z[i][0], Z[i][1], Z[i][2], Z[i][3], cLine);
+
+  char b[64];
+  snprintf(b, sizeof(b), "СЫРОЕ  %u , %u", gTapRawX, gTapRawY);
+  drawTxt(8, 288, b, cText, cBg, 1);
+  snprintf(b, sizeof(b), "ЭКРАН  %d , %d", gTapMapX, gTapMapY);
+  drawTxt(8, 300, b, cAccent, cBg, 1);
+
+  // крестик там, куда попал палец
+  if (gTapMapX > 0 || gTapMapY > 0) {
+    uiHLine(gTapMapX - 12, gTapMapY, 25, cBadC);
+    uiVLine(gTapMapX, gTapMapY - 12, 25, cBadC);
+    uiCircle(gTapMapX, gTapMapY, 9, cBadC);
+  }
+  drawTxtR(232, 288, "НАЖМИ НА КАРТОЧКУ", cMuted, cBg, 1);
+}
+
+// ---------------------------------------------------------------- калибровка по 4 углам
+// Четыре мишени в углах экрана. По ним считаем и масштаб, и сдвиг по обеим
+// осям — надёжнее двух точек: одна неточная мишень не портит всю калибровку.
+static const int CAL_X[4] = { 14, 226, 14, 226 };   // левый верх, правый верх,
+static const int CAL_Y[4] = { 14, 14, 306, 306 };   // левый низ, правый низ
+static const int CAL_IN = 14, CAL_IN2 = 226;        // отступ мишени от края
+static const int CAL_MARGIN = 11;                   // 14 - 3 (запас на палец)
+
+void drawCalTarget(int x, int y, int step) {
+  uiScreen(cBg);
+  drawTxtC(120, 150, "КАЛИБРОВКА", cAccent, cBg, 2);
+  char b[64];
+  snprintf(b, sizeof(b), "УГОЛ %d ИЗ 4", step);
+  drawTxtC(120, 180, b, cText, cBg, 1);
+  drawTxtC(120, 196, "НАЖМИ В ЦЕНТР КРУЖКА", cMuted, cBg, 1);
+
+  // уже принятые углы помечаем зелёным
+  for (int i = 0; i < step - 1; i++) uiCircle(CAL_X[i], CAL_Y[i], 6, cGood);
+
+  // текущая мишень
+  for (int r = 15; r > 0; r -= 3) uiCircle(x, y, r, (r % 2) ? cAccent : cText);
+  uiHLine(x - 22, y, 45, cAccent);
+  uiVLine(x, y - 22, 45, cAccent);
+}
+
+void calTouchStart() {
+  gCalStep = 1;
+  for (int i = 0; i < 4; i++) { gCalGood[i] = 0; gCalR[i][0] = gCalR[i][1] = 0; }
+  gTouchSkip = millis() + 400;
+  drawCalTarget(CAL_X[0], CAL_Y[0], 1);
+}
+
+void drawCalDone() {
+  uiScreen(cBg);
+  drawTxtC(120, 60, "ГОТОВО", cGood, cBg, 3);
+  char b[80];
+  snprintf(b, sizeof(b), "X: %d .. %d", calYleft, calYright);
+  drawTxtC(120, 110, b, cText, cBg, 1);
+  snprintf(b, sizeof(b), "Y: %d .. %d", calXtop, calXbottom);
+  drawTxtC(120, 126, b, cText, cBg, 1);
+  drawTxtC(120, 160, "СОХРАНЕНО В ПАМЯТЬ", cMuted, cBg, 1);
+}
+
+// Возвращает true, если касание использовано для калибровки
+bool calTick(int x, int y) {
+  if (gCalStep == 0) return false;
+
+  int idx = gCalStep - 1;
+  int tx = CAL_X[idx], ty = CAL_Y[idx];
+
+  // Палец должен быть РЯДОМ с мишенью, иначе случайное касание всё сломает.
+  // Допуск 90 px — с запасом на неточную калибровку.
+  int dx0 = x - tx, dy0 = y - ty;
+  if (dx0 * dx0 + dy0 * dy0 > 90 * 90) {
+    drawTxtC(120, 214, "МИМО — НАЖМИ В КРУЖОК", cBadC, cBg, 1);
+    return true;
+  }
+
+  gCalR[idx][0] = gTapRawX;
+  gCalR[idx][1] = gTapRawY;
+  gCalGood[idx] = 1;
+  Serial.printf("калибровка: угол %d (%d,%d) = %u,%u\n",
+                gCalStep, tx, ty, gTapRawX, gTapRawY);
+
+  if (gCalStep < 4) {
+    gCalStep++;
+    delay(220);
+    drawCalTarget(CAL_X[gCalStep - 1], CAL_Y[gCalStep - 1], gCalStep);
+    return true;
+  }
+
+  // ---- все четыре собраны: считаем калибровку
+  float xLeft  = (gCalR[0][0] + gCalR[2][0]) / 2.0f;   // левый верх + левый низ
+  float xRight = (gCalR[1][0] + gCalR[3][0]) / 2.0f;   // правый верх + правый низ
+  float yTop   = (gCalR[0][1] + gCalR[1][1]) / 2.0f;   // верх левый + верх правый
+  float yBottom= (gCalR[2][1] + gCalR[3][1]) / 2.0f;   // низ левый + низ правый
+
+  Serial.printf("калибровка: X %.0f..%.0f, Y %.0f..%.0f\n", xLeft, xRight, yTop, yBottom);
+  Serial.printf("калибровка: разброс X %.0f, Y %.0f\n",
+                fabs(gCalR[0][0] - gCalR[2][0]), fabs(gCalR[0][1] - gCalR[1][1]));
+
+  // проверка: диапазоны должны быть широкими, а мишени по вертикали совпадать
+  bool bad = (fabs(xLeft - xRight) < 900) || (fabs(yTop - yBottom) < 900) ||
+             (fabs(gCalR[0][0] - gCalR[2][0]) > 700) ||
+             (fabs(gCalR[0][1] - gCalR[1][1]) > 700);
+  if (bad) {
+    Serial.println("калибровка: НЕГОДНЫЕ ДАННЫЕ — повтор");
+    uiScreen(cBg);
+    drawTxtC(120, 140, "НЕ ПОЛУЧИЛОСЬ", cBadC, cBg, 2);
+    drawTxtC(120, 170, "КАСАНИЯ НЕТОЧНЫЕ", cText, cBg, 1);
+    drawTxtC(120, 186, "ПОПРОБУЙ СНОВА", cMuted, cBg, 1);
+    delay(2400);
+    calTouchStart();
+    return true;
+  }
+
+  // экстраполяция с отступа 14 px на самые края 0 и 239 / 0 и 319
+  float dxRaw = (xRight - xLeft) / (float)(CAL_IN2 - CAL_IN);
+  calYleft  = (int)(xLeft  - dxRaw * CAL_IN);
+  calYright = (int)(xLeft  - dxRaw * CAL_IN + dxRaw * 239);
+
+  float dyRaw = (yBottom - yTop) / (float)(306 - 14);
+  calXtop    = (int)(yTop - dyRaw * 14);
+  calXbottom = (int)(calXtop + dyRaw * 319);
+
+  saveCal();
+  gCalStep = 0;
+  Serial.printf("калибровка сохранена: yleft=%d yright=%d xtop=%d xbottom=%d\n",
+                calYleft, calYright, calXtop, calXbottom);
+  drawCalDone();
+  delay(1600);
+  gScreen = SCR_MAIN;
+  drawScreen();
+  gLastDraw = millis(); gLastSig = screenSig(); gLastWinFull = millis();
+  return true;
+}
 
 // ---------------------------------------------------------------- время без интернета
 // ESP32 не имеет батарейной памяти часов. Если интернета при включении нет,
@@ -1099,7 +2682,8 @@ bool     gWifiOff     = false;    // радио выключено вручну�
 bool     gNetOk       = false;    // результат последней проверки
 unsigned long gNetProbeMs = 0;
 
-#define NET_PROBE_MS 350          // таймаут одного подключения, мс
+#define NET_PROBE_MS 250          // таймаут одного подключения, мс
+bool gProbe1 = false, gProbe2 = false;   // результаты зонда — видны в /data
 
 bool netProbe() {
   if (gNetForceOff || gWifiOff || WiFi.status() != WL_CONNECTED) return false;
@@ -1107,21 +2691,203 @@ bool netProbe() {
   // 8.8.8.8 первым не ставим — в РФ он часто недоступен;
   // 77.88.8.8 (Яндекс DNS) доступен всегда, когда интернет есть.
   const uint8_t ips[2][4] = { { 77, 88, 8, 8 }, { 1, 1, 1, 1 } };
+  gProbe1 = gProbe2 = false;
   for (int i = 0; i < 2; i++) {
     IPAddress ip(ips[i][0], ips[i][1], ips[i][2], ips[i][3]);
     WiFiClient c;
     bool ok = (c.connect(ip, 53, NET_PROBE_MS) == 1);
     c.stop();
+    if (i == 0) gProbe1 = ok; else gProbe2 = ok;
     if (ok) return true;
   }
   return false;
 }
 
+
+// ===== МАСТЕР НАСТРОЙКИ: mDNS, IP, WIFISET =====================================
+// Нужны программе настройки на ПК: она находит плату по USB, прошивает,
+// записывает Wi-Fi и дальше работает по сети. См. DomMonitor.ps1.
+
+bool mdnsBegin() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  MDNS.end();
+  if (!MDNS.begin("cyd")) {
+    Serial.println("mDNS: не запустился, cyd.local не работает");
+    return false;
+  }
+  MDNS.addService("http", "tcp", 80);
+  Serial.println("mDNS: http://cyd.local/");
+  return true;
+}
+
+// Аргумент команды: "в кавычках с пробелами" или слово до пробела.
+bool wfArg(const String& s, int& i, String& out) {
+  int n = (int)s.length();
+  while (i < n && s[i] == ' ') i++;
+  if (i >= n) return false;
+  out = "";
+  if (s[i] == '"') {
+    i++;
+    while (i < n && s[i] != '"') { out += s[i]; i++; }
+    if (i < n) i++;
+  } else {
+    while (i < n && s[i] != ' ') { out += s[i]; i++; }
+  }
+  return true;
+}
+
+// IP — текущий адрес, сеть и уровень сигнала одной строкой для мастера.
+void printIp() {
+  String ssid = (WiFi.status() == WL_CONNECTED) ? WiFi.SSID() : gSsid;
+  if (ssid.length() == 0) ssid = gSsid;
+  Serial.printf("IP: %s ssid=%s rssi=%d\n",
+                WiFi.localIP().toString().c_str(), ssid.c_str(), (int)gRssi);
+}
+
+// WIFISET "ssid" "pass" — записать сеть в NVS и подключиться.
+// Пароль в ответ НЕ печатаем: строка уходит в лог приложения.
+// Если подключиться не удалось — возвращаемся на прежнюю сеть, чтобы плата
+// не осталась без связи (проверено на неверном пароле 30.10.2026).
+//
+// ВАЖНО: раньше здесь был цикл while (millis()-t0 < 20000) с delay(250), и на
+// это время тач и веб были МЁРТВЫ, а при неудаче добавлялся ещё откат
+// connectWifi(15000) — до 35 с зависания. Теперь это автомат: cmdWifiSet()
+// только СТАРТУЕТ процесс и сразу отвечает, а шаги делает wifiSetTick() из
+// loop() — по одному за проход, без delay больше 50 мс.
+int      gWifiSetState   = 0;   // 0=простой 1=подключаемся 2=проверяем 3=откат
+unsigned long gWifiSetT0 = 0;   // начало текущего состояния
+unsigned long gWifiSetTick = 0; // когда последний раз проверяли статус
+String   gWifiSetSsid, gWifiSetPass;      // цель
+String   gWifiSetOldSsid, gWifiSetOldPass;// куда вернуться при неудаче
+
+#define WIFISET_CONNECT_MS 20000   // сколько ждём подключения к новой сети
+#define WIFISET_VERIFY_MS   1500   // сколько держим связь, прежде чем сказать ОК
+#define WIFISET_ROLLBACK_MS 15000  // сколько ждём возврата на прежнюю сеть
+
+// true — смена сети идёт: тяжёлые сетевые операции в это время не запускаем,
+// иначе они снова займут цикл и интерфейс замрёт.
+bool wifiSetBusy() { return gWifiSetState != 0; }
+
+// Отложенный запуск: веб-команда должна успеть отдать ответ ДО того, как
+// плата уйдёт из сети. Иначе клиент видит таймаут, хотя всё сработало.
+String gWifiSetPendingCmd;
+
+void cmdWifiSet(const String& cmd) {
+  if (gWifiSetState != 0) {
+    Serial.printf("WIFISET: ERR уже идёт смена сети (состояние %d)\n", gWifiSetState);
+    return;
+  }
+  int i = 7;                          // длина слова WIFISET
+  String ssid, pass;
+  if (!wfArg(cmd, i, ssid) || ssid.length() == 0) {
+    Serial.println("WIFISET: ERR нужен SSID, пример: WIFISET \"сеть\" \"пароль\"");
+    return;
+  }
+  wfArg(cmd, i, pass);
+
+  // Запоминаем, куда вернуться. Пароль в лог не попадает.
+  gWifiSetOldSsid = gSsid;
+  gWifiSetOldPass = gPass;
+  gWifiSetSsid = ssid;
+  gWifiSetPass = pass;
+
+  gWifiOff = false;
+  gNetForceOff = false;
+  gNetOk = false;           // после смены сети старый результат зонда неверен
+  gNetProbeMs = 0;          // и кэш 30 с сбрасываем — иначе netOnline() врёт
+
+  WiFi.disconnect(false, false);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  gWifiSetState = 1;
+  gWifiSetT0 = millis();
+  gWifiSetTick = millis();
+  Serial.printf("WIFISET: подключаюсь к \"%s\" (пароль %d симв.)\n",
+                ssid.c_str(), (int)pass.length());
+  Serial.printf("WIFISET: START ssid=%s\n", ssid.c_str());
+}
+
+// Шаг автомата смены сети. Вызывается из loop() и НЕ блокирует цикл:
+// за проход — максимум одна проверка WiFi.status() (без delay).
+void wifiSetTick() {
+  if (gWifiSetState == 0) return;
+  esp_task_wdt_reset();                             // сторож: шаг дешёвый
+  if (millis() - gWifiSetTick < 250UL) return;      // раз в 250 мс, не чаще
+  gWifiSetTick = millis();
+
+  switch (gWifiSetState) {
+    case 1:                                        // подключаемся к новой сети
+      if (WiFi.status() == WL_CONNECTED) {
+        gWifiSetState = 2;                         // проверяем, что связь держится
+        gWifiSetT0 = millis();
+        return;
+      }
+      if (millis() - gWifiSetT0 > WIFISET_CONNECT_MS) {
+        Serial.println("WIFISET: ERR timeout");
+        Serial.printf("WIFISET: возвращаюсь на \"%s\"\n", gWifiSetOldSsid.c_str());
+        WiFi.disconnect(false, false);
+        gSsid = gWifiSetOldSsid;
+        gPass = gWifiSetOldPass;
+        WiFi.begin(gSsid.c_str(), gPass.c_str());
+        gWifiSetState = 3;
+        gWifiSetT0 = millis();
+      }
+      return;
+
+    case 2:                                        // подключились — проверим
+      if (WiFi.status() != WL_CONNECTED) {          // связь не удержалась
+        if (millis() - gWifiSetT0 > WIFISET_CONNECT_MS) {
+          Serial.println("WIFISET: ERR timeout");
+          Serial.printf("WIFISET: возвращаюсь на \"%s\"\n", gWifiSetOldSsid.c_str());
+          WiFi.disconnect(false, false);
+          gSsid = gWifiSetOldSsid;
+          gPass = gWifiSetOldPass;
+          WiFi.begin(gSsid.c_str(), gPass.c_str());
+          gWifiSetState = 3;
+          gWifiSetT0 = millis();
+        }
+        return;
+      }
+      if (millis() - gWifiSetT0 < WIFISET_VERIFY_MS) return;
+      // Связь есть и держится — только теперь пишем в память.
+      gRssi = WiFi.RSSI();
+      saveWifi(gWifiSetSsid, gWifiSetPass);
+      mdnsBegin();
+      gNetProbeMs = 0;                              // проверим интернет заново
+      Serial.printf("WIFISET: OK ssid=%s\n", gWifiSetSsid.c_str());
+      Serial.println("веб: http://" + WiFi.localIP().toString() + "/");
+      gWifiSetState = 0;
+      return;
+
+    case 3:                                        // откат на прежнюю сеть
+      if (WiFi.status() == WL_CONNECTED) {
+        gRssi = WiFi.RSSI();
+        gNetProbeMs = 0;
+        Serial.printf("WIFISET: на связи снова \"%s\"\n", gWifiSetOldSsid.c_str());
+        Serial.println("веб: http://" + WiFi.localIP().toString() + "/");
+        gWifiSetState = 0;
+        return;
+      }
+      if (millis() - gWifiSetT0 > WIFISET_ROLLBACK_MS) {
+        Serial.println("WIFISET: прежняя сеть тоже не отвечает");
+        gWifiSetState = 0;
+      }
+      return;
+
+    default:
+      gWifiSetState = 0;
+      return;
+  }
+}
+// ==============================================================================
+
 // true — интернет есть. Результат кэшируется на 30 с, чтобы не тратить время.
 bool netOnline() {
   if (gNetForceOff || gWifiOff) { gNetOk = false; return false; }
+  // идёт смена сети — интернета заведомо нет, и тяжёлые запросы сейчас некстати
+  if (gWifiSetState != 0) { gNetOk = false; return false; }
   if (WiFi.status() != WL_CONNECTED) { gNetOk = false; return false; }
-  if (gNetProbeMs != 0 && millis() - gNetProbeMs < 30000UL) return gNetOk;
+  if (gNetProbeMs != 0 && millis() - gNetProbeMs < 45000UL) return gNetOk;
   gNetProbeMs = millis();
   bool was = gNetOk;
   gNetOk = netProbe();
@@ -1190,9 +2956,10 @@ bool parsePhase(const char* js) {
   // отсекаем мусор
   bool got = false;
   if (v > 80 && v < 400) { gVoltage = v; got = true; }
-  if (pwr >= 0 && pwr < 20000) { gPower = pwr; got = true; }
+  if (pwr >= 0 && pwr < 20000) { gPower = pwr; gPowerMs = millis(); got = true; }
   if (a >= 0 && a < 100) gCurrent = a;      // реальный ток, а не P/V
   if (got) gPhaseMs = millis();
+  if (got) { gPhaseN++; gPhaseRelayN++; }   // сколько раз напряжение пришло ОТ РЕЛЕ
   return got;
 }
 
@@ -1209,6 +2976,50 @@ String gTuyaToken;
 unsigned long gTuyaTokenMs = 0;
 unsigned long gCloudLast = 0;
 bool gCloudOk = false;
+// счётчики для /data: видно, доходит ли дело до облака и чем кончается
+unsigned long gCloudTry = 0;     // попыток cloudStatus()
+unsigned long gCloudOkN = 0;     // из них удачных
+unsigned long gTokenN   = 0;     // сколько раз брали токен
+int           gNetStep  = 0;     // шаг сетевого автомата в loop() (для /data)
+
+// ---------------------------------------------------------------- диагностика облака
+// Раньше облачные отказы были ПОЛНОСТЬЮ немыми: cloudCall() возвращал false на
+// шести разных этапах, и понять, где рвётся, было нечем. Отсюда «напряжение
+// застыло на 2 часа» при живом Wi-Fi. Теперь каждый отказ помечен.
+int           gCloudWhy    = 0;    // 0 ок, 1 нет Wi-Fi, 2 нет интернета, 3 нет токена,
+                                   // 4 cloudCall==false, 5 success=false, 6 в ответе нет phase_a
+unsigned long gCloudTryMs  = 0;    // millis() последней попытки cloudStatus()
+unsigned long gCloudFailRun = 0;   // неудач ПОДРЯД (сбрасывается успехом)
+int           gCliStage    = 0;    // где кончился последний cloudCall:
+                                   // 0 ок, 1 часы, 2 connect, 3 отправка, 4 заголовки,
+                                   // 5 нет "HTTP/1.", 6 тело короче Content-Length, 7 тело пустое
+int           gCliHttp     = 0;    // HTTP-код ответа (200, 400, 429 ...)
+int           gCliLen      = 0;    // сколько байт тела прочитано
+int           gCliWant     = 0;    // Content-Length ответа (-1 = не было)
+const char* cliStageName(int s) {
+  switch (s) {
+    case 0: return "ok";
+    case 1: return "clock";
+    case 2: return "connect";
+    case 3: return "print";
+    case 4: return "hdr";
+    case 5: return "http";
+    case 6: return "short";
+    case 7: return "empty";
+    default: return "?";
+  }
+}
+// Кольцо последних облачных запросов — видно историю, а не только «сейчас»:
+// /clog отдаёт его текстом. 8 записей по 16 байт.
+struct ClRec { unsigned long at; uint8_t stage; uint8_t why; int16_t http; int16_t len; };
+ClRec gClRing[8];
+int   gClRingI = 0;
+void clRingAdd(uint8_t stage, uint8_t why, int http, int len) {
+  ClRec& r = gClRing[gClRingI % 8];
+  r.at = millis(); r.stage = stage; r.why = why;
+  r.http = (int16_t)http; r.len = (int16_t)len;
+  gClRingI++;
+}
 
 String sha256hex(const String& s) {
   uint8_t h[32];
@@ -1256,25 +3067,139 @@ String randomHex(int n) {
 
 // Один HTTPS-запрос к облаку. Возвращает тело ответа.
 // maxRaw — предел размера ответа (история за сутки бывает заметно длиннее).
+//
+// ВАЖНО (затупания): раньше тело читалось ПОБАЙТНО и потом ещё ждало 400 мс
+// тишины — это лишние ~600 мс на каждый запрос. Теперь заголовки читаются до
+// пустой строки, а тело — ровно по Content-Length (и кусками, а не по байту).
+static unsigned long gCloudReuse = 0;   // оставлен для совместимости /data
+unsigned long gMsDns = 0;               // последний getaddrinfo облака
+unsigned long gMsTls = 0;               // последний TLS-handshake облака
+
+// Заголовки ответа до пустой строки. false — не дождались.
+static bool cloudReadHeaders(WiFiClientSecure& c, String& hdr, unsigned long timeoutMs) {
+  hdr = "";
+  hdr.reserve(512);
+  unsigned long t0 = millis();
+  while (millis() - t0 < timeoutMs) {
+    while (c.available()) {
+      int ch = c.read();
+      if (ch < 0) break;
+      hdr += (char)ch;
+      int n = (int)hdr.length();
+      if (n >= 4 && hdr[n - 1] == '\n' && hdr[n - 2] == '\r' &&
+                    hdr[n - 3] == '\n' && hdr[n - 4] == '\r') return true;
+      if (n > 1600) return false;
+    }
+    if (!c.connected() && !c.available()) break;
+    esp_task_wdt_reset();
+    delay(5);
+  }
+  return false;
+}
+
+static int cloudContentLength(const String& hdr) {
+  String low = hdr;
+  low.toLowerCase();
+  int i = low.indexOf("\r\ncontent-length:");
+  if (i < 0) return -1;
+  int j = i + 17;
+  while (j < (int)low.length() && (low[j] == ' ' || low[j] == '\t')) j++;
+  long v = 0;
+  bool any = false;
+  while (j < (int)low.length() && low[j] >= '0' && low[j] <= '9') {
+    v = v * 10 + (low[j] - '0');
+    j++;
+    any = true;
+    if (v > 400000) return -1;
+  }
+  return any ? (int)v : -1;
+}
+
+// ------------------------------------------------------------------ chunked
+// ОБЛАКО ОТВЕЧАЕТ CHUNKED (проверено /cloudtest: в теле было "915\r\n{...}").
+// Раньше служебные "<hex>\r\n" оставались ВНУТРИ тела, и разбор JSON рвался:
+// граница чанка (~2325 байт) могла разрезать "code":"phase_a","value": или
+// "success":true. Тогда облако «ответило», а напряжение не обновлялось —
+// и так часами, потому что длина ответа почти не меняется. Теперь чанки
+// разбираются как положено, в тело попадает только JSON.
+static bool cloudIsChunked(const String& hdr) {
+  String low = hdr;
+  low.toLowerCase();
+  return low.indexOf("transfer-encoding: chunked") >= 0;
+}
+
+// Прочитать ровно n байт тела. false — дедлайн вышел или соединение оборвалось.
+static bool cloudReadN(WiFiClientSecure& c, int n, String& out, unsigned long deadline) {
+  while (n > 0) {
+    if ((long)(millis() - deadline) >= 0) return false;
+    int want = n > 256 ? 256 : n;
+    uint8_t buf[257];
+    int k = c.read(buf, want);
+    if (k > 0) { buf[k] = 0; out += (char*)buf; n -= k; }
+    else if (!c.connected() && !c.available()) return false;
+    else delay(2);
+    esp_task_wdt_reset();
+  }
+  return true;
+}
+
+// Разбор "размер_в_hex\r\n<данные>\r\n...0\r\n\r\n" в чистый JSON.
+static bool cloudReadChunked(WiFiClientSecure& c, String& raw, int maxRaw, unsigned long deadline) {
+  for (int guard = 0; guard < 4000; guard++) {
+    // строка размера чанка (hex, может быть с ";ext")
+    String sz;
+    bool gotNl = false;
+    while (sz.length() < 24) {
+      if ((long)(millis() - deadline) >= 0) return false;
+      int ch = c.read();
+      if (ch < 0) {
+        if (!c.connected() && !c.available()) return false;
+        delay(1);
+        continue;
+      }
+      if (ch == '\n') { gotNl = true; break; }
+      if (ch != '\r') sz += (char)ch;
+    }
+    if (!gotNl) return false;
+    sz.trim();
+    int semi = sz.indexOf(';');
+    if (semi >= 0) sz = sz.substring(0, semi);
+    long n = strtol(sz.c_str(), NULL, 16);
+    if (n <= 0) return raw.length() > 0;           // "0" — конец тела
+    if ((int)raw.length() + (int)n > maxRaw) return raw.length() > 0;
+    if (!cloudReadN(c, (int)n, raw, deadline)) return false;
+    // после данных идёт CRLF
+    String crlf;
+    cloudReadN(c, 2, crlf, deadline);
+    esp_task_wdt_reset();
+  }
+  return raw.length() > 0;
+}
+
+// Кэш веб-страницы (30 КБ) объявлен ниже, но отдавать эту память нужно уметь
+// отсюда: именно из-за неё падал TLS к облаку (см. cloudCall).
+void pageCacheFree();
+
 bool cloudCall(const String& method, const String& path, String& body, int maxRaw = 3500) {
+  gCliStage = 0; gCliHttp = 0; gCliLen = 0; gCliWant = -1;
   time_t now = time(nullptr);
-  if (now < 1600000000) return false;              // часы не выставлены
+  if (now < 1600000000) { gCliStage = 1; return false; }   // часы не выставлены
 
   String t = String((unsigned long)(now * 1000ULL % 10000000000ULL));
-  String nonce = randomHex(8);
   String sha = sha256hex("");
   String sts = method + "\n" + sha + "\n\n" + path;
 
+  // Подпись по документации Tuya v1.0:
+  //   client_id + access_token + t + stringToSign
+  // Раньше здесь был ещё nonce (t + nonce + sts) — до 31.10.2026 облако его
+  // принимало, потом начало отвечать 1004 sign invalid, и напряжение с
+  // мощностью перестали приходить. Проверено: без nonce запрос проходит,
+  // с nonce — 1004. Заголовок nonce отправлять можно, в подпись — нельзя.
   String strSign = String(TUYA_CID);
   if (gTuyaToken.length()) strSign += gTuyaToken;
-  strSign += t + nonce + sts;
+  strSign += t + sts;
 
   String sig = hmacHex(String(TUYA_SECRET), strSign);
-
-  WiFiClientSecure client;
-  client.setInsecure();                            // без проверки сертификата
-  client.setTimeout(10);
-  if (!client.connect(TUYA_HOST, 443, 2000)) return false;   // 2 с — и хватит
 
   String req = method + " " + path + " HTTP/1.1\r\n";
   req += String("Host: ") + TUYA_HOST + "\r\n";
@@ -1282,40 +3207,95 @@ bool cloudCall(const String& method, const String& path, String& body, int maxRa
   req += "sign: " + sig + "\r\n";
   req += "t: " + t + "\r\n";
   req += "sign_method: HMAC-SHA256\r\n";
-  req += "nonce: " + nonce + "\r\n";
   if (gTuyaToken.length()) req += "access_token: " + gTuyaToken + "\r\n";
   req += "Content-Type: application/json\r\n";
   req += "Connection: close\r\n\r\n";
 
-  client.print(req);
-
-  unsigned long t0 = millis();
-  while (client.connected() && !client.available() && millis() - t0 < 2000) {
-    esp_task_wdt_reset();
-    delay(20);
+  // IP облака НЕ кэшируем: адрес у openapi.tuyaeu.com короткоживущий, и через
+  // пару минут кэш приводил к мгновенному отказу TCP (69 мс) — напряжение
+  // переставало обновляться. Пусть лучше DNS (45-70 мс) каждый раз.
+  WiFiClientSecure client;
+  client.setInsecure();                            // без проверки сертификата
+  client.setTimeout(10);
+  unsigned long d0 = millis();
+  bool conn = client.connect(TUYA_HOST, 443, 3000);
+  gMsDns = 0;
+  gMsTls = millis() - d0;
+  if (!conn) {
+    // ГЛАВНАЯ причина «облако живо, а напряжения нет»: mbedTLS просит под TLS
+    // 16 КБ на буфер приёма и передачи. Если в куче уже лежит кэш веб-страницы
+    // (30 КБ), блока не находится — connect падает за ~70 мс с
+    // "SSL - Memory allocation failed", хотя TCP до облака открывается.
+    // Проверено на живой плате: сразу после GET / tls=0, после /pagefree tls=1.
+    // Лечим на месте: отдаём кэш страницы и пробуем снова.
+    pageCacheFree();
+    client.stop();
+    delay(30);
+    conn = client.connect(TUYA_HOST, 443, 3000);
+    gMsTls = millis() - d0;
   }
+  if (!conn) { gCliStage = 2; clRingAdd(2, gCloudWhy, 0, 0); return false; }
+
+  if (client.print(req) == 0) { gCliStage = 3; clRingAdd(3, gCloudWhy, 0, 0); client.stop(); return false; }
+
+  String hdr;
+  if (!cloudReadHeaders(client, hdr, 3000)) { gCliStage = 4; clRingAdd(4, gCloudWhy, 0, 0); client.stop(); return false; }
+  // HTTP-код — из первой строки ответа ("HTTP/1.1 200 OK"), для диагностики
+  {
+    int sp = hdr.indexOf(' ');
+    if (sp > 0 && sp + 4 < (int)hdr.length())
+      gCliHttp = hdr.substring(sp + 1, sp + 4).toInt();
+  }
+  if (!hdr.startsWith("HTTP/1.")) { gCliStage = 5; clRingAdd(5, gCloudWhy, gCliHttp, 0); client.stop(); return false; }
 
   String raw;
-  raw.reserve(maxRaw + 64);
-  unsigned long t1 = millis();
-  while (millis() - t1 < 2500UL) {
-    if (client.available()) {
-      raw += (char)client.read();
-      t1 = millis();
-      if ((int)raw.length() > maxRaw) break;
-    } else if (!client.connected()) {
-      break;
-    } else if (millis() - t1 > 400UL) {
-      break;                          // 400 мс тишины — ответ закончился
+  int cl = cloudContentLength(hdr);
+  bool chunked = cloudIsChunked(hdr);
+  gCliWant = chunked ? -1 : cl;
+  // 8 с на всё тело: 5.3 КБ идут ~1.4 с, но при занятом канале 3 с не хватало —
+  // тело обрывалось на середине, в нём не было "success":true, и запрос
+  // считался ошибкой, хотя облако ответило.
+  unsigned long deadline = millis() + 8000UL;
+  if (chunked) {
+    if (!cloudReadChunked(client, raw, maxRaw, deadline)) {
+      gCliStage = 6; gCliLen = (int)raw.length();
+      clRingAdd(6, gCloudWhy, gCliHttp, gCliLen);
+      client.stop(); return false;
     }
-    esp_task_wdt_reset();
+  } else if (cl >= 0 && cl <= maxRaw) {
+    raw.reserve(cl + 8);
+    if (!cloudReadN(client, cl, raw, deadline)) {
+      gCliStage = 6; gCliLen = (int)raw.length();
+      clRingAdd(6, gCloudWhy, gCliHttp, gCliLen);
+      client.stop(); return false;
+    }
+  } else {
+    // без Content-Length и без chunked: читаем, пока не замолчит (150 мс тишины)
+    unsigned long t1 = millis();
+    while (millis() - t1 < 4000UL) {
+      if (client.available()) {
+        raw += (char)client.read();
+        t1 = millis();
+        if ((int)raw.length() > maxRaw) break;
+      } else if (!client.connected()) {
+        break;
+      } else if (millis() - t1 > 150UL) {
+        break;
+      }
+      esp_task_wdt_reset();
+    }
   }
   client.stop();
 
-  int hdr = raw.indexOf("\r\n\r\n");
-  if (hdr < 0) return false;
-  body = raw.substring(hdr + 4);
-  return body.length() > 0;
+  body = raw;
+  gCliLen = (int)body.length();
+  if (body.length() == 0) {
+    // Пустой ответ — частый вид отказа: HTTP 200 без тела, 204, 429 без тела.
+    gCliStage = 7; clRingAdd(7, gCloudWhy, gCliHttp, 0);
+    return false;
+  }
+  clRingAdd(0, 0, gCliHttp, gCliLen);
+  return true;
 }
 
 // Получить токен доступа (живёт ~18 минут)
@@ -1335,6 +3315,7 @@ bool cloudToken() {
 
   gTuyaToken = body.substring(i, j);
   gTuyaTokenMs = millis();
+  gTokenN++;
   Serial.printf("облако: токен получен (%d симв.)\n", gTuyaToken.length());
   return gTuyaToken.length() > 10;
 }
@@ -1360,24 +3341,35 @@ bool cloudValue(const String& body, const char* code, String& val) {
 
 // Запросить состояние устройства — забираем всё нужное сразу
 bool cloudStatus() {
-  if (WiFi.status() != WL_CONNECTED) return false;
-  if (!netOnline()) return false;          // облако — только при живом интернете
-  if (!cloudToken()) return false;
+  gCloudTry++;
+  gCloudWhy = 0;
+  gCloudTryMs = millis();
+  if (WiFi.status() != WL_CONNECTED) { gCloudWhy = 1; return false; }
+  // Зонд TCP:53 — грубая проверка и иногда врёт: DNS-сервер перестаёт
+  // принимать TCP, а интернет жив. Раньше это наглухо отключало облако
+  // (net=false в /data — и напряжение «застывало» на часы). Теперь максимум
+  // каждая третья попытка идёт в облако даже при «нет интернета»: без сети
+  // это 3 с таймаута, зато свежесть напряжения не теряется.
+  bool netOk = netOnline();
+  if (!netOk && (gCloudTry % 3) != 0) { gCloudWhy = 2; return false; }
+  if (!cloudToken()) { gCloudWhy = (gCliStage == 1) ? 1 : ((gCliStage == 2) ? 2 : 3); return false; }
 
   String body;
   String path = String("/v1.0/devices/") + DEVICE_ID;
-  if (!cloudCall("GET", path, body)) return false;
+  if (!cloudCall("GET", path, body)) { gCloudWhy = 4; return false; }
   if (body.indexOf("\"success\":true") < 0) {
     gTuyaToken = "";                 // токен мог протухнуть — обновим в следующий раз
+    gCloudWhy = 5;
     return false;
   }
 
   String v;
+  bool gotV = false;                 // пришло ли в этом ответе напряжение
 
   // счётчик энергии (в сотых)
   if (cloudValue(body, "total_forward_energy", v)) {
     float e = v.toFloat() / 100.0f;
-    if (e > 0 && e < 100000) gEnergy = e;
+    if (e > 0 && e < 100000) { gEnergy = e; gEnergyMs = millis(); }
   }
 
   // напряжение и мощность в одной строке base64
@@ -1391,8 +3383,8 @@ bool cloudStatus() {
       float pwr  = (float)w3;         // мощность — прямое значение
       uint32_t ampsCA = ((uint32_t)raw[2] << 16) | ((uint32_t)raw[3] << 8) | raw[4];
       float ampCA = ampsCA / 1000.0f;
-      if (volt > 80 && volt < 400) { gVoltage = volt; gPhaseMs = millis(); }
-      if (pwr >= 0 && pwr < 20000) gPower = pwr;
+      if (volt > 80 && volt < 400) { gVoltage = volt; gPhaseMs = millis(); gPhaseN++; gotV = true; }
+      if (pwr >= 0 && pwr < 20000) { gPower = pwr; gPowerMs = millis(); }
       if (ampCA >= 0 && ampCA < 100) gCurrent = ampCA;   // реальный ток из облака
     }
   }
@@ -1400,7 +3392,7 @@ bool cloudStatus() {
   // температура (в десятых)
   if (cloudValue(body, "temp_current", v)) {
     float t = v.toFloat() / 10.0f;
-    if (t > -40 && t < 125) { gTemp = t; gTempValid = true; }
+    if (t > -40 && t < 125) { gTemp = t; gTempValid = true; gTempMs = millis(); }
   }
 
   // реле
@@ -1408,11 +3400,71 @@ bool cloudStatus() {
     gRelay = (v == "true" || v == "1");
   }
 
+  if (!gotV) { gCloudWhy = 6; return false; }   // ответ есть, напряжения в нём нет
   gCloudOk = true;
   gTuyaOk = true;
+  gCloudOkN++;
+  gCloudFailRun = 0;
   gLastOk = millis();
   gCost = myTodayCost;
   return true;
+}
+
+// ============================================================================
+//  ОБЛАКО ПО СВОЕМУ ТАЙМЕРУ — вне сетевого автомата и вне PWRFILL/GAPFILL.
+//  Причина: cloudStatus() стоял в gNetStep==2 и делил очередь с tuyaQuery,
+//  PWRFILL, GAPFILL и histTick. Любая заминка в соседе (или сброс gNetStep)
+//  оставляла напряжение застывшим на часы — ровно то, на что жаловались.
+//  Теперь напряжение — приоритет №1: пока vAge > 60 с, облако зовём каждые
+//  20 с, что бы ни делали остальные задачи.
+// ============================================================================
+void cloudTick() {
+  static unsigned long lastLog = 0;
+  unsigned long vAge = voltAgeMs();
+
+  // ---- эскалация после подряд идущих отказов (лечим залипшие состояния)
+  if (gCloudFailRun != 0) {
+    if (gCloudFailRun == 3) {              // ~50 с: переспросить зонд и токен
+      gNetProbeMs = 0;
+      gTuyaToken  = "";
+      Serial.printf("облако: 3 отказа подряд (причина %d, этап %s) — сброс зонда и токена\n",
+                    gCloudWhy, cliStageName(gCliStage));
+    }
+    if (gCloudFailRun == 6) {              // ~2 мин: переподключить Wi-Fi
+      gNetProbeMs = 0; gTuyaToken = "";
+      if (!gWifiOff && gWifiSetState == 0 && WiFi.status() == WL_CONNECTED) {
+        Serial.println("облако: 6 отказов подряд — WiFi.reconnect()");
+        WiFi.reconnect();
+      }
+    }
+    if (gCloudFailRun == 10) {             // ~3.5 мин: перезапустить станцию целиком
+      gNetProbeMs = 0; gTuyaToken = "";
+      if (!gWifiOff && gWifiSetState == 0) {
+        Serial.println("облако: 10 отказов подряд — перезапуск Wi-Fi-станции");
+        WiFi.disconnect();
+        WiFi.begin();
+      }
+    }
+  }
+
+  if (gWifiOff || gNetForceOff) return;
+  // не чаще раза в 20 с; после 20 отказов подряд — раз в минуту, чтобы не злить облако
+  unsigned long period = (gCloudFailRun >= 20) ? 60000UL : 20000UL;
+  if (millis() - gCloudTryMs < period) return;
+  if (gPhaseMs != 0 && vAge < 60000UL) return;   // напряжение свежее — не тратим запрос
+
+  unsigned long q0 = millis();
+  bool ok = cloudStatus();
+  gMsCloud = millis() - q0;
+  if (ok) return;
+
+  gCloudFailRun++;
+  if (millis() - lastLog > 60000UL) {      // не заливаем serial одной и той же строкой
+    lastLog = millis();
+    Serial.printf("облако-ERR: причина %d, этап %s, HTTP %d, тело %d/%d, подряд %lu, vAge %lu с\n",
+                  gCloudWhy, cliStageName(gCliStage), gCliHttp, gCliLen, gCliWant,
+                  gCloudFailRun, (millis() - gPhaseMs) / 1000UL);
+  }
 }
 
 
@@ -1584,16 +3636,30 @@ static uint8_t  hList[24];          // часы, которых в CSV нет (�
 static int      hListN = 0, hListI = 0;
 static String   hBody;              // тело последнего ответа облака
 
-long  histDayDone = -2;             // день, за который уже восстанавливали
+long  histDayDone = -2;             // день, за который уже восстанавливали (сегодня)
+long  histYestDone = -2;            // вчерашний день, который уже проверяли
 bool  gHistWant = false;            // нужно восстановление
 bool  gHistForce = false;           // команда CSVHIST — принудительно
 int   gHistStep = 0;                // автомат: 0 — простой
 int   gHistAdded = 0;               // сколько часов дописано
 unsigned long gHistRetry = 0;       // пауза после неудачи
+// Файл /energy.csv должен оставаться в хронологическом порядке: все читатели
+// (findDayStartOffset, /day, seedStatsFromSd) ищут сегодняшние строки с конца.
+// Поэтому вчерашние строки можно дописывать только ПОКА сегодняшних ещё нет.
+// На время проверки/дозаполнения вчера придерживаем writeSd (не дольше 2 мин).
+bool  gHistHold = false;
+unsigned long gHistHoldMs = 0;
+#define HIST_HOLD_MS 120000UL
+
+// Цель текущего прохода: сегодня или вчера.
+static bool hTargetYest = false;
+static int  hTargetY = 0, hTargetM = 0, hTargetD = 0;
+static int  hEndHour = 0;           // проверяем часы [0..hEndHour)
 
 void loadHistDay() {
   Preferences p; p.begin("hist", true);
   histDayDone = p.getLong("day", -2);
+  histYestDone = p.getLong("ydone", -2);
   p.end();
 }
 void saveHistDay(long d) {
@@ -1602,10 +3668,20 @@ void saveHistDay(long d) {
   p.end();
   histDayDone = d;
 }
+void saveHistYest(long d) {
+  Preferences p; p.begin("hist", false);
+  p.putLong("ydone", d);
+  p.end();
+  histYestDone = d;
+}
 
 // Один шаг автомата. Вызывается из loop() каждый проход и сразу выходит,
 // если восстанавливать нечего или интернета нет.
 void histTick() {
+  if (pwrHistActive()) return;                  // PWRHIST сам ходит в облако
+  if (gapFillActive()) return;                  // GAPFILL тоже (иначе лимит облака)
+  // Напряжение устарело — приоритет у cloudTick(), история подождёт.
+  if (voltStale(180000UL)) return;
   // касание в любой момент — откладываем любой шаг истории
   if (millis() < gTouchSkip) return;
   // ---- шаг 0: условия и «надо ли»
@@ -1614,7 +3690,10 @@ void histTick() {
     if (!getLocalTime(&ti, 5)) return;
     long todayKey = daysFromCivil(ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
     if (todayKey <= 0) return;
-    if (histDayDone != todayKey) gHistWant = true;     // новый день — снова надо
+    // Новый день — снова надо. Вчерашний день проверяем отдельно: если он
+    // ещё не проверялся, тоже надо (например, плата сутки стояла).
+    if (histDayDone != todayKey || histYestDone != todayKey - 1)
+      gHistWant = true;
     if (!gHistWant) return;
     if (!gSdOk) { gHistWant = false; return; }
     if (gHistRetry != 0 && millis() < gHistRetry) return;
@@ -1625,6 +3704,17 @@ void histTick() {
     memset(hHave, 0, sizeof(hHave));
     hListN = 0; hListI = 0;
     gHistAdded = 0;
+    // Придерживаем запись сегодняшних строк ТОЛЬКО пока их ещё нет: тогда
+    // вчерашние (если их не хватает) лягут до них и файл останется в порядке
+    // возрастания дат. Если сегодняшние уже есть, вчера всё равно пропустим
+    // (см. шаг 7) — держать запись незачем.
+    char tp[12];
+    snprintf(tp, sizeof(tp), "%04d-%02d-%02d",
+             ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+    if (!fileTailHasDay(tp)) {
+      gHistHold = true;
+      gHistHoldMs = millis();
+    }
     gHistStep = 1;
     Serial.println("история: проверяю пропущенные часы за сегодня");
     return;
@@ -1637,9 +3727,15 @@ void histTick() {
       gHistRetry = millis() + 600000UL;
       gHistStep = 0;
       gHistWant = false;
+      gHistHold = false;
       return;
     }
-    gHistStep = 4;               // сначала смотрим, каких часов нет в карте
+    struct tm ti;
+    long todayKey = 0;
+    if (getLocalTime(&ti, 5))
+      todayKey = daysFromCivil(ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+    // Сегодня уже восстановлен (или CSVHIST) — сразу к вчерашнему дню.
+    gHistStep = (gHistForce || todayKey <= 0 || histDayDone != todayKey) ? 4 : 7;
     return;
   }
 
@@ -1647,14 +3743,13 @@ void histTick() {
   if (gHistStep == 2) {
     if (millis() - gTouchMs < 1500UL) return;          // не мешаем тачу
     if (hListI >= hListN) { gHistStep = 5; return; }
-    struct tm ti;
-    if (!getLocalTime(&ti, 5)) { gHistStep = 0; return; }
     int hh = hList[hListI];
 
     // Границы часа — по местному времени (как в CSV), в запрос — UTC-мс.
+    // Дата берётся из цели: сегодня или вчера.
     struct tm t0;
     memset(&t0, 0, sizeof(t0));
-    t0.tm_year = ti.tm_year; t0.tm_mon = ti.tm_mon; t0.tm_mday = ti.tm_mday;
+    t0.tm_year = hTargetY - 1900; t0.tm_mon = hTargetM - 1; t0.tm_mday = hTargetD;
     t0.tm_hour = hh; t0.tm_min = 0; t0.tm_sec = 0; t0.tm_isdst = -1;
     time_t hs = mktime(&t0);
     if (hs < 1600000000) { hListI++; return; }
@@ -1668,13 +3763,17 @@ void histTick() {
              DEVICE_ID, en, HIST_MAX_REC, st);
 
     hBody = "";
-    if (!cloudCall("GET", String(path), hBody, 12000) ||
+    if (repWait()) return;                        // общий лимит report-logs
+    bool okH = cloudCall("GET", String(path), hBody, 12000);
+    repDone();
+    if (!okH ||
         hBody.indexOf("\"success\":true") < 0) {
       Serial.println("история: запрос не удался — повтор позже");
       gTuyaToken = "";                                 // токен мог протухнуть
       gHistRetry = millis() + 600000UL;
       gHistStep = 0;
       gHistWant = false;
+      gHistHold = false;
       return;
     }
 
@@ -1707,12 +3806,17 @@ void histTick() {
 
       struct tm lt;
       localtime_r(&et, &lt);
+      // Первая ПРИНЯТАЯ запись часа: по ней и будет время восстановленной
+      // строки. Считаем до инкрементов n/nT — иначе условие уже не сработает.
+      bool firstInHour = (hSlot[hh].n == 0 && hSlot[hh].nT == 0);
 
-      // Температура приходит просто числом («214»), напряжение — base64
-      // («CUcAAJYAABM=»). Различаем по содержимому: только цифры = температура.
+      // Температура приходит просто числом («214», «-50»), напряжение — base64
+      // («CUcAAJYAABM=»). Различаем по содержимому: цифры, минус и точка =
+      // температура. Раньше минус не считался цифрой, и «-50» уходило в
+      // base64-ветку, где терялось.
       bool digitsOnly = b64.length() > 0;
       for (int k = 0; k < (int)b64.length(); k++)
-        if (!isDigit(b64[k])) { digitsOnly = false; break; }
+        if (!isDigit(b64[k]) && b64[k] != '-' && b64[k] != '.') { digitsOnly = false; break; }
 
       if (digitsOnly) {
         float t = b64.toFloat() / 10.0f;
@@ -1733,9 +3837,13 @@ void histTick() {
           hSlot[hh].nP++;
         }
       }
-      hSlot[hh].ts = (unsigned long)(daysFromCivil(lt.tm_year + 1900, lt.tm_mon + 1,
-                                                  lt.tm_mday) * 86400L
-                                     + lt.tm_hour * 3600L + lt.tm_min * 60L + lt.tm_sec);
+      // Время начала часа: ts пишем только с ПЕРВОЙ записи часа, иначе
+      // восстановленная строка получала время ПОСЛЕДНЕЙ записи (14:55 вместо
+      // 14:00).
+      if (firstInHour)
+        hSlot[hh].ts = (unsigned long)(daysFromCivil(lt.tm_year + 1900, lt.tm_mon + 1,
+                                                    lt.tm_mday) * 86400L
+                                       + lt.tm_hour * 3600L + lt.tm_min * 60L + lt.tm_sec);
       nrec++;
     }
     Serial.printf("история: час %02d — записей %d, ответ %d байт\n", hh, nrec, len);
@@ -1748,12 +3856,17 @@ void histTick() {
   if (gHistStep == 4) {
     memset(hHave, 0, sizeof(hHave));
     struct tm ti;
-    if (!getLocalTime(&ti, 5)) { gHistStep = 0; return; }
+    if (!getLocalTime(&ti, 5)) { gHistStep = 0; gHistHold = false; return; }
+    hTargetYest = false;
+    hTargetY = ti.tm_year + 1900;
+    hTargetM = ti.tm_mon + 1;
+    hTargetD = ti.tm_mday;
+    hEndHour = ti.tm_hour;                 // текущий час не трогаем — его пишем вживую
     char dayPrefix[12];
     snprintf(dayPrefix, sizeof(dayPrefix), "%04d-%02d-%02d",
              ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
     File f = SD.open("/energy.csv", FILE_READ);
-    if (!f) { gHistStep = 0; return; }
+    if (!f) { gHistStep = 0; gHistHold = false; return; }
     size_t off = findDayStartOffset(f, dayPrefix);
     if (off > 0 || fileTailIsToday(f, dayPrefix)) {
       f.seek(off);
@@ -1769,7 +3882,7 @@ void histTick() {
     // вживую каждые 30 с). Именно их и спрашиваем по одному.
     hListN = 0; hListI = 0;
     int haveN = 0;
-    for (int h = 0; h < ti.tm_hour && h < 24; h++) {
+    for (int h = 0; h < hEndHour && h < 24; h++) {
       if (hHave[h]) { haveN++; continue; }
       hList[hListN++] = (uint8_t)h;
     }
@@ -1781,14 +3894,27 @@ void histTick() {
 
   // ---- шаг 5: дописываем недостающие часы
   if (gHistStep == 5) {
-    struct tm ti;
-    if (!getLocalTime(&ti, 5)) { gHistStep = 0; return; }
     char dayPrefix[12];
     snprintf(dayPrefix, sizeof(dayPrefix), "%04d-%02d-%02d",
-             ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
-    int nowHour = ti.tm_hour;
+             hTargetY, hTargetM, hTargetD);
+    // Страховка для вчера: пока шли облачные запросы, в файле могли появиться
+    // сегодняшние строки. Тогда вчерашние дописывать нельзя — порядок дат
+    // в /energy.csv нарушится, и поиск сегодняшних строк с конца сломается.
+    if (hTargetYest) {
+      struct tm nt;
+      char tp[12] = "";
+      bool okN = getLocalTime(&nt, 5);
+      if (okN)
+        snprintf(tp, sizeof(tp), "%04d-%02d-%02d", nt.tm_year + 1900, nt.tm_mon + 1, nt.tm_mday);
+      if (!okN || fileTailHasDay(tp)) {
+        Serial.println("история: вчера НЕ дописываю — в файле уже есть сегодня");
+        gHistWant = false; gHistForce = false; gHistStep = 0; gHistHold = false;
+        return;
+      }
+    }
+    int nowHour = hEndHour;
     int fill[24], nf = 0, empty = 0;
-    for (int h = 0; h < nowHour; h++) {
+    for (int h = 0; h < nowHour && h < 24; h++) {
       if (hHave[h]) continue;
       if (hSlot[h].n == 0) { empty++; continue; }   // в облаке этого часа тоже нет
       fill[nf++] = h;
@@ -1828,19 +3954,118 @@ void histTick() {
 
   // ---- шаг 6: пересобрать суточную статистику с учётом восстановленных часов
   if (gHistStep == 6) {
-    if (gHistAdded > 0) {
+    if (!hTargetYest && gHistAdded > 0) {
       resetStats();
       statsSeeded = false;
       seedStatsFromSd();          // мин/макс/среднее/график — заново по карте
       gLastDraw = 0;
     }
     struct tm ti;
+    long todayKey = 0;
     if (getLocalTime(&ti, 5))
-      saveHistDay(daysFromCivil(ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday));
+      todayKey = daysFromCivil(ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+
+    if (hTargetYest) {
+      if (todayKey > 1) saveHistYest(todayKey - 1);
+      Serial.printf("история: вчера готово, дописано часов %d\n", gHistAdded);
+      gHistWant = false;
+      gHistForce = false;
+      gHistStep = 0;
+      gHistHold = false;
+      return;
+    }
+
+    if (todayKey > 0) saveHistDay(todayKey);
+    // Сегодня закончили — проверяем вчера. Запись сегодняшних строк ещё
+    // придержана (gHistHold), чтобы вчерашние легли до них.
+    if (todayKey > 1 && histYestDone != todayKey - 1) {
+      gHistStep = 7;
+      Serial.println("история: сегодня готово, проверяю вчера");
+      return;
+    }
     gHistWant = false;
     gHistForce = false;
     gHistStep = 0;
+    gHistHold = false;
     Serial.printf("история: готово, дописано часов %d\n", gHistAdded);
+    return;
+  }
+
+  // ---- шаг 7: вчерашний день — есть ли пропущенные часы
+  // Файл /energy.csv хронологический, поэтому вчерашние строки можно
+  // дописывать только пока сегодняшних строк нет (writeSd придержан).
+  // Если сегодняшние уже есть — честно пропускаем: вставка в середину
+  // файла на SD требует перезаписи мегабайтов и опасна для карты.
+  if (gHistStep == 7) {
+    if (millis() - gTouchMs < 1500UL) return;          // не мешаем тачу
+    struct tm ti;
+    if (!getLocalTime(&ti, 5)) {
+      gHistStep = 0; gHistWant = false; gHistHold = false; return;
+    }
+    long todayKey = daysFromCivil(ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+    if (todayKey <= 1) {
+      gHistWant = false; gHistStep = 0; gHistHold = false; return;
+    }
+    if (histYestDone == todayKey - 1) {
+      gHistWant = false; gHistForce = false; gHistStep = 0; gHistHold = false; return;
+    }
+
+    char todayPrefix[12];
+    snprintf(todayPrefix, sizeof(todayPrefix), "%04d-%02d-%02d",
+             ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+    if (fileTailHasDay(todayPrefix)) {
+      Serial.println("история: вчера пропущено — в файле уже есть сегодня");
+      saveHistYest(todayKey - 1);
+      gHistWant = false; gHistForce = false; gHistStep = 0; gHistHold = false;
+      return;
+    }
+
+    // Вчерашняя календарная дата (через местное время, а не арифметикой дней).
+    time_t nowT = time(nullptr);
+    struct tm ty;
+    localtime_r(&nowT - 86400, &ty);
+    hTargetYest = true;
+    hTargetY = ty.tm_year + 1900;
+    hTargetM = ty.tm_mon + 1;
+    hTargetD = ty.tm_mday;
+    hEndHour = 24;
+    char dayPrefix[12];
+    snprintf(dayPrefix, sizeof(dayPrefix), "%04d-%02d-%02d", hTargetY, hTargetM, hTargetD);
+
+    memset(hSlot, 0, sizeof(hSlot));
+    memset(hHave, 0, sizeof(hHave));
+    hListN = 0; hListI = 0;
+    gHistAdded = 0;
+
+    File f = SD.open("/energy.csv", FILE_READ);
+    if (f) {
+      size_t off = findDayStartOffset(f, dayPrefix);
+      if (off > 0 || fileTailIsToday(f, dayPrefix)) {
+        f.seek(off);
+        int rd = 0;
+        while (f.available()) {
+          String l = f.readStringUntil('\n');
+          if ((++rd & 255) == 0) esp_task_wdt_reset();
+          if (!l.startsWith(dayPrefix)) continue;
+          long t = lineEpoch(l);
+          if (!t) continue;
+          hHave[(int)((t % 86400L) / 3600)] = 1;
+        }
+      }
+      f.close();
+    }
+    int haveN = 0;
+    for (int h = 0; h < 24; h++) if (hHave[h]) haveN++;
+    Serial.printf("история: вчера %s — часов в карте %d, пустых %d\n",
+                  dayPrefix, haveN, 24 - haveN);
+    if (haveN >= 24) {
+      saveHistYest(todayKey - 1);
+      gHistWant = false; gHistForce = false; gHistStep = 0; gHistHold = false;
+      return;
+    }
+    for (int h = 0; h < 24; h++)
+      if (!hHave[h]) hList[hListN++] = (uint8_t)h;
+    gHistStep = 2;
     return;
   }
 }
@@ -2157,6 +4382,49 @@ bool findDpBool(const char* js, const char* dp, bool* out) {
   return true;
 }
 
+// Применить dps из JSON к нашим переменным. Возвращает true, если пришло
+// напряжение/мощность (DP 6).
+// ВАЖНО: каждый DP применяем ТОЛЬКО если он реально есть в кадре — реле
+// присылает отчёты по одному полю, и «switch» в таком кадре нет.
+bool applyDps(const char* js) {
+  long e = 0, t10 = 0;
+  bool sw = false;
+  if (findDpInt(js, "1", &e) && e > 0) { gEnergy = e / 100.0f; gEnergyMs = millis(); }
+  if (findDpBool(js, "16", &sw)) gRelay = sw;
+  if (findDpInt(js, "101", &t10)) { gTemp = t10 / 10.0f; gTempValid = true; gTempMs = millis(); }
+  return parsePhase(js);
+}
+
+// Разобрать УЖЕ ПРИШЕДШИЕ кадры от реле, ничего не выбрасывая.
+// Раньше здесь стоял drainSocket(), который просто читал и ВЫБРАСЫВАЛ байты:
+// вместе с ними терялись и push-отчёты с DP 6 (напряжение/мощность). Из-за
+// этого напряжение приходило только из облака — раз в минуту и через TLS.
+// Теперь ждём только если в сокете уже есть заголовок кадра: без данных
+// функция выходит сразу и цикл не тормозит.
+int tuyaPollPushes(unsigned long budgetMs, bool* gotPhase) {
+  int frames = 0;
+  unsigned long t0 = millis();
+  while (millis() - t0 <= budgetMs && sock.available() >= (int)HEADER_LEN) {
+    uint8_t buf[1024], payload[512], cmd = 0;
+    int got = readFrame(buf, sizeof(buf), 120);
+    if (got < 0) {
+      // Кадр не разобрался (обрезан/больше буфера) — поток сбит, начинаем заново.
+      sock.stop();
+      sessionReady = false;
+      break;
+    }
+    int plen = parseFrame(buf, got, sessionKey, &cmd, payload, sizeof(payload));
+    if (plen <= 4 || plen >= (int)sizeof(payload)) continue;
+    payload[plen] = 0;
+    const char* js = (const char*)(payload + 4);
+    if (!strstr(js, "\"dps\"")) continue;
+    frames++;
+    if (applyDps(js) && gotPhase) *gotPhase = true;
+    esp_task_wdt_reset();
+  }
+  return frames;
+}
+
 bool tuyaQuery() {
   if (!sock.connected()) {
     sock.stop();
@@ -2170,16 +4438,18 @@ bool tuyaQuery() {
   bool gotDps = false;
   bool gotPhase = false;
 
+  // Сначала забираем то, что реле уже прислало само (push-отчёты с DP 6).
+  // Если напряжения ещё нет — спрашиваем явно.
+  bool polledPhase = false;
+  int pushN = tuyaPollPushes(150UL, &polledPhase);
+  if (pushN > 0) { gotDps = true; gotPhase = polledPhase; }
+
   // DP 6 (напряжение и мощность) приходит не на каждый запрос, поэтому раньше
   // делали три попытки с таймаутом 5 с — это 23 с блокировки цикла. Теперь
   // одна попытка и короткий таймаут: не пришло — спросим в следующем проходе.
-  for (int attempt = 0; attempt < 1; attempt++) {
-    drainSocket(80);
-
+  for (int attempt = 0; attempt < (gotPhase ? 0 : 1); attempt++) {
     seqNo++;
-    const char* req = (attempt == 0)
-                      ? "{}"
-                      : "{}";
+    const char* req = "{}";
     size_t n = buildFrame(CMD_DP_QUERY, (const uint8_t*)req, strlen(req), sessionKey, buf);
     sock.write(buf, n);
 
@@ -2199,19 +4469,7 @@ bool tuyaQuery() {
     if (!strstr(js, "\"dps\"")) continue;
 
     gotDps = true;
-
-    long e = 0, t10 = 0;
-    bool sw = false;
-    findDpInt(js, "1", &e);
-    findDpBool(js, "16", &sw);
-    if (findDpInt(js, "101", &t10)) { gTemp = t10 / 10.0f; gTempValid = true; }
-
-    if (e > 0) gEnergy = e / 100.0f;    // нет DP1 — счётчик не обнуляем
-    gRelay = sw;
-
-    if (parsePhase(js)) gotPhase = true;
-    if (gotPhase) break;              // напряжение поймали — хватит
-    delay(100);
+    if (applyDps(js)) gotPhase = true;
   }
 
   if (gotDps) {
@@ -2235,6 +4493,8 @@ bool httpGet(const String& url, String& out, int timeout = 2500) {
 }
 
 bool fetchFromApi() {
+  gApiN++;
+  gApiLast = millis();
   String body;
   if (!httpGet(String(PC_API) + "/relay", body)) return false;
 
@@ -2256,8 +4516,8 @@ bool fetchFromApi() {
   // Источник истины: облачный phase_a (свежий каждые ~16 с),
   // а локальный DP 6 — только запасной вариант с пометкой возраста.
   float t = num("temperature");
-  if (t > -900 && t > -40 && t < 125) { gTemp = t; gTempValid = true; }
-  float ek = num("energy_kwh"); if (ek > 0) gEnergy = ek;
+  if (t > -900 && t > -40 && t < 125) { gTemp = t; gTempValid = true; gTempMs = millis(); }
+  float ek = num("energy_kwh"); if (ek > 0) { gEnergy = ek; gEnergyMs = millis(); }
 
   // Второй запрос (/stats) — не чаще раза в 5 минут: он нужен только для
   // сверки «сегодня» с компьютером, а висит столько же, сколько /relay.
@@ -2390,6 +4650,16 @@ bool initSD() {
 // из-за этого при обрыве канала в /energy.csv появлялись дыры.
 void writeSd() {
   if (!gSdOk) return;
+  // GAPFILL переписывает /energy.csv целиком: пока идёт подмена, новую строку
+  // не пишем — иначе файл вырастет между чтением и записью.
+  if (gGapBusy) return;
+  // Пока histTick проверяет/дозаполняет вчерашний день, сегодняшние строки
+  // не пишем: иначе вчерашние окажутся после них и порядок дат сломается.
+  // Дольше двух минут историю не держим — это важнее одной проверки.
+  if (gHistHold) {
+    if (millis() - gHistHoldMs < HIST_HOLD_MS) return;
+    gHistHold = false;
+  }
   if (millis() - gSdLast < 30000) return;        // не чаще раза в 30 с
   // Нет напряжения — строку не пишем вообще. Раньше при gEnergy>0 писалась
   // строка с v=0, и она ломала мин/среднее (23-26.10 таких было 100 %).
@@ -2400,12 +4670,23 @@ void writeSd() {
   struct tm ti;
   if (!getLocalTime(&ti, 100)) return;
 
+  // Смена месяца: старый рабочий файл уходит в /energy-YYYY-MM.csv,
+  // новый начинается с заголовка. Пока ротация не удалась — не пишем,
+  // чтобы не смешать два месяца в одном файле.
+  int monthStamp = (ti.tm_year + 1900) * 12 + ti.tm_mon;
+  if (gSdMonth < 0) {
+    gSdMonth = monthStamp;
+  } else if (monthStamp != gSdMonth) {
+    if (!rotateHistory(monthStamp, false)) return;
+    gSdMonth = monthStamp;
+  }
+
   char stamp[24];
   snprintf(stamp, sizeof(stamp), "%04d-%02d-%02d %02d:%02d:%02d",
            ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday, ti.tm_hour, ti.tm_min, ti.tm_sec);
 
   File f = SD.open("/energy.csv", FILE_APPEND);
-  if (!f) return;
+  if (!f) { if (gSdWriteFail < 1000) gSdWriteFail++; return; }
   // 7-я колонка — температура. Если её ещё нет (плата только включилась),
   // поле остаётся пустым: пустое значение разбор пропускает.
   if (gTempValid)
@@ -2415,6 +4696,7 @@ void writeSd() {
     f.printf("%s,%.0f,%.0f,%.2f,%d,%.2f,\n", stamp, gVoltage, gPower, gEnergy,
              gRelay ? 1 : 0, gCost);
   f.close();
+  gSdWriteFail = 0;
   gSdLast = millis();      // отсчёт 30 с — от реальной записи, а не от попытки
   gSdRows++;
 }
@@ -2504,6 +4786,39 @@ void durStr(long sec, char* b, size_t n) {
   else                  snprintf(b, n, "%ld Ч %02ld МИН", sec / 3600, (sec % 3600) / 60);
 }
 
+// ---------------------------------------------------------------- метки получения
+// «12:31» — если показатель получен сегодня, «ВЧЕРА 23:45» — вчера,
+// «30.10 23:45» — раньше. Данным больше 5 минут — метка жёлтая.
+bool stampStale(unsigned long ms) {
+  return ms != 0 && (millis() - ms) > 300000UL;
+}
+
+void stampStr(unsigned long ms, char* b, size_t n) {
+  if (ms == 0) { snprintf(b, n, "—"); return; }             // ещё не приходило
+  time_t now = time(nullptr);
+  if (now < 1700000000L) { snprintf(b, n, "—"); return; }   // часы не синхронизированы
+  time_t at = now - (time_t)((millis() - ms) / 1000UL);
+  struct tm tn, ta;
+  localtime_r(&now, &tn);
+  localtime_r(&at, &ta);
+  // Разницу в днях считаем от местной полуночи: tm_yday не переживает смену года.
+  time_t midN = now - (tn.tm_hour * 3600L + tn.tm_min * 60L + tn.tm_sec);
+  time_t midA = at  - (ta.tm_hour * 3600L + ta.tm_min * 60L + ta.tm_sec);
+  long days = (long)((midN - midA) / 86400L);
+  if (days <= 0)      snprintf(b, n, "%02d:%02d", ta.tm_hour, ta.tm_min);
+  else if (days == 1) snprintf(b, n, "ВЧЕРА %02d:%02d", ta.tm_hour, ta.tm_min);
+  else                snprintf(b, n, "%02d.%02d %02d:%02d",
+                               ta.tm_mday, ta.tm_mon + 1, ta.tm_hour, ta.tm_min);
+}
+
+// Строка «ПОЛУЧЕНО 12:31» мелким шрифтом под значением окна.
+void drawStamp(int x, int y, unsigned long ms, uint16_t bg) {
+  char t[24], b[40];
+  stampStr(ms, t, sizeof(t));
+  snprintf(b, sizeof(b), "ПОЛУЧЕНО %s", t);
+  drawTxt(x, y, b, stampStale(ms) ? cWarn : cMuted, bg, 1);
+}
+
 // ---------------------------------------------------------------- семисегментные цифры
 const uint8_t SEG7_DIG[10] = {
   0b0111111,  // 0
@@ -2589,17 +4904,17 @@ int seg7W(const char* s, int dh, int gap) {
 
 // ---------------------------------------------------------------- каркас экрана
 const int HDR_H = 46;
-const int TAP_SLOP = 4;          // допуск попадания по тачу, px
+const int TAP_SLOP = 10;          // допуск попадания по тачу, px
 
 struct Block { int x, y, w, h, scr; };
 const Block BLOCKS[5] = {
-  {  6,  50, 228, 64, SCR_VOLT    },
-  {  6, 118, 110, 56, SCR_TEMP    },
-  // x=118, а не 120: щель между карточками 116..119 больше не «мёртвая».
-  // Раньше в ней всегда выигрывала ТЕМПЕРАТУРА, и МОЩНОСТЬ «не нажималась».
-  {118, 118, 116, 56, SCR_POWER   },
-  {  6, 178, 228, 66, SCR_TODAY   },
-  {  6, 248, 228, 62, SCR_WEATHER },
+  // Зоны доведены ДО КРАЁВ экрана. Раньше касание у кромки (x=239 при крае
+  // карточки 234) промахивалось мимо всех карточек — и «ничего не открывалось».
+  {  0,  44, 240, 72, SCR_VOLT    },
+  {  0, 112, 116, 64, SCR_TEMP    },
+  {116, 112, 124, 64, SCR_POWER   },   // примыкает к ТЕМП без щели
+  {  0, 174, 240, 72, SCR_TODAY   },
+  {  0, 244, 240, 74, SCR_WEATHER },
 };
 // Экран сторожа оставлен в коде, но недоступен: вернём, когда будет
 // большой экран. Пока вместо него на нижней полосе сеть/карта/сигнал.
@@ -2771,20 +5086,349 @@ void wdTick() {
   wdSummary();
 }
 
-// ---------------------------------------------------------------- RGB-светодиод
-// Трёхцветный: 4 — красный, 16 — зелёный, 17 — синий. Горит при низком уровне.
-void ledInit() {
-  pinMode(4, OUTPUT); pinMode(16, OUTPUT); pinMode(17, OUTPUT);
-  digitalWrite(4, HIGH); digitalWrite(16, HIGH); digitalWrite(17, HIGH);
+// ============================================================================
+//  ПОДСВЕТКА ЭКРАНА — GPIO 21, ШИМ (канал 0). Команда DISP, эндпоинт /disp.
+// ============================================================================
+// Было analogWrite(21, 255): всегда на полную. Стало: яркость 0..255 через
+// ledc (5 кГц, 8 бит) и запись в NVS. Ночью экран гаснет, тач работает;
+// касание включает подсветку на 20 с (DISP NOTOUCH отключает эту реакцию).
+#define BL_PIN      21
+#define BL_CH       0
+#define BL_WAKE_MS  20000UL
+
+bool     gDispOn     = true;     // подсветка включена
+uint8_t  gDispBright = 255;      // рабочая яркость 1..255
+bool     gDispTouch  = true;     // касание при погашенном экране включает свет
+unsigned long gDispWakeUntil = 0;
+
+bool dispWakeActive() { return gDispWakeUntil && (long)(millis() - gDispWakeUntil) < 0; }
+bool dispIsDark()     { return !gDispOn && !dispWakeActive(); }
+
+void dispApply() {
+  uint8_t v = gDispOn ? gDispBright : (dispWakeActive() ? gDispBright : 0);
+  ledcWrite(BL_CH, v);
+}
+void dispPwmBegin() {
+  ledcSetup(BL_CH, 5000, 8);
+  ledcAttachPin(BL_PIN, BL_CH);
+  dispApply();
+}
+void dispLoad() {
+  Preferences p;
+  if (!p.begin("disp", true)) return;
+  uint8_t v = p.getUChar("bright", 255);
+  gDispTouch = p.getBool("touch", true);
+  p.end();
+  if (v == 0) { gDispOn = false; gDispBright = 255; }
+  else        { gDispOn = true;  gDispBright = v;   }
+}
+void dispSave() {
+  Preferences p;
+  if (!p.begin("disp", false)) return;
+  p.putUChar("bright", gDispOn ? gDispBright : 0);
+  p.putBool("touch", gDispTouch);
+  p.end();
+}
+void dispSet(bool on, uint8_t bright) {
+  if (bright > 0) gDispBright = bright;
+  gDispOn = on;
+  if (!on) gDispWakeUntil = 0;
+  dispApply();
+  dispSave();
+}
+void dispWake() {
+  if (gDispOn || !gDispTouch || gDispBright == 0) return;
+  gDispWakeUntil = millis() + BL_WAKE_MS;
+  ledcWrite(BL_CH, gDispBright);
+}
+void dispTick() {
+  if (gDispWakeUntil && !dispWakeActive()) {
+    gDispWakeUntil = 0;
+    if (!gDispOn) ledcWrite(BL_CH, 0);
+  }
+}
+String dispState() {
+  char b[64];
+  snprintf(b, sizeof(b), "DISP: on=%d bright=%u%s",
+           gDispOn ? 1 : 0, (unsigned)(gDispOn ? gDispBright : 0),
+           gDispTouch ? "" : " notouch");
+  return String(b);
+}
+void dispCommand(const String& up) {
+  String a = up.substring(4); a.trim();
+  if (a.length() == 0) { Serial.println(dispState()); return; }
+  if (a == "ON")           { dispSet(true, 255); Serial.println("DISP: OK on"); }
+  else if (a == "OFF")     { dispSet(false, 0);  Serial.println("DISP: OK off"); }
+  else if (a == "TOGGLE")  {     // приложение шлёт это по кнопке «Экран платы»
+    if (gDispOn) dispSet(false, 0);
+    else         dispSet(true, 0);   // вернуть последнюю яркость, не обязательно 255
+    Serial.println(gDispOn ? "DISP: OK on" : "DISP: OK off");
+  }
+  else if (a == "TOUCH")   { gDispTouch = true;  dispSave(); Serial.println("DISP: OK touch=1"); }
+  else if (a == "NOTOUCH") { gDispTouch = false; dispSave(); Serial.println("DISP: OK touch=0"); }
+  else {
+    int v = a.toInt();
+    if (v <= 0) { dispSet(false, 0); Serial.println("DISP: OK off"); return; }
+    if (v > 100) v = 100;
+    uint8_t b = (uint8_t)((v * 255 + 50) / 100);
+    dispSet(true, b);
+    char o[40];
+    snprintf(o, sizeof(o), "DISP: OK bright=%u", (unsigned)b);
+    Serial.println(o);
+  }
+}
+
+// ============================================================================
+//  ДИНАМИК — GPIO 26 (DAC2), ШИМ-тон (канал 1). Команда BEEP.
+// ============================================================================
+// Подключение: GPIO 26 -> «+» динамика, GND -> «−». Пьезоизлучатель или
+// маленький динамик 8 Ом; громкость маленькая (не более 50 % ШИМ).
+// По умолчанию звук ВЫКЛЮЧЕН: включается командой BEEP ON.
+#define BEEP_PIN   26
+#define BEEP_CH    1
+
+bool     gBeepOn    = false;
+uint8_t  gBeepVol   = 50;        // 0..100
+bool     gBeepTouch = true;      // пик при касании
+bool     gBeepHour  = false;     // пик в начале часа (по умолчанию нет)
+
+static uint8_t  bpLeft = 0;      // сколько пиков ещё осталось
+static uint16_t bpFreq = 2200, bpOn = 40, bpOff = 60;
+static bool     bpSounding = false;
+static unsigned long bpAt = 0;
+
+void beepTone(bool on) {
+  if (on) {
+    ledcWriteTone(BEEP_CH, bpFreq);
+    uint16_t duty = (uint16_t)((uint32_t)gBeepVol * 127 / 100);  // 127 = 50 % ШИМ
+    ledcWrite(BEEP_CH, duty);
+  } else {
+    ledcWriteTone(BEEP_CH, 0);
+    ledcWrite(BEEP_CH, 0);
+  }
+}
+void beepStop() { bpLeft = 0; bpSounding = false; beepTone(false); }
+void beepInit() {
+  ledcSetup(BEEP_CH, 2000, 8);
+  ledcAttachPin(BEEP_PIN, BEEP_CH);
+  beepTone(false);
+  Preferences p;
+  if (!p.begin("beep", true)) return;
+  gBeepOn    = p.getBool("on", false);
+  gBeepVol   = p.getUChar("vol", 50);
+  gBeepTouch = p.getBool("touch", true);
+  gBeepHour  = p.getBool("hour", false);
+  p.end();
+  if (gBeepVol > 100) gBeepVol = 100;
+}
+void beepSave() {
+  Preferences p;
+  if (!p.begin("beep", false)) return;
+  p.putBool("on", gBeepOn);
+  p.putUChar("vol", gBeepVol);
+  p.putBool("touch", gBeepTouch);
+  p.putBool("hour", gBeepHour);
+  p.end();
+}
+void beepPlay(uint8_t n, uint16_t freq, uint16_t onMs, uint16_t offMs) {
+  if (gBeepVol == 0 || n == 0) return;
+  bpLeft = n; bpFreq = freq; bpOn = onMs; bpOff = offMs;
+  bpSounding = true; bpAt = millis();
+  bpLeft--;                       // первый пик пошёл сразу
+  beepTone(true);
+}
+void beepStart(uint8_t n, uint16_t freq, uint16_t onMs, uint16_t offMs) {
+  if (!gBeepOn) return;
+  beepPlay(n, freq, onMs, offMs);
+}
+void beepStartForce(uint8_t n, uint16_t freq, uint16_t onMs, uint16_t offMs) {
+  beepPlay(n, freq, onMs, offMs);   // BEEP TEST — даже при выключенном звуке
+}
+void beepTick() {
+  if (!bpSounding && bpLeft == 0) return;
+  unsigned long now = millis();
+  if (bpSounding) {
+    if (now - bpAt >= bpOn) { beepTone(false); bpSounding = false; bpAt = now; }
+  } else if (bpLeft > 0 && now - bpAt >= bpOff) {
+    bpLeft--; bpSounding = true; bpAt = now; beepTone(true);
+  }
+}
+String beepState() {
+  char b[64];
+  snprintf(b, sizeof(b), "BEEP: on=%d vol=%u touch=%d hour=%d",
+           gBeepOn ? 1 : 0, (unsigned)gBeepVol,
+           gBeepTouch ? 1 : 0, gBeepHour ? 1 : 0);
+  return String(b);
+}
+void beepCommand(const String& up) {
+  String a = up.substring(4); a.trim();
+  if (a.length() == 0) { Serial.println(beepState()); return; }
+  if (a == "ON")   { gBeepOn = true;  beepSave(); Serial.println("BEEP: OK on"); }
+  else if (a == "OFF") { gBeepOn = false; beepStop(); beepSave(); Serial.println("BEEP: OK off"); }
+  else if (a == "TEST") { Serial.println("BEEP: OK test"); beepStartForce(1, 2200, 80, 0); }
+  else if (a.startsWith("VOL")) {
+    int v = a.substring(3).toInt();
+    if (v < 0) v = 0;
+    if (v > 100) v = 100;
+    gBeepVol = (uint8_t)v;
+    beepSave();
+    char o[32];
+    snprintf(o, sizeof(o), "BEEP: OK vol=%d", v);
+    Serial.println(o);
+    beepStartForce(1, 2200, 60, 0);
+  }
+  else if (a == "TOUCH") { gBeepTouch = !gBeepTouch; beepSave();
+    Serial.printf("BEEP: OK touch=%d\n", gBeepTouch ? 1 : 0); }
+  else if (a == "HOUR")  { gBeepHour = !gBeepHour; beepSave();
+    Serial.printf("BEEP: OK hour=%d\n", gBeepHour ? 1 : 0); }
+  else Serial.println("BEEP: ON|OFF|TEST|VOL n|TOUCH|HOUR");
+}
+
+// Сигналы тревоги: напряжение вне 207..253 В дольше 10 с — три пика;
+// перегрев реле > 55 °C — длинный пик раз в 5 минут; пропала карта — два пика;
+// начало часа — один пик (если BEEP HOUR).
+void beepEvents() {
+  static unsigned long last = 0;
+  static unsigned long badSince = 0, alarmAt = 0, tempAt = 0;
+  static bool sdWas = true;
+  static int lastHour = -1;
+  if (millis() - last < 500UL) return;
+  last = millis();
+
+  if (!gSdOk && sdWas) beepStart(2, 1200, 100, 90);   // карта только что пропала
+  sdWas = gSdOk;
+  if (!gBeepOn) return;
+
+  bool fresh = gPhaseMs && (millis() - gPhaseMs < 30000UL);
+  bool bad = fresh && (gVoltage < V_NORM_LO || gVoltage > V_NORM_HI);
+  if (bad) { if (!badSince) badSince = millis(); }
+  else badSince = 0;
+  if (badSince && millis() - badSince > 10000UL && millis() - alarmAt > 300000UL) {
+    alarmAt = millis();
+    beepStart(3, 1800, 120, 100);
+  }
+  if (gTempValid && gTemp > 55.0f && millis() - tempAt > 300000UL) {
+    tempAt = millis();
+    beepStart(1, 1500, 600, 0);
+  }
+  struct tm ti;
+  if (getLocalTime(&ti, 10)) {
+    if (lastHour != ti.tm_hour) {
+      if (gBeepHour && lastHour >= 0 && ti.tm_min < 2) beepStart(1, 2400, 50, 0);
+      lastHour = ti.tm_hour;
+    }
+  }
+}
+
+// ============================================================================
+//  RGB-СВЕТОДИОД — 4 (R), 16 (G), 17 (B), горят при НИЗКОМ уровне.
+// ============================================================================
+// v4.4: светодиод показывает состояние платы, яркость — ШИМ (каналы 2,3,4),
+// чтобы ночью гореть тускло. Приоритет: красный > оранжевый > жёлтый > зелёный.
+#define LED_R_PIN 4
+#define LED_G_PIN 16
+#define LED_B_PIN 17
+#define LED_R_CH  2
+#define LED_G_CH  3
+#define LED_B_CH  4
+
+enum { LEDS_BOOT = 0, LEDS_RED, LEDS_ORANGE, LEDS_YELLOW, LEDS_GREEN, LEDS_DIM, LEDS_OFF };
+
+int           gLedState = LEDS_GREEN;
+uint8_t       gLedR = 255, gLedG = 255, gLedB = 255;   // что уже записано в ШИМ
+unsigned long gLedAt = 0;
+bool          gLedBlinkOn = true;
+unsigned long gLedBootUntil = 0;
+int           gLedOverride = -1;
+unsigned long gLedOverrideUntil = 0;
+
+void ledSetRaw(uint8_t r, uint8_t g, uint8_t b) {
+  if (r == gLedR && g == gLedG && b == gLedB) return;
+  gLedR = r; gLedG = g; gLedB = b;
+  ledcWrite(LED_R_CH, 255 - r);      // светодиод горит при НИЗКОМ уровне
+  ledcWrite(LED_G_CH, 255 - g);
+  ledcWrite(LED_B_CH, 255 - b);
 }
 void ledSet(bool r, bool g, bool b) {
-  digitalWrite(4,  r ? LOW : HIGH);
-  digitalWrite(16, g ? LOW : HIGH);
-  digitalWrite(17, b ? LOW : HIGH);
+  ledSetRaw(r ? 255 : 0, g ? 255 : 0, b ? 255 : 0);
 }
-void ledUpdate() {
-  // v4.3: сторож отключён — мигать больше нечем. Зелёный всегда.
-  ledSet(false, true, false);
+void ledInit() {
+  ledcSetup(LED_R_CH, 5000, 8); ledcAttachPin(LED_R_PIN, LED_R_CH);
+  ledcSetup(LED_G_CH, 5000, 8); ledcAttachPin(LED_G_PIN, LED_G_CH);
+  ledcSetup(LED_B_CH, 5000, 8); ledcAttachPin(LED_B_PIN, LED_B_CH);
+  gLedR = gLedG = gLedB = 255;       // «всё выключено» (ШИМ = 0)
+  gLedState = LEDS_BOOT;
+  ledSetRaw(0, 0, 255);              // синий на время загрузки
+}
+const char* ledName(int st) {
+  switch (st) {
+    case LEDS_BOOT:   return "blue";
+    case LEDS_RED:    return "red";
+    case LEDS_ORANGE: return "orange";
+    case LEDS_YELLOW: return "yellow";
+    case LEDS_GREEN:  return "green";
+    case LEDS_DIM:    return "green-dim";
+    default:          return "off";
+  }
+}
+int ledWant() {
+  if (gLedOverride >= 0 && (long)(millis() - gLedOverrideUntil) < 0) return gLedOverride;
+  if (gLedBootUntil && (long)(millis() - gLedBootUntil) < 0) return LEDS_BOOT;
+  bool wifi = (WiFi.status() == WL_CONNECTED);
+  if (!wifi || gRelayFailRun >= 2) return LEDS_RED;          // нет связи с реле
+  if (!gSdOk || gSdWriteFail >= 2) return LEDS_ORANGE;       // карта/запись
+  if (!gNetOk || gCloudFailRun >= 3) return LEDS_YELLOW;     // интернета нет
+  if (dispIsDark()) return LEDS_DIM;                         // экран погашен
+  return LEDS_GREEN;
+}
+void ledTick() {
+  unsigned long now = millis();
+  int st = ledWant();
+  if (st != gLedState) { gLedState = st; gLedAt = now; gLedBlinkOn = true; }
+  if (st == LEDS_ORANGE) {
+    if (now - gLedAt >= 500UL) { gLedAt = now; gLedBlinkOn = !gLedBlinkOn; }
+  } else gLedBlinkOn = true;
+  switch (st) {
+    case LEDS_BOOT:   ledSetRaw(0, 0, 255); break;
+    case LEDS_RED:    ledSetRaw(255, 0, 0); break;
+    case LEDS_ORANGE: ledSetRaw(gLedBlinkOn ? 255 : 0, gLedBlinkOn ? 90 : 0, 0); break;
+    case LEDS_YELLOW: ledSetRaw(255, 190, 0); break;
+    case LEDS_GREEN:  ledSetRaw(0, 255, 0); break;
+    case LEDS_DIM:    ledSetRaw(0, 51, 0); break;     // 20 % — ночью не слепит
+    default:          ledSetRaw(0, 0, 0); break;
+  }
+}
+void ledUpdate() { ledTick(); }
+
+// Проверка глазами: LED TEST red|orange|yellow|green|blue|dim на 15 секунд.
+void ledCommand(const String& up) {
+  String a = up.substring(3); a.trim();
+  if (a.length() == 0) {
+    Serial.printf("LED: %s (net=%d relayFail=%u sd=%d sdw=%u dark=%d)\n",
+                  ledName(gLedState), gNetOk ? 1 : 0, (unsigned)gRelayFailRun,
+                  gSdOk ? 1 : 0, (unsigned)gSdWriteFail, dispIsDark() ? 1 : 0);
+    return;
+  }
+  if (a.startsWith("TEST")) {
+    String c = a.substring(4); c.trim(); c.toLowerCase();
+    int st = -1;
+    if (c == "red")         st = LEDS_RED;
+    else if (c == "orange") st = LEDS_ORANGE;
+    else if (c == "yellow") st = LEDS_YELLOW;
+    else if (c == "green")  st = LEDS_GREEN;
+    else if (c == "dim")    st = LEDS_DIM;
+    else if (c == "blue")   st = LEDS_BOOT;
+    else if (c == "off")    st = LEDS_OFF;
+    if (st < 0) { Serial.println("LED: TEST red|orange|yellow|green|dim|blue|off"); return; }
+    gLedOverride = st;
+    gLedOverrideUntil = millis() + 15000UL;
+    Serial.printf("LED: OK test %s 15 s\n", ledName(st));
+  } else if (a == "RESET") {
+    gLedOverride = -1; gLedOverrideUntil = 0;
+    Serial.println("LED: OK auto");
+  } else {
+    Serial.println("LED: TEST <цвет> | RESET");
+  }
 }
 
 // ---------------------------------------------------------------- иконка погоды
@@ -2932,15 +5576,20 @@ int fitScale(const char* s, int maxW, int maxScale) {
 // отсчёты каждые 5 минут, значит час h — это индексы h*12 .. h*12+11.
 // Границы проверяются всегда: соседний график уже падал с LoadProhibited,
 // когда цикл шёл до 6 при массиве из 5.
+// Маска точек — от выбранного дня: сегодня это h24Mask (живые замеры),
+// прошлый день — dayMask (прочитано с карты).
+static inline const uint8_t* maskCur() { return (gDayOffset > 0) ? dayMask : h24Mask; }
+
 float hourAverage(const float* vals, uint8_t bit, int h, int* samples) {
   if (samples) *samples = 0;
   if (h < 0 || h > 23) return 0;
+  const uint8_t* m = maskCur();
   float sum = 0;
   int n = 0;
   for (int s = 0; s < 12; s++) {
     int i = h * 12 + s;
     if (i < 0 || i >= H24_N) continue;
-    if (!(h24Mask[i] & bit)) continue;
+    if (!(m[i] & bit)) continue;
     float v = vals[i];
     if (v != v) continue;                     // NaN — пропускаем
     sum += v;
@@ -2950,23 +5599,41 @@ float hourAverage(const float* vals, uint8_t bit, int h, int* samples) {
   return n ? sum / n : 0;
 }
 
-// Заголовок над столбиками: слева «ПО ЧАСАМ», справа текущий час и его
-// среднее. Крупное мгновенное значение остаётся сверху окна.
+// Стрелка ‹ / › в строке заголовка: две линии, 9 px высотой.
+static void drawChevron(int cx, int cy, bool left, uint16_t col) {
+  int tip  = left ? cx - 2 : cx + 2;      // вершина
+  int back = left ? cx + 3 : cx - 3;      // хвост
+  uiLine(back, cy - 4, tip, cy, col);
+  uiLine(tip, cy, back, cy + 4, col);
+}
+
+// Заголовок над столбиками: слева стрелки ‹ › и дата выбранного дня,
+// справа — час и его среднее. Крупное мгновенное значение остаётся сверху окна.
+// Зоны нажатий: 0..44 — ‹, 44..116 — дата (возврат к сегодня), 116..156 — ›.
 void drawHourTitle(int y, const float* vals, uint8_t bit, const char* unit, int dec) {
-  drawTxt(10, y, "ПО ЧАСАМ", cMuted, cBg, 1);
-  char b[40];
+  uiFill(0, y - 1, 240, 10, cBg);            // полоса под стрелки и дату
+  drawChevron(16, y + 4, true,  (gDayOffset < gDayMaxOffset) ? cAccent : cLine);
+  drawChevron(126, y + 4, false, (gDayOffset > 0) ? cAccent : cLine);
+  drawTxtC(80, y, (gDayOffset == 0) ? "СЕГОДНЯ" : gDayLabel,
+           (gDayOffset == 0) ? cGood : cText, cBg, 1);
+
+  char b[24];
   struct tm ti;
   int nowH = getLocalTime(&ti, 5) ? ti.tm_hour : -1;
+  // Нажали на столбик — показываем ТОТ час, иначе текущий.
+  // У прошлого дня «текущего часа» нет: показываем «--», пока не нажали столбик.
+  if (gChartHour >= 0)      nowH = gChartHour;
+  else if (gDayOffset > 0)  nowH = -1;
   if (nowH < 0) {
-    snprintf(b, sizeof(b), "ЧАС --");
+    snprintf(b, sizeof(b), "--");
   } else {
     int n = 0;
     float a = hourAverage(vals, bit, nowH, &n);
-    if (n == 0)     snprintf(b, sizeof(b), "ЧАС %02d: --", nowH);
-    else if (dec)   snprintf(b, sizeof(b), "ЧАС %02d: %.1f %s", nowH, a, unit);
-    else            snprintf(b, sizeof(b), "ЧАС %02d: %.0f %s", nowH, a, unit);
+    if (n == 0)     snprintf(b, sizeof(b), "%02d: --", nowH);
+    else if (dec)   snprintf(b, sizeof(b), "%02d: %.1f %s", nowH, a, unit);
+    else            snprintf(b, sizeof(b), "%02d: %.0f %s", nowH, a, unit);
   }
-  drawTxtR(230, y, b, cMuted, cBg, 1);
+  drawTxtR(234, y, b, cMuted, cBg, 1);
 }
 
 // 24 столбика: width 8 px, зазор 1 px, шаг 9 px -> 24*9 = 216 px.
@@ -3009,6 +5676,11 @@ void drawHourBars(int x, int y, int w, int h, const float* vals, uint8_t bit,
 
     struct tm ti;
     int nowH = getLocalTime(&ti, 5) ? ti.tm_hour : -1;
+    // если пользователь нажал на столбик — выделяем выбранный час
+    // если пользователь нажал на столбик — выделяем выбранный час,
+    // иначе у прошлого дня текущего часа нет и выделять нечего
+    if (gChartHour >= 0)     nowH = gChartHour;
+    else if (gDayOffset > 0) nowH = -1;
     int base = y + h - 1;
     int plotH = h - 4;
     for (int i = 0; i < 24; i++) {
@@ -3183,38 +5855,56 @@ void drawVoltScreen() {
   drawTxt(226 - vw2, 65, verdict, vc, cElev, 1);
   drawTxt(150, 86, gRelay ? "РЕЛЕ ВКЛ" : "РЕЛЕ ВЫКЛ", gRelay ? cGood : cBadC, cBg, 1);
 
-  drawTxt(12, 104, "НОРМА 207-253 В", cMuted, cBg, 1);
-  drawTxt(12, 116, "ГОСТ 32144-2013", cMuted, cBg, 1);
+  drawStamp(12, 104, gPhaseMs, cBg);        // когда напряжение реально пришло
+  drawTxt(12, 116, "НОРМА 207-253 В", cMuted, cBg, 1);
+  drawTxt(12, 128, "ГОСТ 32144-2013", cMuted, cBg, 1);
 
   const int colX[3] = { 12, 88, 164 };
   const char* lab[3] = { "МИН", "СРЕД", "МАКС" };
-  float val[3] = { (dayMinV < 900) ? dayMinV : 0,
-                   (dayVSec > 0) ? (float)(daySumV / dayVSec) : 0,
-                   dayMaxV };
-  int mins[3] = { dayMinVMin, -1, dayMaxVMin };
+  // Показатели — за ВЫБРАННЫЙ день: сегодня из живых day*, прошлый из dd*.
+  bool past = (gDayOffset > 0);
+  float val[3] = { past ? ((ddMinV < 900) ? ddMinV : 0) : ((dayMinV < 900) ? dayMinV : 0),
+                   past ? (ddSecV ? (float)(ddSumV / ddSecV) : 0)
+                        : (dayVSec > 0 ? (float)(daySumV / dayVSec) : 0),
+                   past ? ddMaxV : dayMaxV };
+  int mins[3] = { past ? ddMinVMin : dayMinVMin, -1, past ? ddMaxVMin : dayMaxVMin };
+  // У 23–26.10 в файле только строки из облака: напряжения нет вообще.
+  // Честнее показать «--», чем нули.
+  bool noV = past && ddSecV == 0;
   for (int i = 0; i < 3; i++) {
-    drawTxt(colX[i], 132, lab[i], cMuted, cBg, 1);
-    snprintf(b, sizeof(b), "%.0f", val[i]);
-    drawTxt(colX[i], 142, b, cText, cBg, 2);
+    drawTxt(colX[i], 140, lab[i], cMuted, cBg, 1);
+    if (noV) strcpy(b, "--");
+    else     snprintf(b, sizeof(b), "%.0f", val[i]);
+    drawTxt(colX[i], 150, b, cText, cBg, 2);
     hhmm(mins[i], b, sizeof(b));
     if (i == 1) strcpy(b, "24 Ч");
-    drawTxt(colX[i], 160, b, cMuted, cBg, 1);
+    drawTxt(colX[i], 168, b, cMuted, cBg, 1);
   }
-  uiVLine(80, 130, 42, cLine);
-  uiVLine(156, 130, 42, cLine);
+  uiVLine(80, 138, 44, cLine);
+  uiVLine(156, 138, 44, cLine);
 
-  float pct = (dayVSec > 0) ? 100.0f * dayOutSec / dayVSec : 0;
-  durStr(dayOutSec, b, sizeof(b));
+  long  outSec = past ? (long)ddOutV : dayOutSec;
+  long  secAll = past ? ddSecV : dayVSec;
+  float pct = (secAll > 0) ? 100.0f * outSec / secAll : 0;
+  durStr(outSec, b, sizeof(b));
   char line[64];
-  snprintf(line, sizeof(line), "ВНЕ НОРМЫ %.0f%%  %s", pct, b);
-  drawTxt(12, 176, line, (dayOutSec > 0) ? cWarn : cGood, cBg, 1);
+  if (noV) strcpy(line, "ВНЕ НОРМЫ --   ЗАМЕРОВ НЕТ");
+  else     snprintf(line, sizeof(line), "ВНЕ НОРМЫ %.0f%%  %s", pct, b);
+  drawTxt(12, 180, line, (!noV && outSec > 0) ? cWarn : (noV ? cMuted : cGood), cBg, 1);
 
   // График — самая дорогая часть окна. При точечном обновлении его не
   // перерисовываем: столбики за прошедшие часы не меняются.
-  drawHourTitle(192, h24V, 1, "В", 0);
+  // Сегодня — живые h24V, прошлый день — прочитанный с карты dayV.
+  const float* arrV = past ? dayV : h24V;
+  drawHourTitle(192, arrV, 1, "В", 0);
   if (!gSkipChart)
-    drawHourBars(10, 202, 220, 86, h24V, 1, cAccent, tft.color565(191, 219, 254), false);
-  drawTxt(10, 301, "СРЕДНЕЕ НАПРЯЖЕНИЕ ЗА КАЖДЫЙ ЧАС", cMuted, cBg, 1);
+    drawHourBars(10, 202, 220, 86, arrV, 1, cAccent, tft.color565(191, 219, 254), false);
+  // Кириллица в UTF-8 — 2 байта на букву: «СРЕДНЕЕ НАПРЯЖЕНИЕ ЗА КАЖДЫЙ ЧАС»
+  // это 67 байт, поэтому буфер с запасом, а не 48 (было переполнение стека).
+  char cap[80];
+  if (past) snprintf(cap, sizeof(cap), "СРЕДНЕЕ НАПРЯЖЕНИЕ ЗА %s", gDayLabel);
+  else      snprintf(cap, sizeof(cap), "СРЕДНЕЕ НАПРЯЖЕНИЕ ЗА КАЖДЫЙ ЧАС");
+  drawTxt(10, 301, cap, cMuted, cBg, 1);
 }
 
 // ---------------------------------------------------------------- окно температуры
@@ -3228,26 +5918,42 @@ void drawTempScreen() {
   int tw = seg7W(b, dh, gap);
   seg7Str(12, 54, dh, b, cTEMP_ACC, gap);
   drawTxt(12 + tw + 8, 80, "C", cMuted, cBg, 2);
-  drawTxt(12, 104, "ТЕМПЕРАТУРА КОРПУСА РЕЛЕ", cMuted, cBg, 1);
+  drawStamp(12, 104, gTempMs, cBg);         // когда температура реально пришла
+  drawTxt(12, 116, "ТЕМПЕРАТУРА КОРПУСА РЕЛЕ", cMuted, cBg, 1);
 
-  drawTxt(12, 118, "МАКС ЗА СУТКИ", cMuted, cBg, 1);
-  snprintf(b, sizeof(b), "%.1f", (dayMaxT > -100) ? dayMaxT : gTemp);
-  drawTxt(12, 128, b, cTEMP_ACC, cBg, 3);
-  hhmm(dayMaxTMin, b, sizeof(b));
-  drawTxt(12, 154, b, cMuted, cBg, 1);
+  // Показатели — за ВЫБРАННЫЙ день (сегодня из day*, прошлый из dd*).
+  bool past = (gDayOffset > 0);
+  char lab[40];
+  if (past) snprintf(lab, sizeof(lab), "МАКС ЗА %s", gDayLabel);
+  else      snprintf(lab, sizeof(lab), "МАКС ЗА СУТКИ");
+  drawTxt(12, 126, lab, cMuted, cBg, 1);
+  float tMax = past ? ddMaxT : dayMaxT;
+  if (past && ddSecT == 0) strcpy(b, "--");
+  else                     snprintf(b, sizeof(b), "%.1f", (tMax > -100) ? tMax : gTemp);
+  drawTxt(12, 136, b, cTEMP_ACC, cBg, 3);
+  hhmm(past ? ddMaxTMin : dayMaxTMin, b, sizeof(b));
+  drawTxt(12, 160, b, cMuted, cBg, 1);
 
-  drawTxt(100, 118, "СРЕДНЯЯ", cMuted, cBg, 1);
-  snprintf(b, sizeof(b), "%.1f", dayTSec ? (float)(daySumT / dayTSec) : gTemp);
-  drawTxt(100, 128, b, cText, cBg, 2);
+  drawTxt(100, 126, "СРЕДНЯЯ", cMuted, cBg, 1);
+  if (past && ddSecT == 0) strcpy(b, "--");
+  else snprintf(b, sizeof(b), "%.1f", past ? (ddSecT ? (float)(ddSumT / ddSecT) : gTemp)
+                                           : (dayTSec ? (float)(daySumT / dayTSec) : gTemp));
+  drawTxt(100, 136, b, cText, cBg, 2);
 
-  drawTxt(100, 152, "МИН", cMuted, cBg, 1);
-  snprintf(b, sizeof(b), "%.1f", (dayMinT < 900) ? dayMinT : gTemp);
-  drawTxt(148, 152, b, cMuted, cBg, 1);
+  drawTxt(100, 162, "МИН", cMuted, cBg, 1);
+  float tMin = past ? ddMinT : dayMinT;
+  if (past && ddSecT == 0) strcpy(b, "--");
+  else                     snprintf(b, sizeof(b), "%.1f", (tMin < 900) ? tMin : gTemp);
+  drawTxt(148, 162, b, cMuted, cBg, 1);
 
-  drawHourTitle(176, h24T, 2, "C", 1);
+  const float* arrT = past ? dayT : h24T;
+  drawHourTitle(176, arrT, 2, "C", 1);
   if (!gSkipChart)
-    drawHourBars(10, 186, 220, 86, h24T, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
-  drawTxt(10, 284, "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА КАЖДЫЙ ЧАС", cMuted, cBg, 1);
+    drawHourBars(10, 186, 220, 86, arrT, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
+  char cap[80];
+  if (past) snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА %s", gDayLabel);
+  else      snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА КАЖДЫЙ ЧАС");
+  drawTxt(10, 284, cap, cMuted, cBg, 1);
 }
 
 // ---------------------------------------------------------------- окно мощности
@@ -3263,31 +5969,77 @@ void drawPowerScreen() {
   seg7Str(12, 54, dh, b, cPOWER_ACC, gap);
   drawTxt(12 + pw + 8, 80, "ВТ", cMuted, cBg, 2);
 
+  drawStamp(12, 104, gPowerMs, cBg);        // когда мощность реально пришла
   // Именно мгновенная нагрузка через реле: по ней и видно включение перфоратора.
-  drawTxt(12, 104, "МГНОВЕННАЯ НАГРУЗКА ЧЕРЕЗ РЕЛЕ", cWarn, cBg, 1);
+  drawTxt(12, 116, "МГНОВЕННАЯ НАГРУЗКА ЧЕРЕЗ РЕЛЕ", cWarn, cBg, 1);
 
-  drawTxt(12, 118, "СРЕДНЯЯ", cMuted, cBg, 1);
-  snprintf(b, sizeof(b), "%.0f ВТ", (dayPSec > 0) ? (float)(daySumP / dayPSec) : gPower);
-  drawTxt(12, 128, b, cText, cBg, 2);
+  // СРЕДНЯЯ за сутки: считаем по часовым средним из графика, а не по живым
+  // замерам — иначе после сброса или простоя цифра занижена.
+  // Средняя: НЕ учитываем текущий неполный час и взвешиваем по числу отсчётов.
+  // Для прошлого дня берём сводку, посчитанную при чтении карты.
+  bool past = (gDayOffset > 0);
+  const float* arrP = past ? dayP : h24P;
+  struct tm tiAvg;
+  int nowHAvg = getLocalTime(&tiAvg, 5) ? tiAvg.tm_hour : -1;
+  float avgP = 0;
+  if (past) {
+    avgP = ddSecP ? (float)(ddSumP / ddSecP) : 0;
+  } else {
+    int wAvg = 0;
+    for (int i = 0; i < 24; i++) {
+      if (i == nowHAvg) continue;                 // час ещё не прожит
+      int cnt = 0;
+      float hAvg = hourAverage(arrP, 4, i, &cnt);
+      if (cnt > 0) { avgP += hAvg * cnt; wAvg += cnt; }
+    }
+    if (wAvg > 0) avgP /= (float)wAvg;
+    else if (dayPSec > 0) avgP = (float)(daySumP / dayPSec);
+    else avgP = gPower;
+  }
 
-  drawTxt(118, 118, "ПИК", cMuted, cBg, 1);
-  snprintf(b, sizeof(b), "%.0f ВТ", dayMaxP);
-  drawTxt(118, 128, b, cWarn, cBg, 2);
-  hhmm(dayMaxPMin, b, sizeof(b));
-  drawTxt(118, 146, b, cMuted, cBg, 1);
+  drawTxt(12, 126, past ? "СРЕДНЯЯ ЗА ДЕНЬ" : "СРЕДНЯЯ С 00:00", cMuted, cBg, 1);
+  if (past && ddSecP == 0) strcpy(b, "--");
+  else                     snprintf(b, sizeof(b), "%.0f ВТ", avgP);
+  drawTxt(12, 136, b, cText, cBg, 2);
 
-  drawTxt(12, 160, "ТОК", cMuted, cBg, 1);
+  // ПИК берём из почасовых максимумов (их заполняет PWRFILL из облака),
+  // а не из dayMaxP: тот считается только по живым замерам и после сброса
+  // показывает ерунду. Для прошлого дня почасовых пиков из облака нет —
+  // берём максимум строк этого дня с карты.
+  float peakP = 0;
+  int peakH = -1;
+  if (past) {
+    peakP = ddMaxP;
+  } else {
+    for (int i = 0; i < 24; i++) {
+      if (h24PmOk[i] && h24Pm[i] > peakP) { peakP = h24Pm[i]; peakH = i; }
+    }
+    if (peakP < dayMaxP) { peakP = dayMaxP; peakH = -1; }   // живой максимум больше
+  }
+
+  drawTxt(118, 126, "ПИК", cMuted, cBg, 1);
+  if (past && ddSecP == 0) strcpy(b, "--");
+  else                     snprintf(b, sizeof(b), "%.0f ВТ", peakP);
+  drawTxt(118, 136, b, cWarn, cBg, 2);
+  if (peakH >= 0) snprintf(b, sizeof(b), "%02d:%02d", peakH, (int)h24PmMin[peakH]);
+  else            hhmm(past ? ddPMin : dayMaxPMin, b, sizeof(b));
+  drawTxt(118, 154, b, cMuted, cBg, 1);
+
+  drawTxt(12, 166, "ТОК", cMuted, cBg, 1);
   snprintf(b, sizeof(b), "%.2f А", gCurrent);
-  drawTxt(54, 160, b, cText, cBg, 2);
+  drawTxt(54, 166, b, cText, cBg, 2);
 
-  drawTxt(12, 178, "НАПРЯЖЕНИЕ X ТОК", cMuted, cBg, 1);
+  drawTxt(12, 180, "НАПРЯЖЕНИЕ X ТОК", cMuted, cBg, 1);
   snprintf(b, sizeof(b), "%.0f В  %.2f А  %.0f ВТ", gVoltage, gCurrent, gPower);
-  drawTxt(12, 190, b, cMuted, cBg, 1);
+  drawTxt(12, 192, b, cMuted, cBg, 1);
 
-  drawHourTitle(204, h24P, 4, "ВТ", 0);
+  drawHourTitle(204, arrP, 4, "ВТ", 0);
   if (!gSkipChart)
-    drawHourBars(10, 214, 220, 72, h24P, 4, cPOWER_ACC, tft.color565(253, 230, 138), true);
-  drawTxt(10, 299, "СРЕДНЯЯ МОЩНОСТЬ ЗА КАЖДЫЙ ЧАС", cMuted, cBg, 1);
+    drawHourBars(10, 214, 220, 72, arrP, 4, cPOWER_ACC, tft.color565(253, 230, 138), true);
+  char cap[80];
+  if (past) snprintf(cap, sizeof(cap), "СРЕДНЯЯ МОЩНОСТЬ ЗА %s", gDayLabel);
+  else      snprintf(cap, sizeof(cap), "СРЕДНЯЯ МОЩНОСТЬ ЗА КАЖДЫЙ ЧАС");
+  drawTxt(10, 299, cap, cMuted, cBg, 1);
 }
 
 // ---------------------------------------------------------------- окно итогов
@@ -3300,6 +6052,12 @@ void drawTodayScreen() {
 
   char b[40];
   drawTxt(12, 52, "СЕГОДНЯ", cMuted, cBg, 1);
+  // Время последнего получения счётчика: и «сегодня», и счётчик считаются
+  // из него, поэтому метка стоит у обоих.
+  char et[24];
+  stampStr(gEnergyMs, et, sizeof(et));
+  uint16_t ec = stampStale(gEnergyMs) ? cWarn : cMuted;
+  drawTxtR(228, 52, et, ec, cBg, 1);
 
   float dKwh  = gDemoToday ? 123.45f  : myTodayKwh;
   float dCost = gDemoToday ? 1234.56f : myTodayCost;
@@ -3313,7 +6071,11 @@ void drawTodayScreen() {
   int s2 = fitScale(b, 100, 3);
   drawTxtR(228, 64, b, C_MONEY, cBg, s2);
   drawTxtR(228, 64 + 7 * s2 + 2, "РУБ", cMuted, cBg, 1);
-  uiVLine(120, 50, 48, cLine);
+  uiVLine(120, 50, 44, cLine);
+
+  // Счётчик целиком и время его последнего получения — одной строкой.
+  snprintf(b, sizeof(b), "СЧЁТЧИК %.2f  %s", gEnergy, et);
+  drawTxt(12, 96, b, ec, cBg, 1);
 
   uiHLine(12, 104, 216, cLine);
   drawTxtR(136, 108, "КВТ*Ч", cMuted, cBg, 1);
@@ -3379,6 +6141,14 @@ void drawTodayScreen() {
   drawTxt(12, y + 32, b, cMuted, cBg, 1);
   snprintf(b, sizeof(b), "СРЕДНИЙ ТАРИФ %.2f", measuredTariff());
   drawTxtR(228, y + 32, b, cMuted, cBg, 1);
+
+  // GAPFILL: если сегодня в истории были пропуски — мелкая жёлтая пометка.
+  // Мин/макс напряжения и пик мощности могли быть посчитаны без этих точек.
+  if (gapTodayCount() > 0) {
+    char gb[40];
+    snprintf(gb, sizeof(gb), "ПРОПУСКИ %d МИН", gapTodayMinutes());
+    drawTxt(12, y + 46, gb, cWarn, cBg, 1);
+  }
 }
 
 // ---------------------------------------------------------------- окно погоды
@@ -3488,7 +6258,18 @@ void drawWatchScreen() {
 }
 
 // ---------------------------------------------------------------- диспетчер
+void drawCalTarget(int x, int y, int step);   // объявлена ниже
+
 void drawScreen() {
+  gDrawN++;
+  gLastWinRefresh = millis();
+  if (gTapTest) { drawTapTest(); return; }
+  // Пока идёт калибровка тача — на экране только мишень
+  if (gCalStep > 0) {
+    if (gCalStep == 1) drawCalTarget(20, 20, 1);
+    else               drawCalTarget(220, 300, 2);
+    return;
+  }
   switch (gScreen) {
     case SCR_VOLT:    drawVoltScreen();    break;
     case SCR_TEMP:    drawTempScreen();    break;
@@ -3506,30 +6287,63 @@ void drawScreen() {
 // учитывала половину полей: смена мощности перерисовывала окно ВОЛЬТЫ целиком.
 uint32_t screenSig() {
   uint32_t h = 2166136261u ^ (uint32_t)(gScreen * 2654435761u);
+  // Выбранный день и час тоже видны на экране. Раньше их здесь не было:
+  // после dayShift() сигнатура не менялась, но это лечилось ручным сбросом
+  // gLastSig. Теперь отпечаток честно учитывает, ЧТО нарисовано.
+  h ^= (uint32_t)(gDayOffset * 2654435761u); h *= 16777619u;
+  h ^= (uint32_t)(gChartHour + 1);           h *= 16777619u;
   uint32_t v[20];
   int n = 0;
   switch (gScreen) {
     case SCR_VOLT:
-      v[n++] = (uint32_t)(int32_t)lroundf(gVoltage);
+      v[n++] = (uint32_t)(int32_t)(time(nullptr) / 60);   // метка «получено» видна
+      v[n++] = (uint32_t)(int32_t)(lroundf(gVoltage / 2.0f) * 2);
       v[n++] = gRelay ? 1u : 0u;
-      v[n++] = (uint32_t)(int32_t)lroundf(((dayMinV < 900) ? dayMinV : 0) * 10.0f);
-      v[n++] = (uint32_t)(int32_t)lroundf(dayMaxV * 10.0f);
-      v[n++] = (uint32_t)(int32_t)((dayVSec > 0) ? (daySumV / dayVSec) * 10.0 : 0);
-      v[n++] = (uint32_t)dayOutSec;
+      // Для прошлого дня на экране dd* (сводка из карты), а не живые day*.
+      // Раньше сюда попадали ЖИВЫЕ daySumV/dayMaxV: statsTick() менял их
+      // каждые 5 с, сигнатура «менялась», и окно заливалось белым — то самое
+      // частое моргание при просмотре прошлых дней.
+      if (gDayOffset > 0) {
+        v[n++] = (uint32_t)(int32_t)lroundf(((ddMinV < 900) ? ddMinV : 0) * 10.0f);
+        v[n++] = (uint32_t)(int32_t)lroundf(ddMaxV * 10.0f);
+        v[n++] = (uint32_t)(int32_t)((ddSecV > 0) ? (ddSumV / ddSecV) * 10.0 : 0);
+        v[n++] = (uint32_t)ddOutV;
+      } else {
+        v[n++] = (uint32_t)(int32_t)lroundf(((dayMinV < 900) ? dayMinV : 0) * 10.0f);
+        v[n++] = (uint32_t)(int32_t)lroundf(dayMaxV * 10.0f);
+        v[n++] = (uint32_t)(int32_t)((dayVSec > 0) ? (daySumV / dayVSec) * 10.0 : 0);
+        v[n++] = (uint32_t)dayOutSec;
+      }
       break;
     case SCR_TEMP:
-      v[n++] = gTempValid ? (uint32_t)(int32_t)lroundf(gTemp * 10.0f) : 0xFFFFFFu;
-      v[n++] = (uint32_t)(int32_t)lroundf(((dayMinT < 900) ? dayMinT : 0) * 10.0f);
-      v[n++] = (uint32_t)(int32_t)lroundf(dayMaxT * 10.0f);
-      v[n++] = (uint32_t)(int32_t)((dayTSec > 0) ? (daySumT / dayTSec) * 10.0 : 0);
+      v[n++] = (uint32_t)(int32_t)(time(nullptr) / 60);   // метка «получено» видна
+      v[n++] = gTempValid ? (uint32_t)(int32_t)(lroundf(gTemp) * 10) : 0xFFFFFFu;
+      if (gDayOffset > 0) {
+        v[n++] = (uint32_t)(int32_t)lroundf(((ddMinT < 900) ? ddMinT : 0) * 10.0f);
+        v[n++] = (uint32_t)(int32_t)lroundf(ddMaxT * 10.0f);
+        v[n++] = (uint32_t)(int32_t)((ddSecT > 0) ? (ddSumT / ddSecT) * 10.0 : 0);
+      } else {
+        v[n++] = (uint32_t)(int32_t)lroundf(((dayMinT < 900) ? dayMinT : 0) * 10.0f);
+        v[n++] = (uint32_t)(int32_t)lroundf(dayMaxT * 10.0f);
+        v[n++] = (uint32_t)(int32_t)((dayTSec > 0) ? (daySumT / dayTSec) * 10.0 : 0);
+      }
       break;
     case SCR_POWER:
-      v[n++] = (uint32_t)(int32_t)lroundf(gPower);
-      v[n++] = (uint32_t)(int32_t)lroundf(gVoltage);
-      v[n++] = (uint32_t)(int32_t)fmodf((float)((dayPSec > 0) ? daySumP / dayPSec : 0), 1000.0f);
-      v[n++] = (uint32_t)(int32_t)lroundf(dayMaxP);
+      v[n++] = (uint32_t)(int32_t)(time(nullptr) / 60);   // метка «получено» видна
+      // Округляем ГРУБО: иначе каждое изменение на 1 Вт заливало область
+      // окна белым — это и выглядело как «мини-вспышка» каждые 30 секунд.
+      v[n++] = (uint32_t)(int32_t)(lroundf(gPower / 25.0f) * 25);
+      v[n++] = (uint32_t)(int32_t)(lroundf(gVoltage / 2.0f) * 2);
+      if (gDayOffset > 0) {
+        v[n++] = (uint32_t)(int32_t)fmodf((float)((ddSecP > 0) ? ddSumP / ddSecP : 0), 1000.0f);
+        v[n++] = (uint32_t)(int32_t)lroundf(ddMaxP);
+      } else {
+        v[n++] = (uint32_t)(int32_t)fmodf((float)((dayPSec > 0) ? daySumP / dayPSec : 0), 1000.0f);
+        v[n++] = (uint32_t)(int32_t)lroundf(dayMaxP);
+      }
       break;
     case SCR_TODAY:
+      v[n++] = (uint32_t)(int32_t)(time(nullptr) / 60);   // метка счётчика видна
       v[n++] = (uint32_t)(int32_t)lroundf(myTodayKwh * 100.0f);
       v[n++] = (uint32_t)(int32_t)lroundf(myTodayCost * 100.0f);
       v[n++] = (uint32_t)(int32_t)lroundf(yKwh * 100.0f);
@@ -3562,8 +6376,9 @@ uint32_t screenSig() {
       v[n++] = (uint32_t)(int32_t)lroundf(wHum);
       v[n++] = (uint32_t)(int32_t)lroundf(wWind);
       v[n++] = wOk ? 1u : 0u;
-      v[n++] = (uint32_t)gRssi;
-      v[n++] = (uint32_t)gSdRows;
+      // rssi и число строк карты сюда НЕ входят: они меняются каждые
+      // 15-60 с и вызывали полную перерисовку пяти карточек (~139 КБ SPI).
+      // Статус-бар обновляется отдельным таймером раз в 60 с (loop).
       break;
   }
   for (int i = 0; i < n; i++) { h ^= v[i]; h *= 16777619u; }
@@ -3576,8 +6391,10 @@ uint32_t screenSig() {
 // Главный экран: фон НЕ заливаем целиком (это 63 600 px, ~25 мс). Каждый
 // блок и шапка заливаются сами в drawBlockFrame/drawTopBar, а промежутки
 // между блоками никогда не рисуются — там и так фон.
+unsigned long gRedrawN = 0;        // счётчик полных перерисовок главного экрана
 void refreshMain() {
   if (gCap) { drawScreen(); return; }
+  Serial.printf("перерисовка #%lu\n", ++gRedrawN);
   gNoClear = true;
   drawMain();
   gNoClear = false;
@@ -3587,25 +6404,28 @@ void refreshMain() {
 // поверх теми же пикселями. Полной заливки экрана нет, тач не блокируется.
 void refreshWindow() {
   if (gCap) { drawScreen(); return; }
+  gWinRefreshN++;
   switch (gScreen) {
     case SCR_WATCH:
       uiFill(0, 50, 240, 168, cBg);     // весь список
       break;
     case SCR_VOLT:
-      uiFill(10,  50, 214, 52, cBg);    // цифры, вердикт, реле
-      uiFill(10, 128, 216, 44, cBg);    // мин / сред / макс
-      uiFill(12, 176, 216,  8, cBg);    // вне нормы
+      uiFill(10,  50, 214, 60, cBg);    // цифры, метка получения, вердикт, реле
+      if (gDayOffset == 0) {            // для прошлого дня сводка dd* статична
+        uiFill(10, 136, 216, 44, cBg);  // мин / сред / макс
+        uiFill(12, 178, 216,  8, cBg);  // вне нормы
+      }
       break;
     case SCR_TEMP:
-      uiFill(10,  50, 214, 52, cBg);    // цифры
-      uiFill(10, 116, 216, 48, cBg);    // макс / средняя / мин
+      uiFill(10,  50, 214, 60, cBg);    // цифры и метка получения
+      if (gDayOffset == 0) uiFill(10, 116, 216, 56, cBg);  // макс / средняя / мин
       break;
     case SCR_POWER:
-      uiFill(10,  50, 214, 52, cBg);    // цифры
-      uiFill(10, 116, 216, 82, cBg);    // средняя / пик / ток / U*I
+      uiFill(10,  50, 214, 60, cBg);    // цифры и метка получения
+      if (gDayOffset == 0) uiFill(10, 116, 216, 88, cBg);  // средняя / пик / ток / U*I
       break;
     default:
-      uiFill(10, 54, 220, 240, cBg);    // «ИТОГИ» и «ПОГОДА»
+      uiFill(10, 50, 220, 244, cBg);    // «ИТОГИ» и «ПОГОДА»
       break;
   }
   gNoClear = true;
@@ -3620,10 +6440,102 @@ bool inRect(int x, int y, int rx, int ry, int rw, int rh) {
   return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
 }
 
+// Области графиков: {x, y, w, h}. Столбики идут от x шагом 9 px, 24 штуки.
+static const int CHART_VOLT[4]  = { 10, 202, 220, 86 };
+static const int CHART_TEMP[4]  = { 10, 186, 220, 86 };
+static const int CHART_POWER[4] = { 10, 214, 220, 72 };
+
+// ---------------------------------------------------------------- листание дней
+// Строка заголовка графика (там, где нарисованы ‹ дата ›) — по экранам.
+static int chartTitleY() {
+  if (gScreen == SCR_VOLT)  return 192;
+  if (gScreen == SCR_TEMP)  return 176;
+  if (gScreen == SCR_POWER) return 204;
+  return -1;
+}
+static const int* chartRect() {
+  if (gScreen == SCR_VOLT)  return CHART_VOLT;
+  if (gScreen == SCR_TEMP)  return CHART_TEMP;
+  if (gScreen == SCR_POWER) return CHART_POWER;
+  return NULL;
+}
+
+// «ЗАГРУЗКА…» на месте графика: чтение суток с карты занимает 1–3 с, и
+// человек должен видеть, что плата работает, а не что она зависла.
+static void drawDayLoading() {
+  const int* ch = chartRect();
+  if (!ch) return;
+  gDrawN++;                                  // это тоже перерисовка (загрузка)
+  uiFill(ch[0], ch[1], ch[2], ch[3], cBg);
+  drawTxtC(ch[0] + ch[2] / 2, ch[1] + ch[3] / 2 - 12, "ЗАГРУЗКА...", cAccent, cBg, 2);
+  drawTxtC(ch[0] + ch[2] / 2, ch[1] + ch[3] / 2 + 6, gDayLabel, cText, cBg, 2);
+  drawTxtC(ch[0] + ch[2] / 2, ch[1] + ch[3] / 2 + 22, "ЧИТАЮ КАРТУ", cMuted, cBg, 1);
+}
+
+// Сменить день: delta = +1 — на день назад (‹), -1 — ближе к сегодня (›).
+// resetStats() здесь НЕ вызывается: сегодняшняя статистика (мин/сред/макс и
+// h24*) остаётся целой, работаем только с буфером day*.
+void dayShift(int delta) {
+  int n = gDayOffset + delta;
+  if (n < 0) n = 0;
+  if (n > gDayMaxOffset) n = gDayMaxOffset;
+  if (n == gDayOffset) return;                    // дальше некуда — ничего не делаем
+  gDayOffset = n;
+  gChartHour = -1;                                // выбранный час сбрасываем
+  if (n == 0) {
+    drawScreen();                                 // сегодня — живые h24*, читать нечего
+  } else {
+    if (gDayLoaded != n) {
+      char date[12], label[8];
+      if (dayDate(n, date, sizeof(date), label, sizeof(label)))
+        memcpy(gDayLabel, label, sizeof(label));
+      // Ровно ОДНА перерисовка «ЗАГРУЗКА…» и ровно ОДНА — результат.
+      // Пока флаг поднят, loop() не имеет права запускать обновление окна.
+      gDayLoading = true;
+      drawDayLoading();                           // 1–3 с чтения — показать, что живы
+      dayLoadFromSd(n);                           // внутри обновит gDayMaxOffset
+      gDayLoading = false;
+    }
+    drawScreen();
+  }
+  gLastDraw = millis();
+  gLastSig = screenSig();
+  gLastWinFull = millis();
+}
+
 void handleTapAt(int x, int y) {
   if (gScreen != SCR_MAIN) {
+    // Стрелки ‹ › и дата в строке заголовка графика (левая треть, центр,
+    // правая треть полосы). Проверяем ДО графика: полоса вплотную над ним.
+    int ty = chartTitleY();
+    if (ty > 0 && y >= ty - 6 && y <= ty + 10) {
+      if (x < 44)       { dayShift(+1); return; }        // ‹ — прошлый день
+      else if (x < 116) {                                // дата — назад к сегодня
+        if (gDayOffset != 0) {
+          gDayOffset = 0; gChartHour = -1;
+          drawScreen();
+          gLastDraw = millis(); gLastSig = screenSig(); gLastWinFull = millis();
+        }
+        return;
+      }
+      else if (x < 156) { dayShift(-1); return; }        // › — следующий день
+    }
+    // Нажатие на столбик графика — показать значение этого часа
+    const int* ch = chartRect();
+    if (ch && inRect(x, y, ch[0], ch[1], ch[2], ch[3])) {
+      int hour = (x - ch[0]) / 9;
+      if (hour < 0)  hour = 0;
+      if (hour > 23) hour = 23;
+      gChartHour = (gChartHour == hour) ? -1 : hour;   // повторно — назад к текущему
+      drawScreen();
+      gLastDraw = millis();
+      gLastSig = screenSig();
+      gLastWinFull = millis();
+      return;
+    }
     if (inRect(x, y, 0, 0, 240, 52)) {          // вся верхняя полоса — «назад»
       gScreen = SCR_MAIN;
+      gChartHour = -1;
       drawScreen();
       gLastDraw = millis();
       gLastSig = screenSig();
@@ -3662,6 +6574,25 @@ void handleTapAt(int x, int y) {
 
 void handleTouch() {
   static unsigned long lock = 0;
+  // Экран погашен: ЛЮБОЕ касание включает подсветку на 20 с (DISP NOTOUCH — отключить).
+  if (!gDispOn && tpDown()) dispWake();
+  if (gTapTest) {
+    if (millis() < lock) return;
+    if (!tpDown()) return;
+    int tx = 0, ty = 0;
+    if (tpPoint(&tx, &ty)) { lock = millis() + 250; drawTapTest(); }
+    return;
+  }
+  if (millis() < lock) return;
+  if (gCalStep > 0) {
+    if (!tpDown()) return;
+    int cx = 0, cy = 0;
+    if (tpPoint(&cx, &cy)) {
+      lock = millis() + 400;
+      calTick(cx, cy);
+    }
+    return;
+  }
   if (millis() < lock) return;
   if (!tpDown()) return;
 
@@ -3680,6 +6611,7 @@ void handleTouch() {
   Serial.printf("TAP %d %d\n", x, y);
   gTouchMs = millis();
   gTouchSkip = millis() + 1200;      // 1.2 с не начинаем тяжёлые сетевые дела
+  if (gBeepOn && gBeepTouch) beepStart(1, 2600, 25, 0);   // тихий пик подтверждения
   handleTapAt(x, y);
 }
 
@@ -3946,120 +6878,2801 @@ void printCsvT() {
 
 
 // ============================================================================
-//  ВЕБ-СТРАНИЦА — проверка без USB
+//  ВЕБ-СТРАНИЦА — текущие значения, история по дням, графики
 // ============================================================================
-//  http://192.168.1.51/         — все цифры, как на экране
-//  http://192.168.1.51/data     — те же данные в JSON
-//  http://192.168.1.51/csv      — последние 40 строк истории
-//  http://192.168.1.51/day      — строки истории по часам
+//  http://192.168.1.51/                    — страница (светлая, с графиками)
+//  http://192.168.1.51/data                — текущие значения в JSON
+//  http://192.168.1.51/history?date=ДЕНЬ   — почасовая история за день
+//  http://192.168.1.51/days                — даты, за которые есть данные
+//  http://192.168.1.51/events              — последние переключения реле
+//  /csv /day /full /files /tap /rotate     — диагностика (как раньше)
 WebServer gWeb(80);
 
-String webPage() {
-  char b[64];
-  String h = F("<!DOCTYPE html><meta charset=utf-8>"
-               "<meta name=viewport content='width=device-width,initial-scale=1'>"
-               "<title>Дом — энергия</title><style>"
-               "body{font:16px/1.5 system-ui,sans-serif;background:#F8FAFF;color:#0F172A;"
-               "margin:0;padding:16px;max-width:520px}"
-               "h1{font-size:22px;margin:0 0 4px}"
-               ".s{color:#5A6478;font-size:13px;margin-bottom:14px}"
-               ".c{background:#fff;border:1px solid #DBE4F5;border-radius:14px;"
-               "padding:14px 16px;margin:10px 0}"
-               ".l{font-size:12px;color:#5A6478;text-transform:uppercase;letter-spacing:.06em}"
-               ".v{font-size:30px;font-weight:700;letter-spacing:-.02em}"
-               ".b{color:#2563EB}.g{color:#0F9F6E}.r{color:#DB2777}.m{color:#94A3B8}"
-               "table{width:100%;border-collapse:collapse;font-size:15px}"
-               "td{padding:5px 0;border-bottom:1px solid #EDF1F9}"
-               "td:last-child{text-align:right;font-weight:600}"
-               "</style>");
+// ---- агрегат одного часа для /history ----
+struct HourAgg {
+  uint16_t n;          // всего строк за час
+  uint16_t vN;         // строк с напряжением
+  uint16_t pN;         // строк с мощностью
+  uint16_t tN;         // строк с температурой
+  float pSum, pMax, vSum, tSum;
+  int32_t eFirstT;     // ЧЧММСС первого счётчика в часе
+  int32_t eLastT;      // ЧЧММСС последнего счётчика в часе
+  float eFirstE, eLastE;
+};
+static HourAgg sHA[24];
+// Пики часов из облака (файл /energy.peak, его пишет PWRHIST). Нужны, чтобы
+// после замены мощности на среднюю /history всё равно показывал реальный пик.
+static uint16_t sPeakP[24];
+static bool sPeakOk[24];
+static uint8_t sPeakMin[24];     // минута пика внутри часа (0..59)
+static uint8_t sPeakDur[24];     // минут выше 80 % пика
+static bool sPeakTValid[24];     // минута пика известна (новый формат файла)
 
-  h += "<h1>Дом — энергия</h1>";
-  snprintf(b, sizeof(b), "<div class=s>%s · %d dBm · карта %d строк</div>",
-           WiFi.localIP().toString().c_str(), gRssi, gSdRows);
-  h += b;
+// "2026-10-30 " — дата в начале строки CSV.
+static bool isDatePrefix(const char* s, int len) {
+  if (len < 11) return false;
+  for (int i = 0; i < 10; i++) {
+    char c = s[i];
+    if (i == 4 || i == 7) { if (c != '-') return false; }
+    else if (c < '0' || c > '9') return false;
+  }
+  return s[10] == ' ';
+}
 
-  // напряжение
+// /energy.peak: строки "YYYY-MM-DD,HH,ПИК[,МИНУТА,МИНУТ_ВЫШЕ_80%]". PWRHIST
+// дописывает их после успешной перезаписи CSV. Читаем перед разбором дня;
+// последняя строка для пары (дата,час) побеждает.
+// Старые файлы без минуты тоже читаем: тогда pmaxT остаётся null.
+static void loadPeakOverlay(const char* date) {
+  memset(sPeakP, 0, sizeof(sPeakP));
+  memset(sPeakOk, 0, sizeof(sPeakOk));
+  memset(sPeakMin, 0, sizeof(sPeakMin));
+  memset(sPeakDur, 0, sizeof(sPeakDur));
+  memset(sPeakTValid, 0, sizeof(sPeakTValid));
+  if (!gSdOk) return;
+  File f = SD.open("/energy.peak", FILE_READ);
+  if (!f) return;
+  int rd = 0;
+  while (f.available()) {
+    String l = f.readStringUntil('\n');
+    if ((++rd & 63) == 0) esp_task_wdt_reset();
+    l.trim();
+    if (l.length() < 16 || memcmp(l.c_str(), date, 10) != 0 || l[10] != ',') continue;
+    int c = l.indexOf(',', 11);
+    if (c < 0) continue;
+    int hh = l.substring(11, c).toInt();
+    int c2 = l.indexOf(',', c + 1);
+    int pk, mi = -1, du = 0;
+    if (c2 < 0) {
+      pk = l.substring(c + 1).toInt();
+    } else {
+      pk = l.substring(c + 1, c2).toInt();
+      int c3 = l.indexOf(',', c2 + 1);
+      if (c3 < 0) {
+        mi = l.substring(c2 + 1).toInt();
+      } else {
+        mi = l.substring(c2 + 1, c3).toInt();
+        du = l.substring(c3 + 1).toInt();
+      }
+    }
+    if (hh >= 0 && hh < 24 && pk > 0 && pk <= 20000) {
+      sPeakP[hh] = (uint16_t)pk;
+      sPeakOk[hh] = true;
+      sPeakMin[hh] = (mi >= 0 && mi < 60) ? (uint8_t)mi : 0;
+      sPeakDur[hh] = (du >= 0 && du < 60) ? (uint8_t)du : 0;
+      sPeakTValid[hh] = (mi >= 0 && mi < 60);
+    }
+  }
+  f.close();
+}
+
+// Быстрое число из CSV — без String и без atof (в сутках ~2900 строк).
+static float csvNum(const char*& p, const char* end) {
+  while (p < end && (*p == ' ' || *p == '\t')) p++;
+  bool neg = false;
+  if (p < end && *p == '-') { neg = true; p++; }
+  long ip = 0;
+  bool any = false;
+  while (p < end && *p >= '0' && *p <= '9') { ip = ip * 10 + (*p - '0'); p++; any = true; }
+  float f = (float)ip;
+  if (p < end && *p == '.') {
+    p++;
+    float d = 0.1f;
+    while (p < end && *p >= '0' && *p <= '9') {
+      f += (float)(*p - '0') * d;
+      d *= 0.1f;
+      p++;
+      any = true;
+    }
+  }
+  if (!any) f = 0;
+  return neg ? -f : f;
+}
+static void csvSkip(const char*& p, const char* end) {
+  while (p < end && *p != ',') p++;
+  if (p < end) p++;
+}
+
+// Разбор одной строки дня: дата,В,Вт,кВт·ч,реле,руб,°C
+// Температура (7-е поле) может отсутствовать или быть пустой.
+static void histAdd(const char* s, int len) {
+  if (len < 20) return;
+  int hh = (s[11] - '0') * 10 + (s[12] - '0');
+  if (hh < 0 || hh > 23) return;
+  int mm = (s[14] - '0') * 10 + (s[15] - '0');
+  int ss = (s[17] - '0') * 10 + (s[18] - '0');
+  int tod = hh * 10000 + mm * 100 + ss;
+  const char* p = s + 19;
+  const char* end = s + len;
+  if (p >= end || *p != ',') return;
+  p++;
+  float v  = csvNum(p, end); csvSkip(p, end);
+  float pw = csvNum(p, end); csvSkip(p, end);
+  float en = csvNum(p, end); csvSkip(p, end);
+  csvSkip(p, end);                 // реле
+  csvSkip(p, end);                 // рубли
+  bool hasT = false;
+  float tv = 0;
+  while (p < end && (*p == ' ' || *p == '\t')) p++;
+  if (p < end && *p != '\r' && *p != '\n' && *p != ',') { tv = csvNum(p, end); hasT = true; }
+
+  HourAgg& a = sHA[hh];
+  a.n++;
+  // Строки, восстановленные из облака, помечены нулевым напряжением:
+  // в мощность и напряжение они не идут (иначе средняя занижается).
+  if (v > 50.0f) {
+    a.vSum += v; a.vN++;
+  }
+  // Мощность считаем и для восстановленных строк (v=0), если PWRHIST уже
+  // подставил туда среднюю из облака. Строки с pw=0 по-прежнему не шумят.
+  if (v > 50.0f || pw > 0.5f) {
+    a.pSum += pw; a.pN++;
+    if (pw > a.pMax) a.pMax = pw;
+  }
+  // Счётчик: первый и последний ПО ВРЕМЕНИ. Файл не отсортирован
+  // (архивные дни вклеены в середину), поэтому нельзя брать «как идёт».
+  if (en > 0.0f) {
+    if (a.eFirstT < 0 || tod < a.eFirstT) { a.eFirstT = tod; a.eFirstE = en; }
+    if (a.eLastT < 0 || tod > a.eLastT)  { a.eLastT = tod;  a.eLastE = en; }
+  }
+  if (hasT && tv > -40.0f && tv < 100.0f) { a.tSum += tv; a.tN++; }
+}
+
+// Чтение файла БЛОКАМИ по 512 байт (а не readStringUntil на каждую строку).
+// Цель — ответ быстрее 3 секунд; при переполнении времени отдаём что успели.
+static bool histScan(const char* date, unsigned long* msOut, bool* truncOut) {
+  memset(sHA, 0, sizeof(sHA));
+  for (int i = 0; i < 24; i++) { sHA[i].eFirstT = -1; sHA[i].eLastT = -1; }
+  loadPeakOverlay(date);
+  if (msOut) *msOut = 0;
+  if (truncOut) *truncOut = false;
+  if (!gSdOk) return false;
+  File f = SD.open("/energy.csv", FILE_READ);
+  if (!f) return false;
+
+  size_t sz = f.size();
+  size_t start = 0;
+  bool today = false;
+  struct tm ti;
+  if (getLocalTime(&ti, 10)) {
+    char td[12];
+    snprintf(td, sizeof(td), "%04d-%02d-%02d",
+             ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+    if (strcmp(td, date) == 0) {
+      today = true;
+      // Сегодняшние строки всегда в конце — не читаем весь файл.
+      size_t o = findDayStartOffset(f, date);
+      if (o > start) start = o;
+      if (o == 0 && !fileTailIsToday(f, date)) { f.close(); return true; }
+    }
+  }
+  // Файл НЕ отсортирован по времени: 23–26.10 вклеены в середину.
+  // Поэтому читаем целиком, а для очень больших файлов — последние 400 КБ.
+  if (!today && sz > 1048576UL) start = sz - 1000000UL;   // как в /days
+  if (start >= sz) { f.close(); return true; }
+  f.seek(start);
+
+  static uint8_t hbuf[512 + 256];
+  int carry = 0;
+  int guard = 0;
+  unsigned long t0 = millis();
+  bool trunc = false;
+  while (f.available()) {
+    int n = (int)f.read(hbuf + carry, 512);
+    if (n <= 0) break;
+    int total = carry + n;
+    int i = 0;
+    while (i < total) {
+      uint8_t* nl = (uint8_t*)memchr(hbuf + i, '\n', total - i);
+      if (!nl) break;
+      int len = (int)(nl - (hbuf + i));
+      if (len >= 20 && memcmp(hbuf + i, date, 10) == 0 &&
+          hbuf[i + 10] == ' ' && hbuf[i + 13] == ':')
+        histAdd((const char*)(hbuf + i), len);
+      i = (int)(nl - hbuf) + 1;
+      if ((++guard & 1023) == 0) { esp_task_wdt_reset(); yield(); }
+    }
+    carry = total - i;
+    if (carry > 0) memmove(hbuf, hbuf + i, carry);
+    if (carry > 240) carry = 0;          // защита от строки без перевода строки
+    esp_task_wdt_reset();
+    if (millis() - t0 > 3000UL) { trunc = true; break; }
+  }
+  f.close();
+  if (msOut) *msOut = millis() - t0;
+  if (truncOut) *truncOut = trunc;
+  return true;
+}
+
+static String histJson(const char* date, unsigned long ms, bool trunc) {
+  String out;
+  out.reserve(3600);
+  char b[200];
+  snprintf(b, sizeof(b), "{\"date\":\"%s\",\"ms\":%lu,\"trunc\":%s,\"hours\":[",
+           date, ms, trunc ? "true" : "false");
+  out += b;
+  for (int i = 0; i < 24; i++) {
+    HourAgg& a = sHA[i];
+    float kwh = 0;
+    if (a.eFirstT >= 0 && a.eLastT >= 0 && a.eLastE >= a.eFirstE) {
+      kwh = a.eLastE - a.eFirstE;
+      if (kwh < 0 || kwh > 100) kwh = 0;
+    }
+    char tbuf[12];
+    if (a.tN) snprintf(tbuf, sizeof(tbuf), "%.1f", a.tSum / a.tN);
+    else      strcpy(tbuf, "null");
+    float pmax = a.pMax;
+    bool tOk = false;
+    int  pmin = 0, pdur = 0;
+    if (sPeakOk[i] && (float)sPeakP[i] >= pmax) {
+      pmax = (float)sPeakP[i];
+      // пик из облака: вместе с ним известны минута пика и длительность
+      tOk = sPeakTValid[i];
+      pmin = sPeakMin[i];
+      pdur = sPeakDur[i];
+    }
+    if (i) out += ',';
+    if (tOk)
+      snprintf(b, sizeof(b),
+               "{\"h\":%d,\"kwh\":%.2f,\"p\":%.0f,\"pmax\":%.0f,\"pmaxT\":\"%02d:%02d\","
+               "\"pmaxDur\":%d,\"v\":%.0f,\"t\":%s,\"n\":%u}",
+               i, kwh, a.pN ? a.pSum / a.pN : 0.0f, pmax, i, pmin, pdur,
+               a.vN ? a.vSum / a.vN : 0.0f, tbuf, (unsigned)a.n);
+    else
+      snprintf(b, sizeof(b),
+               "{\"h\":%d,\"kwh\":%.2f,\"p\":%.0f,\"pmax\":%.0f,\"pmaxT\":null,"
+               "\"pmaxDur\":0,\"v\":%.0f,\"t\":%s,\"n\":%u}",
+               i, kwh, a.pN ? a.pSum / a.pN : 0.0f, pmax,
+               a.vN ? a.vSum / a.vN : 0.0f, tbuf, (unsigned)a.n);
+    out += b;
+  }
+  out += "]}";
+  return out;
+}
+
+// ---- кэш /history ----------------------------------------------------------
+// Раньше КАЖДЫЙ заход читал до 1 МБ с карты внутри handleClient — интерфейс
+// стоял больше секунды. Теперь готовый JSON держим в памяти: он годен, пока
+// дата та же и размер файла не изменился (как eventsFresh у /events).
+// Прошлые дни меняются только после PWRHIST/GAPFILL (там кэш сбрасывается),
+// поэтому им хватает пяти минут. У сегодняшнего дня запись идёт раз в 30 с —
+// размер файла меняется, и кэш сам себя сбрасывает; 30 с — верхняя граница.
+#define HIST_TTL_TODAY 30000UL
+#define HIST_TTL_PAST  300000UL
+static String sHistJsonOut;
+static char   sHistDate[12] = "";
+static size_t sHistFileSize = 0;
+static unsigned long sHistAt = 0;
+static void histCacheDrop() { sHistAt = 0; sHistDate[0] = 0; sHistFileSize = 0; }
+
+// ---------------------------------------------------------------------------
+//  /days — список дат, за которые есть строки (свежие первыми, до 30)
+// ---------------------------------------------------------------------------
+static char sDayList[46][11];
+static int sDayN = 0;
+static String sDaysJson;
+static size_t sDaysFileSize = 0;
+static unsigned long sDaysAt = 0;
+// Пропуски по дням (параллельно sDayList): сколько и минут. Нужны веб-странице,
+// чтобы пометить день жёлтым «есть пропуски».
+static uint16_t sDayGapN[46];
+static uint16_t sDayGapMi[46];
+
+static int dayAdd(const char* d) {
+  for (int i = 0; i < sDayN; i++) if (memcmp(sDayList[i], d, 10) == 0) return i;
+  if (sDayN >= 46) {
+    memmove(sDayList[0], sDayList[1], 10 * 45);
+    memmove(sDayGapN, sDayGapN + 1, sizeof(uint16_t) * 45);
+    memmove(sDayGapMi, sDayGapMi + 1, sizeof(uint16_t) * 45);
+    sDayN = 45;
+  }
+  memcpy(sDayList[sDayN], d, 10);
+  sDayList[sDayN][10] = 0;
+  sDayGapN[sDayN] = 0;
+  sDayGapMi[sDayN] = 0;
+  sDayN++;
+  return sDayN - 1;
+}
+
+static void daySortDesc() {
+  for (int i = 0; i < sDayN; i++)
+    for (int j = i + 1; j < sDayN; j++)
+      if (strcmp(sDayList[j], sDayList[i]) > 0) {
+        char t[11];
+        uint16_t a = sDayGapN[i], b = sDayGapMi[i];
+        memcpy(t, sDayList[i], 11);
+        memcpy(sDayList[i], sDayList[j], 11);
+        memcpy(sDayList[j], t, 11);
+        sDayGapN[i] = sDayGapN[j]; sDayGapMi[i] = sDayGapMi[j];
+        sDayGapN[j] = a;           sDayGapMi[j] = b;
+      }
+}
+
+static long gfLineEpoch(const char* s, int len);   // объявлена в блоке GAPFILL
+
+static bool scanDays(size_t* sizeOut, unsigned long* msOut) {
+  sDayN = 0;
+  memset(sDayGapN, 0, sizeof(sDayGapN));
+  memset(sDayGapMi, 0, sizeof(sDayGapMi));
+  if (!gSdOk) return false;
+  File f = SD.open("/energy.csv", FILE_READ);
+  if (!f) return false;
+  size_t sz = f.size();
+  if (sizeOut) *sizeOut = sz;
+  size_t start = (sz > 1048576UL) ? sz - 1048576UL : 0;
+  f.seek(start);
+  if (start > 0) f.readStringUntil('\n');     // первая строка может быть обрезана
+  static uint8_t dbuf[4096 + 128];
+  int carry = 0;
+  unsigned long t0 = millis();
+  long prevT = 0;
+  while (f.available()) {
+    int n = (int)f.read(dbuf + carry, 4096);
+    if (n <= 0) break;
+    int total = carry + n;
+    int i = 0;
+    while (i < total) {
+      uint8_t* nl = (uint8_t*)memchr(dbuf + i, '\n', total - i);
+      if (!nl) break;
+      int len = (int)(nl - (dbuf + i));
+      if (isDatePrefix((const char*)(dbuf + i), len)) {
+        int di = dayAdd((const char*)(dbuf + i));
+        long t = gfLineEpoch((const char*)(dbuf + i), len);
+        if (t > 0) {
+          if (prevT > 0) {
+            long dd = t - prevT;
+            // Разрыв > 2 минут — пропуск. Больше 6 часов и «назад по времени»
+            // не считаем: это вклеенные задним числом строки, а не дыра.
+            if (dd > 120 && dd <= 21600 && di >= 0) {
+              if (sDayGapN[di] < 65000) sDayGapN[di]++;
+              int mins = (int)((dd + 59) / 60);
+              if (sDayGapMi[di] < 60000) sDayGapMi[di] = (uint16_t)(sDayGapMi[di] + mins);
+            }
+          }
+          prevT = t;
+        }
+      }
+      i = (int)(nl - dbuf) + 1;
+    }
+    carry = total - i;
+    if (carry > 0) memmove(dbuf, dbuf + i, carry);
+    if (carry > 120) carry = 0;
+    esp_task_wdt_reset();
+    if (millis() - t0 > 5000UL) break;
+  }
+  f.close();
+  daySortDesc();
+  if (msOut) *msOut = millis() - t0;
+  return true;
+}
+
+static void buildDaysJson(unsigned long ms) {
+  String out;
+  out.reserve(46 * 26 + 64);
+  out = "{\"days\":[";
+  int shown = 0;
+  for (int i = 0; i < sDayN && shown < 30; i++, shown++) {
+    if (i) out += ',';
+    out += '"';
+    out += sDayList[i];
+    out += '"';
+  }
+  out += "],\"gaps\":[";
+  shown = 0;
+  for (int i = 0; i < sDayN && shown < 30; i++, shown++) {
+    if (i) out += ',';
+    out += '[';
+    out += String((unsigned)sDayGapN[i]);
+    out += ',';
+    out += String((unsigned)sDayGapMi[i]);
+    out += ']';
+  }
+  out += "],\"ms\":";
+  out += String(ms);
+  out += '}';
+  sDaysJson = out;
+}
+
+// Дата последней строки файла — дешёвая проверка «не начался ли новый день».
+static bool tailDate(char* out) {
+  File f = SD.open("/energy.csv", FILE_READ);
+  if (!f) return false;
+  size_t sz = f.size();
+  if (sz < 30) { f.close(); return false; }
+  size_t from = sz > 300 ? sz - 300 : 0;
+  f.seek(from);
+  char b[320];
+  int n = (int)f.read((uint8_t*)b, 300);
+  f.close();
+  if (n < 20) return false;
+  b[n] = 0;
+  int end = n;
+  while (end > 0 && (b[end - 1] == '\n' || b[end - 1] == '\r')) end--;
+  int s = end;
+  while (s > 0 && b[s - 1] != '\n') s--;
+  if (end - s < 11) return false;
+  if (!isDatePrefix(b + s, end - s)) return false;
+  memcpy(out, b + s, 10);
+  out[10] = 0;
+  return true;
+}
+
+static bool daysFresh(size_t szNow) {
+  if (sDaysJson.length() == 0) return false;
+  if (millis() - sDaysAt > 6UL * 3600UL * 1000UL) return false;
+  if (szNow < sDaysFileSize || szNow - sDaysFileSize > 65536UL) return false;
+  char td[11];
+  if (tailDate(td) && sDaysJson.indexOf(td) < 0) return false;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+//  /events — последние переключения реле (5-е поле CSV)
+// ---------------------------------------------------------------------------
+// Сколько строк истории просматривать при поиске событий реле.
+// Раньше здесь был malloc(8000*4) = 32 КБ: когда heap просел до 62 КБ,
+// свободного БЛОКА нужного размера не находилось и /events отдавал 500
+// навсегда. Теперь массив статический и меньше — 16 КБ в BSS.
+#define EV_MAX 4000
+static String sEvJson;
+static size_t sEvFileSize = 0;
+static unsigned long sEvAt = 0;
+
+static int cmpU32(const void* a, const void* b) {
+  uint32_t x = *(const uint32_t*)a, y = *(const uint32_t*)b;
+  return x < y ? -1 : (x > y ? 1 : 0);
+}
+static int dig2(const char* s) { return (s[0] - '0') * 10 + (s[1] - '0'); }
+static int dig4(const char* s) {
+  return (s[0] - '0') * 1000 + (s[1] - '0') * 100 + (s[2] - '0') * 10 + (s[3] - '0');
+}
+
+// Возвращает до 10 событий (время + новое состояние) в хронологическом порядке.
+// Время — локальный «эпохальный» счётчик (как lineEpoch), поэтому gmtime_r.
+static int scanEvents(uint32_t* outT, uint8_t* outR, size_t* sizeOut, unsigned long* msOut) {
+  if (msOut) *msOut = 0;
+  if (!gSdOk) return -1;
+  size_t szNow = 0;
+  struct tm ti;
+  if (!getLocalTime(&ti, 10)) return -1;
+  long now = daysFromCivil(ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday) * 86400L
+           + ti.tm_hour * 3600L + ti.tm_min * 60L + ti.tm_sec;
+  time_t cutT = (time_t)(now - 3L * 86400L);
+  struct tm ct;
+  gmtime_r(&cutT, &ct);
+  char cutDate[12];
+  snprintf(cutDate, sizeof(cutDate), "%04d-%02d-%02d",
+           ct.tm_year + 1900, ct.tm_mon + 1, ct.tm_mday);
+
+  static uint32_t arr[EV_MAX];      // статический: malloc 32 КБ не проходит при просадке heap
+  File f = SD.open("/energy.csv", FILE_READ);
+  if (!f) return -1;
+  size_t sz = f.size();
+  if (sizeOut) *sizeOut = sz;
+  size_t start = (sz > 1258291UL) ? sz - 800000UL : 0;
+  f.seek(start);
+  if (start > 0) f.readStringUntil('\n');
+
+  static uint8_t ebuf[4096 + 256];
+  int carry = 0;
+  int nEv = 0;
+  unsigned long t0 = millis();
+  while (f.available() && nEv < EV_MAX) {
+    int n = (int)f.read(ebuf + carry, 4096);
+    if (n <= 0) break;
+    int total = carry + n;
+    int i = 0;
+    while (i < total && nEv < EV_MAX) {
+      uint8_t* nl = (uint8_t*)memchr(ebuf + i, '\n', total - i);
+      if (!nl) break;
+      int len = (int)(nl - (ebuf + i));
+      const char* s = (const char*)(ebuf + i);
+      if (len >= 20 && isDatePrefix(s, len) && memcmp(s, cutDate, 10) >= 0) {
+        const char* p = s + 19;
+        const char* end = s + len;
+        if (p < end && *p == ',') {
+          p++;
+          float v = csvNum(p, end); csvSkip(p, end);
+          csvSkip(p, end);               // ватты
+          float en = csvNum(p, end); csvSkip(p, end);
+          float rel = csvNum(p, end);
+          // Только настоящие строки: у восстановленных из облака счётчик
+          // нулевой, а реле в них всегда 0 — иначе получаются ложные
+          // «выключения» каждый час.
+          if (v > 50.0f && en > 0.0f) {
+            long ep = daysFromCivil(dig4(s), (unsigned)dig2(s + 5), (unsigned)dig2(s + 8)) * 86400L
+                    + dig2(s + 11) * 3600L + dig2(s + 14) * 60L + dig2(s + 17);
+            arr[nEv++] = ((uint32_t)ep << 1) | (rel > 0.5f ? 1u : 0u);
+          }
+        }
+      }
+      i = (int)(nl - ebuf) + 1;
+    }
+    carry = total - i;
+    if (carry > 0) memmove(ebuf, ebuf + i, carry);
+    if (carry > 250) carry = 0;
+    esp_task_wdt_reset();
+    if (millis() - t0 > 4000UL) break;
+  }
+  f.close();
+
+  qsort(arr, nEv, sizeof(uint32_t), cmpU32);
+  // Кольцо на 10 событий: нужно ПОСЛЕДНИЕ переключения, а не первые.
+  int cnt = 0, head = 0;
+  bool have = false;
+  uint8_t prevR = 0;
+  uint32_t prevT = 0;
+  for (int k = 0; k < nEv; k++) {
+    uint32_t t = arr[k] >> 1;
+    uint8_t r = (uint8_t)(arr[k] & 1u);
+    if (have && t == prevT) continue;          // дубль того же времени
+    if (have && r != prevR) {
+      outT[head] = t;
+      outR[head] = r;
+      head = (head + 1) % 10;
+      if (cnt < 10) cnt++;
+    }
+    have = true;
+    prevR = r;
+    prevT = t;
+  }
+  if (cnt == 10 && head != 0) {
+    // Кольцо переполнено — разворачиваем в хронологический порядок.
+    uint32_t tt[10];
+    uint8_t rr[10];
+    for (int k = 0; k < 10; k++) {
+      tt[k] = outT[(head + k) % 10];
+      rr[k] = outR[(head + k) % 10];
+    }
+    memcpy(outT, tt, sizeof(tt));
+    memcpy(outR, rr, sizeof(rr));
+  }
+  if (msOut) *msOut = millis() - t0;
+  return cnt;
+}
+
+static void buildEventsJson(const uint32_t* ts, const uint8_t* rs, int n, unsigned long ms) {
+  String out;
+  out.reserve(900);
+  out = "{\"events\":[";
+  for (int k = n - 1; k >= 0; k--) {
+    time_t tt = (time_t)ts[k];
+    struct tm et;
+    gmtime_r(&tt, &et);
+    char b[80];
+    snprintf(b, sizeof(b),
+             "%s{\"t\":\"%04d-%02d-%02d %02d:%02d:%02d\",\"r\":%d}",
+             (k == n - 1) ? "" : ",",
+             et.tm_year + 1900, et.tm_mon + 1, et.tm_mday,
+             et.tm_hour, et.tm_min, et.tm_sec, (int)rs[k]);
+    out += b;
+  }
+  out += "],\"ms\":";
+  out += String(ms);
+  out += '}';
+  sEvJson = out;
+}
+
+static bool eventsFresh(size_t szNow) {
+  if (sEvJson.length() == 0) return false;
+  if (millis() - sEvAt > 120000UL) return false;
+  if (szNow < sEvFileSize || szNow - sEvFileSize > 65536UL) return false;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+//  HTML-страница
+// ---------------------------------------------------------------------------
+static size_t csvFileSize() {
+  File f = SD.open("/energy.csv", FILE_READ);
+  if (!f) return 0;
+  size_t sz = f.size();
+  f.close();
+  return sz;
+}
+
+// Страница собирается в ГОТОВЫЙ буфер (а не в новый String на каждый запрос):
+// 24 КБ и ~20 replace на запрос — это заметная нагрузка, из-за неё изредка
+// рвалось соединение. Кэш живёт 3 с, за это время значения всё равно не
+// успевают измениться заметно.
+static void webPageBuild(String& h) {
+  h = PAGE_TMPL;                       // шаблон из web/page.html (PROGMEM)
+  char b[40];
+  h.replace("__FW__", FW_VER);
+  h.replace("__NETCLS__", gNetOk ? "ok" : "bad");
+  h.replace("__NETTXT__", gNetOk ? "сеть ok" : "нет сети");
+  snprintf(b, sizeof(b), "%d", gRssi);
+  h.replace("__RSSI__", b);
+  snprintf(b, sizeof(b), "%.2f", myTodayKwh);
+  h.replace("__TKWH__", b);
+  snprintf(b, sizeof(b), "%.2f", myTodayCost);
+  h.replace("__TCOST__", b);
   snprintf(b, sizeof(b), "%.0f", gVoltage);
-  h += "<div class=c><div class=l>Напряжение</div>";
-  h += "<div class='v b'>" + String(b) + " В</div>";
-  snprintf(b, sizeof(b), "<div class=s>%s · норма 207–253 В</div>", voltVerdict(gVoltage));
-  h += b;
-  h += "</div>";
+  h.replace("__MV__", b);
+  snprintf(b, sizeof(b), "%.0f", gPower);
+  h.replace("__MP__", b);
+  snprintf(b, sizeof(b), "%.2f", gCurrent);
+  h.replace("__MA__", b);
+  snprintf(b, sizeof(b), "%.1f", gTemp);
+  h.replace("__MT__", b);
+  h.replace("__RELCLS__", gRelay ? "ok" : "bad");
+  h.replace("__RELTXT__", gRelay ? "ВКЛ" : "ВЫКЛ");
+  snprintf(b, sizeof(b), "%.2f", measuredTariff());
+  h.replace("__TAR__", b);
+  snprintf(b, sizeof(b), "%.2f", gEnergy);
+  h.replace("__PE__", b);
+  snprintf(b, sizeof(b), "%.3f", yKwh);
+  h.replace("__YKWH__", String(yKwh, 2));
+  snprintf(b, sizeof(b), "%.2f", yCost);
+  h.replace("__YKOST__", b);
+  snprintf(b, sizeof(b), "%.2f", mKwh);
+  h.replace("__MKWH__", b);
+  snprintf(b, sizeof(b), "%.2f", mCost);
+  h.replace("__MCOST__", b);
+  snprintf(b, sizeof(b), "%.2f", TARIFF_DAY);
+  h.replace("__TARDAY__", b);
+  snprintf(b, sizeof(b), "%.2f", TARIFF_NIGHT);
+  h.replace("__TARNIGHT__", b);
 
-  // температура и мощность
-  h += "<div class=c><table>";
-  snprintf(b, sizeof(b), "<tr><td>Температура реле</td><td>%.1f °C</td></tr>", gTemp);
-  h += b;
-  snprintf(b, sizeof(b), "<tr><td>Мощность</td><td>%.1f Вт · %.2f А</td></tr>", gPower, gCurrent);
-  h += b;
-  h += "</table></div>";
+  char dt[12] = "1970-01-01";
+  int hh = 0;
+  struct tm ti;
+  if (getLocalTime(&ti, 10)) {
+    snprintf(dt, sizeof(dt), "%04d-%02d-%02d",
+             ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+    hh = ti.tm_hour;
+  }
+  h.replace("__DATE__", dt);
+  snprintf(b, sizeof(b), "%d", hh);
+  h.replace("__HOUR__", b);
+}
 
-  // расход
-  h += "<div class=c><table>";
-  snprintf(b, sizeof(b), "<tr><td><b>Сегодня</b></td><td>%.2f кВт·ч · %.2f ₽</td></tr>",
-           myTodayKwh, myTodayCost);
-  h += b;
-  snprintf(b, sizeof(b), "<tr><td>Вчера</td><td>%.2f кВт·ч · %.2f ₽</td></tr>", yKwh, yCost);
-  h += b;
-  snprintf(b, sizeof(b), "<tr><td>Месяц</td><td>%.2f кВт·ч · %.2f ₽</td></tr>", mKwh, mCost);
-  h += b;
-  snprintf(b, sizeof(b), "<tr><td>Счётчик всего</td><td>%.2f кВт·ч</td></tr>", gEnergy);
-  h += b;
-  snprintf(b, sizeof(b), "<tr><td>Средний тариф</td><td>%.2f ₽/кВт·ч</td></tr>", measuredTariff());
-  h += b;
-  h += "</table></div>";
+// ---------------------------------------------------------------- кэш страницы
+// Раньше страница собиралась на КАЖДЫЙ запрос: 24 КБ + ~20 String::replace,
+// и на медленном клиенте соединение изредка обрывалось (2 из 58, 3 из 10).
+// Теперь: готовая строка живёт в памяти, пересборка не чаще раза в 3 с,
+// отдача — чанками по 2 КБ с проверкой результата каждой записи.
+static String        sPage;            // готовая страница (24 КБ, выделяется раз)
+static unsigned long sPageAt      = 0; // millis() последней сборки
+static unsigned long sPageBuildN  = 0; // сколько раз собирали с момента старта
+static unsigned long sPageBuildMs = 0; // сколько заняла последняя сборка
+static unsigned long sPageSendMs  = 0; // сколько заняла последняя отдача
+#define PAGE_TTL_MS 3000UL
+#define PAGE_CAP  32000   // страница ~30 КБ + запас (было 30000 — впритык)
+#define PAGE_CHUNK  4096
 
-  // погода
-  h += "<div class=c><div class=l>Погода · ВАШЕГО ГОРОДА</div>";
-  if (wOk) {
-    char d[20]; descToRus(wDescEn, d, sizeof(d));
-    snprintf(b, sizeof(b), "<div class='v b'>%.0f °C</div>", wTemp);
-    h += b;
-    snprintf(b, sizeof(b), "<div class=s>%s · ветер %.0f м/с · влажность %.0f %%</div>",
-             d, wWind, wHum);
-    h += b;
+// Отдать 30 КБ кэша обратно. Вызывается из loop() по простою и из cloudCall,
+// когда TLS не смог взять память.
+void pageCacheFree() {
+  if (sPage.length() == 0) return;
+  sPage.~String();               // sPage = String() память НЕ отдаёт
+  new (&sPage) String();
+  sPageAt = 0;
+}
+
+static void pageSend() {
+  unsigned long t0 = millis();
+  if (sPage.length() == 0 || (millis() - sPageAt) >= PAGE_TTL_MS) {
+    sPage.reserve(PAGE_CAP);           // один раз: дальше места хватает, replace не растит
+    webPageBuild(sPage);
+    sPageAt = millis();
+    sPageBuildN++;
+    sPageBuildMs = millis() - t0;
+  }
+  size_t total = sPage.length();
+  if (total == 0) {
+    // Так бывает, когда 30 КБ забрал TLS-запрос к облаку (страницу мы
+    // освобождаем сразу после отдачи). Одна повторная попытка, а если
+    // памяти всё ещё нет — короткая заглушка с автообновлением: пустой
+    // ответ 0 байт хуже, чем страница, которая сама перезагрузится.
+    delay(15);
+    sPage.reserve(PAGE_CAP);
+    webPageBuild(sPage);
+    total = sPage.length();
+  }
+  if (total == 0) {
+    Serial.printf("веб: страница не собралась (free=%u max=%u), отдаю заглушку\n",
+                  ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    gWeb.send(200, "text/html; charset=utf-8",
+      "<!DOCTYPE html><meta charset=utf-8><meta http-equiv=refresh content=1>"
+      "<p style=\"font:16px system-ui,sans-serif;padding:20px\">"
+      "Плата занята облаком, страница обновится сама…</p>");
+    return;
+  }
+  gWeb.setContentLength(total);
+  gWeb.sendHeader("Cache-Control", "no-store");
+  gWeb.send(200, "text/html; charset=utf-8", "");
+  WiFiClient c = gWeb.client();        // копия — тот же сокет, но можно connected()
+  // Без TCP_NODELAY каждый чанк ждал подтверждения предыдущего (задержка
+  // 40-200 мс), и 24 КБ уходили почти секунду. С ним — десятки миллисекунд.
+  c.setNoDelay(true);
+  size_t sent = 0;
+  unsigned long t1 = millis();
+  const char* src = sPage.c_str();
+  while (sent < total) {
+    size_t n = total - sent;
+    if (n > PAGE_CHUNK) n = PAGE_CHUNK;
+    size_t w = c.write((const uint8_t*)src + sent, n);
+    if (w == 0) {
+      if (!c.connected()) {                    // клиент ушёл — не висим на нём
+        Serial.printf("веб: / оборвано клиентом на %u из %u байт\n",
+                      (unsigned)sent, (unsigned)total);
+        break;
+      }
+      delay(1);
+      esp_task_wdt_reset();
+      continue;
+    }
+    sent += w;
+    esp_task_wdt_reset();
+    if (millis() - t1 > 20000UL) {             // страховка от вечного цикла
+      Serial.printf("веб: / таймаут отдачи, %u из %u байт\n",
+                    (unsigned)sent, (unsigned)total);
+      break;
+    }
+  }
+  sPageSendMs = millis() - t1;
+  if (sent != total && c.connected())
+    Serial.printf("веб: / недодано %u из %u байт\n", (unsigned)sent, (unsigned)total);
+  // Страницу отдали — 30 КБ сразу возвращаем куче. Держать кэш между запросами
+  // нельзя: именно занятый кэш отнимал у mbedTLS 16-КБ буферы, и TLS к облаку
+  // падал с "SSL - Memory allocation failed" (напряжение застывало на часы).
+  // Сборка страницы стоит ~85 мс и происходит реже, чем раз в 3 с.
+  pageCacheFree();
+}
+
+// ============================================================================
+//  PWRHIST — дозаполнение колонки мощности в /energy.csv из облака Tuya
+// ============================================================================
+// Зачем: до исправления gPower локальный DP 6 отдавал устаревшие 19 Вт, и в
+// истории за 23–29.10 мощность врёт. Энергия (4-е поле) при этом верная — её
+// не трогаем. Для каждого часа берём phase_a тремя окнами по 20 минут (как
+// pwrFillTick), считаем среднее и пик, затем ОДИН раз переписываем файл:
+//   /energy.csv -> /energy.bak (проверенная копия)
+//   /energy.csv + правки -> /energy.tmp
+//   /energy.csv -> /energy.old, /energy.tmp -> /energy.csv, old удаляем.
+// При любой ошибке /energy.csv остаётся прежним, /energy.bak — целым.
+// Пики часов дополнительно пишем в /energy.peak: после замены мощности на
+// среднюю /history иначе потерял бы реальный пик часа.
+#define PH_MAX_DAYS 8
+
+struct PwrHistRun {
+  bool      active;
+  int       days;                 // сколько дней в заказе
+  int       day;                  // текущий день 0..days-1
+  int       hour;                 // текущий час 0..23
+  int       part;                 // окно часа 0..2
+  int       retry;                // подряд неудачных запросов
+  time_t    dayEpoch[PH_MAX_DAYS];// местная полночь дня
+  char      dayStr[PH_MAX_DAYS][11];  // "YYYY-MM-DD"
+  float     avg[PH_MAX_DAYS][24];
+  uint16_t  peak[PH_MAX_DAYS][24];
+  uint8_t   peakMin[PH_MAX_DAYS][24];   // минута пика внутри часа (0..59)
+  uint8_t   peakDur[PH_MAX_DAYS][24];   // сколько минут было выше 80 % пика
+  uint16_t  rows[PH_MAX_DAYS][24];   // сколько строк этого часа есть в CSV
+  uint8_t   ok[PH_MAX_DAYS][24];
+  float     sum;
+  int       n;
+  int       peakCur;
+  uint16_t  mmin[60];             // максимум мощности по минутам текущего часа
+  int       hoursOk;
+  int       hoursMissing;
+  unsigned long nextMs;           // пауза между запросами к report-logs
+  unsigned long started;
+  char      msg[80];              // последний итог/ошибка (для /pwrhist/status)
+};
+static PwrHistRun sPH;
+
+bool pwrHistActive() { return sPH.active; }
+
+// Один проход по CSV: сколько строк у каждого (день,час). Часы без строк
+// пропускаем — незачем 72 раза ходить в облако за тем, чего нет в файле.
+static int pwrHistCountRows() {
+  memset(sPH.rows, 0, sizeof(sPH.rows));
+  File f = SD.open("/energy.csv", FILE_READ);
+  if (!f) return 0;
+  static uint8_t buf[512 + 256];
+  int carry = 0;
+  while (f.available()) {
+    int n = f.read(buf + carry, 512);
+    if (n <= 0) break;
+    int total = carry + n;
+    int i = 0;
+    while (i < total) {
+      uint8_t* nl = (uint8_t*)memchr(buf + i, '\n', total - i);
+      if (!nl) break;
+      int len = (int)(nl - (buf + i));
+      if (len >= 20 && isDatePrefix((const char*)(buf + i), len)) {
+        for (int d = 0; d < sPH.days; d++) {
+          if (memcmp(buf + i, sPH.dayStr[d], 10) != 0) continue;
+          int hh = (buf[i + 11] - '0') * 10 + (buf[i + 12] - '0');
+          if (hh >= 0 && hh < 24 && sPH.rows[d][hh] < 65535) sPH.rows[d][hh]++;
+          break;
+        }
+      }
+      i = (int)(nl - buf) + 1;
+    }
+    carry = total - i;
+    if (carry > 0) memmove(buf, buf + i, carry);
+    if (carry > 240) carry = 0;
+    esp_task_wdt_reset();
+  }
+  f.close();
+  int total = 0;
+  for (int d = 0; d < sPH.days; d++)
+    for (int h = 0; h < 24; h++) total += sPH.rows[d][h];
+  return total;
+}
+
+static void pwrHistAbort(const char* why) {
+  if (!sPH.active) return;
+  sPH.active = false;
+  // ГЛАВНОЕ для диагностики: не «не ответило», а ГДЕ именно порвалось и что
+  // пришло по HTTP. Без этого PWRHIST падал с непонятной ошибкой.
+  snprintf(sPH.msg, sizeof(sPH.msg), "%s: этап %s, HTTP %d, тело %d из %d",
+           why, cliStageName(gCliStage), gCliHttp, gCliLen, gCliWant);
+  Serial.printf("PWRHIST-ERR: %s; /energy.csv НЕ тронут\n", sPH.msg);
+}
+
+// Разбор одного ответа report-logs. Складываем мощность в sPH.sum, пик — в
+// sPH.peakCur/peakMin. Формат phase_a: 8 байт, мощность — байты 6..7.
+static void pwrHistParse(const String& body, time_t hourStart) {
+  int pos = 0;
+  int len = body.length();
+  while (true) {
+    int i = body.indexOf("\"event_time\":", pos);
+    if (i < 0) break;
+    i += 13;
+    while (i < len && (body[i] == ' ' || body[i] == '"')) i++;
+    int j = i;
+    while (j < len && isDigit(body[j])) j++;
+    if (j == i) { pos = i + 1; continue; }
+    unsigned long long ms = strtoull(body.substring(i, j).c_str(), NULL, 10);
+    pos = j;
+
+    int v = body.indexOf("\"value\":", pos);
+    if (v < 0) break;
+    v += 8;
+    while (v < len && (body[v] == ' ' || body[v] == '"')) v++;
+    int e = body.indexOf('"', v);
+    if (e < 0) break;
+    String b64 = body.substring(v, e);
+    pos = e + 1;
+
+    uint8_t raw[12];
+    if (b64decode(b64.c_str(), raw, sizeof(raw)) < 8) continue;
+    int p = ((uint16_t)raw[6] << 8) | raw[7];
+    if (p < 0 || p > 20000) continue;
+
+    sPH.sum += (float)p;
+    sPH.n++;
+    time_t et = (time_t)(ms / 1000ULL);
+    long rel = (long)(et - hourStart);
+    if (rel < 0) rel = 0;
+    if (rel > 3599) rel = 3599;
+    // Копим максимум по минутам: только так после прогона можно посчитать,
+    // сколько минут мощность держалась выше 80 % пика (пик-то известен в конце).
+    int mi = (int)(rel / 60);
+    if (mi >= 0 && mi < 60 && p > (int)sPH.mmin[mi]) sPH.mmin[mi] = (uint16_t)p;
+    if (p > sPH.peakCur) sPH.peakCur = p;
+    esp_task_wdt_reset();
+  }
+}
+
+// Копирование файла с проверкой размера. Используется для /energy.bak.
+static bool pwrHistCopy(const char* from, const char* to, size_t expect, size_t* got) {
+  if (SD.exists(to)) SD.remove(to);
+  File s = SD.open(from, FILE_READ);
+  if (!s) return false;
+  File d = SD.open(to, FILE_WRITE);
+  if (!d) { s.close(); return false; }
+  uint8_t buf[512];
+  size_t all = 0;
+  bool ok = true;
+  while (s.available()) {
+    int n = s.read(buf, sizeof(buf));
+    if (n <= 0) break;
+    if (d.write(buf, n) != (size_t)n) { ok = false; break; }
+    all += (size_t)n;
+    esp_task_wdt_reset();
+  }
+  s.close();
+  d.flush();
+  d.close();
+  if (got) *got = all;
+  if (!ok || all != expect) {
+    SD.remove(to);
+    return false;
+  }
+  return true;
+}
+
+// Одна строка CSV: заменить 3-е поле (мощность) на среднее, если дата/час
+// попали в заказ. Остальные поля, включая энергию, копируются байт в байт.
+static int pwrHistMakeLine(const char* s, int len, char* out, int cap, bool* changed) {
+  *changed = false;
+  if (len < 0 || len + 1 > cap) return -1;
+
+  bool hit = false;
+  int di = -1;
+  int hh = -1;
+  if (len >= 20 && isDatePrefix(s, len)) {
+    for (int i = 0; i < sPH.days; i++) {
+      if (memcmp(s, sPH.dayStr[i], 10) == 0) { di = i; break; }
+    }
+    if (di >= 0 && s[10] == ' ' && s[13] == ':') {
+      hh = (s[11] - '0') * 10 + (s[12] - '0');
+      if (hh >= 0 && hh < 24 && sPH.ok[di][hh]) hit = true;
+    }
+  }
+
+  const char* c1 = NULL;
+  const char* c2 = NULL;
+  const char* c3 = NULL;
+  if (hit) {
+    c1 = (const char*)memchr(s, ',', len);
+    if (c1) c2 = (const char*)memchr(c1 + 1, ',', len - (int)(c1 + 1 - s));
+    if (c2) c3 = (const char*)memchr(c2 + 1, ',', len - (int)(c2 + 1 - s));
+    if (!c1 || !c2 || !c3) hit = false;
+  }
+
+  if (!hit) {
+    memcpy(out, s, len);
+    out[len] = '\n';
+    return len + 1;
+  }
+
+  int prefix = (int)(c2 - s) + 1;          // "...дата,В,"
+  char num[16];
+  int nl = snprintf(num, sizeof(num), "%.0f", sPH.avg[di][hh]);
+  int rest = len - (int)(c3 - s);          // ",энергия,реле,рубль,темп"
+  int ol = prefix + nl + rest;
+  if (ol + 1 > cap) return -1;
+  memcpy(out, s, prefix);
+  memcpy(out + prefix, num, nl);
+  memcpy(out + prefix + nl, c3, rest);
+  out[ol++] = '\n';
+  *changed = true;
+  return ol;
+}
+
+// Перезапись /energy.csv -> /energy.tmp. Возвращает число строк и замен.
+static bool pwrHistRewrite(size_t expected, size_t* changedOut, size_t* linesOut, size_t* tmpSizeOut) {
+  File src = SD.open("/energy.csv", FILE_READ);
+  if (!src) return false;
+  File dst = SD.open("/energy.tmp", FILE_WRITE);
+  if (!dst) { src.close(); return false; }
+
+  static uint8_t buf[512 + 256];
+  char out[400];
+  int carry = 0;
+  size_t lines = 0, changed = 0, readTotal = 0;
+  bool ok = true;
+
+  while (src.available() && ok) {
+    int n = src.read(buf + carry, 512);
+    if (n <= 0) break;
+    readTotal += (size_t)n;
+    int total = carry + n;
+    int i = 0;
+    while (i < total) {
+      uint8_t* nl = (uint8_t*)memchr(buf + i, '\n', total - i);
+      if (!nl) break;
+      int len = (int)(nl - (buf + i));
+      if (len > 0 && buf[i + len - 1] == '\r') len--;
+      bool ch = false;
+      int ol = pwrHistMakeLine((const char*)(buf + i), len, out, sizeof(out), &ch);
+      if (ol < 0 || dst.write((uint8_t*)out, ol) != (size_t)ol) { ok = false; break; }
+      if (ch) changed++;
+      lines++;
+      i = (int)(nl - buf) + 1;
+      if ((lines & 127) == 0) { esp_task_wdt_reset(); yield(); }
+    }
+    if (!ok) break;
+    carry = total - i;
+    if (carry > 0) memmove(buf, buf + i, carry);
+    if (carry > 240) { ok = false; break; }     // строка длиннее буфера
+    esp_task_wdt_reset();
+  }
+
+  // Последняя строка без перевода строки.
+  if (ok && carry > 0) {
+    int len = carry;
+    if (len > 0 && buf[len - 1] == '\r') len--;
+    bool ch = false;
+    int ol = pwrHistMakeLine((const char*)buf, len, out, sizeof(out), &ch);
+    if (ol < 0 || dst.write((uint8_t*)out, ol) != (size_t)ol) ok = false;
+    else { if (ch) changed++; lines++; }
+  }
+
+  // Если карта отдала меньше байт, чем размер файла, — не подменяем оригинал.
+  if (readTotal != expected) ok = false;
+
+  dst.flush();
+  dst.close();
+  src.close();
+
+  if (!ok || lines == 0) {
+    SD.remove("/energy.tmp");
+    return false;
+  }
+
+  File t = SD.open("/energy.tmp", FILE_READ);
+  size_t ts = t ? t.size() : 0;
+  t.close();
+  if (ts == 0) { SD.remove("/energy.tmp"); return false; }
+
+  *changedOut = changed;
+  *linesOut = lines;
+  *tmpSizeOut = ts;
+  return true;
+}
+
+// Формат строки: дата,час,пик,минута_пика,минут_выше_80%
+// Минута и длительность нужны веб-странице (/history: pmaxT и pmaxDur):
+// после PWRHIST колонка мощности в CSV равна средней за час, и восстановить
+// по ней время пика уже нельзя.
+static void pwrHistWritePeaks() {
+  File f = SD.open("/energy.peak", FILE_APPEND);
+  if (!f) {
+    Serial.println("PWRHIST: /energy.peak не открылся — пики не сохранены");
+    return;
+  }
+  int n = 0;
+  for (int d = 0; d < sPH.days; d++)
+    for (int h = 0; h < 24; h++)
+      if (sPH.ok[d][h]) {
+        f.printf("%s,%02d,%u,%u,%u\n", sPH.dayStr[d], h, (unsigned)sPH.peak[d][h],
+                 (unsigned)sPH.peakMin[d][h], (unsigned)sPH.peakDur[d][h]);
+        n++;
+      }
+  f.close();
+  Serial.printf("PWRHIST: пики часов дописаны в /energy.peak (%d)\n", n);
+}
+
+// Финальная стадия: бэкап, перезапись, подмена файла, пересчёт статистики.
+// Вызывается из pwrHistTick() один раз, когда все часы собраны.
+static void pwrHistCommit() {
+  int have = 0;
+  for (int d = 0; d < sPH.days; d++)
+    for (int h = 0; h < 24; h++) if (sPH.ok[d][h]) have++;
+  Serial.printf("PWRHIST: собрано часов %d, пропущено %d\n", have, sPH.hoursMissing);
+  if (have == 0) {
+    Serial.println("PWRHIST: в облаке нет данных за эти дни — /energy.csv не трогаю");
+    return;
+  }
+  if (!gSdOk) {
+    Serial.println("PWRHIST-ERR: карта недоступна — /energy.csv не трогаю");
+    return;
+  }
+
+  // Хвосты прошлого запуска: если .old остался, а .csv нет — вернуть .old.
+  if (SD.exists("/energy.old") && !SD.exists("/energy.csv"))
+    SD.rename("/energy.old", "/energy.csv");
+  if (SD.exists("/energy.old")) SD.remove("/energy.old");
+  if (SD.exists("/energy.tmp")) SD.remove("/energy.tmp");
+
+  size_t sz = csvFileSize();
+  if (sz < 20) {
+    Serial.printf("PWRHIST-ERR: /energy.csv пуст или недоступен (размер %u) — не трогаю\n",
+                  (unsigned)sz);
+    return;
+  }
+
+  // Место: оригинал + .bak + .tmp (в момент подмены ещё и .old).
+  uint64_t total = SD.totalBytes();
+  uint64_t used  = SD.usedBytes();
+  uint64_t freeB = (total > used) ? (uint64_t)(total - used) : 0;
+  uint64_t need  = (uint64_t)sz * 4ULL + 65536ULL;  // .bak.tmp + старый .bak + .tmp
+  if (total > 0) {
+    Serial.printf("PWRHIST: место на карте: свободно %llu, нужно %llu\n",
+                  (unsigned long long)freeB, (unsigned long long)need);
+    if (freeB < need) {
+      Serial.println("PWRHIST-ERR: МАЛО МЕСТА для .bak и .tmp — /energy.csv не трогаю");
+      return;
+    }
+  }
+
+  // Новую копию сначала пишем в .bak.tmp: старый .bak не трогаем, пока новая
+  // копия не проверена по размеру.
+  if (SD.exists("/energy.bak.tmp")) SD.remove("/energy.bak.tmp");
+  Serial.printf("PWRHIST: делаю резервную копию /energy.bak (%u байт)\n", (unsigned)sz);
+  size_t copied = 0;
+  if (!pwrHistCopy("/energy.csv", "/energy.bak.tmp", sz, &copied)) {
+    Serial.printf("PWRHIST-ERR: копия не удалась (записано %u из %u) — /energy.csv не трогаю\n",
+                  (unsigned)copied, (unsigned)sz);
+    return;
+  }
+  File b = SD.open("/energy.bak.tmp", FILE_READ);
+  size_t bs = b ? b.size() : 0;
+  b.close();
+  if (bs != sz) {
+    SD.remove("/energy.bak.tmp");
+    Serial.printf("PWRHIST-ERR: размер копии %u != %u — /energy.csv не трогаю\n",
+                  (unsigned)bs, (unsigned)sz);
+    return;
+  }
+  if (SD.exists("/energy.bak.old")) SD.remove("/energy.bak.old");
+  bool oldMoved = true;
+  if (SD.exists("/energy.bak")) oldMoved = SD.rename("/energy.bak", "/energy.bak.old");
+  if (!oldMoved) {
+    SD.remove("/energy.bak.tmp");
+    Serial.println("PWRHIST-ERR: не смог отодвинуть старый /energy.bak — /energy.csv не трогаю");
+    return;
+  }
+  if (!SD.rename("/energy.bak.tmp", "/energy.bak")) {
+    if (SD.exists("/energy.bak.old")) SD.rename("/energy.bak.old", "/energy.bak");
+    Serial.println("PWRHIST-ERR: не смог поставить /energy.bak — /energy.csv не трогаю");
+    return;
+  }
+  if (SD.exists("/energy.bak.old")) SD.remove("/energy.bak.old");
+  Serial.println("PWRHIST: копия проверена, переписываю строки");
+
+  size_t changed = 0, lines = 0, tmpSz = 0;
+  if (!pwrHistRewrite(sz, &changed, &lines, &tmpSz)) {
+    Serial.println("PWRHIST-ERR: перезапись не удалась — /energy.csv не тронут, /energy.bak цел");
+    return;
+  }
+  Serial.printf("PWRHIST: строк %u, заменено %u, /energy.tmp %u байт\n",
+                (unsigned)lines, (unsigned)changed, (unsigned)tmpSz);
+  if (changed == 0) {
+    SD.remove("/energy.tmp");
+    Serial.println("PWRHIST: ни одна строка не попала в диапазон — /energy.csv не трогаю");
+    return;
+  }
+
+  // Подмена: сначала оригинал -> .old (он остаётся на диске), затем .tmp ->
+  // /energy.csv. Если второй шаг не удался, возвращаем .old на место.
+  if (!SD.rename("/energy.csv", "/energy.old")) {
+    SD.remove("/energy.tmp");
+    Serial.println("PWRHIST-ERR: не смог переименовать /energy.csv — файл не тронут");
+    return;
+  }
+  if (!SD.rename("/energy.tmp", "/energy.csv")) {
+    SD.rename("/energy.old", "/energy.csv");
+    SD.remove("/energy.tmp");
+    Serial.println("PWRHIST-ERR: не смог поставить новый файл — вернул оригинал из .old");
+    return;
+  }
+  if (SD.exists("/energy.old")) SD.remove("/energy.old");
+
+  File chk = SD.open("/energy.csv", FILE_READ);
+  size_t newSz = chk ? chk.size() : 0;
+  chk.close();
+  if (newSz != tmpSz) {
+    Serial.printf("PWRHIST-ERR: размер после подмены %u != %u; оригинал в /energy.bak\n",
+                  (unsigned)newSz, (unsigned)tmpSz);
   } else {
-    h += "<div class=m>нет данных</div>";
+    Serial.printf("PWRHIST: /energy.csv обновлён, %u байт (было %u)\n",
+                  (unsigned)newSz, (unsigned)sz);
   }
-  h += "</div>";
 
-  // сторож
-  h += "<div class=c><div class=l>Сторож сети</div>";
-  if (gWdBad >= 0) {
-    snprintf(b, sizeof(b), "<div class=s>%s</div>",
-             gWdBad ? "есть недоступные устройства" : "все устройства отвечают");
-    h += b;
+  pwrHistWritePeaks();
+
+  // Кэши карты и статистика — заново, иначе /days и экран покажут старое.
+  sDaysFileSize = 0; sDaysAt = 0; histCacheDrop(); gSdGen++;
+  sEvFileSize = 0;   sEvAt = 0;
+  gDayLoaded = -1;
+  resetStats();
+  statsSeeded = false;
+  seedStatsFromSd();
+  if (gDayOffset > 0) dayLoadFromSd(gDayOffset);   // выбранный прошлый день — заново
+  gLastDraw = 0; gLastWinFull = 0; gLastSig = 0;
+  snprintf(sPH.msg, sizeof(sPH.msg), "готово: часов ok %d, пусто %d",
+           sPH.hoursOk, sPH.hoursMissing);
+  Serial.printf("PWRHIST-DONE: мощность дозаполнена; бэкап /energy.bak (%u байт)\n",
+                (unsigned)sz);
+}
+
+// Один шаг автомата за проход loop(): один HTTP-запрос к облаку. Так тач и
+// веб остаются живыми, а 72 запроса на день не превращаются в одну паузу.
+void pwrHistTick() {
+  if (!sPH.active) return;
+  // Tuya ограничивает частоту report-logs («The log query is too frequent»).
+  // Держим не меньше 1,3 с между запросами, иначе 72 запроса в минуту
+  // упираются в лимит и часть часов остаётся пустой.
+  if (millis() < sPH.nextMs) return;
+  if (WiFi.status() != WL_CONNECTED) { pwrHistAbort("Wi-Fi не подключён"); return; }
+  // netOnline() здесь НЕ проверяем как запрет: зонд TCP:53 иногда врёт, и
+  // тогда PWRHIST падал «нет интернета» при живом облаке.
+  if (millis() - gTouchMs < 1500UL) return;      // человек работает с экраном
+  if (millis() < gTouchSkip) return;
+
+  if (sPH.day >= sPH.days) {
+    sPH.active = false;
+    pwrHistCommit();
+    return;
   }
-  snprintf(b, sizeof(b), "<div class=s>интернет: %s · история: %s</div>",
-           gNetOk ? "есть" : "нет", gHistAdded ? "дополнена" : "не требуется");
-  h += b;
-  h += "</div>";
 
-  snprintf(b, sizeof(b), "<div class=s>%s · %s</div>",
-           WiFi.status() == WL_CONNECTED ? "Wi-Fi ok" : "нет Wi-Fi",
-           gNetOk ? "интернет ok" : "без интернета");
-  h += b;
-  return h;
+  time_t nowE = time(nullptr);
+  time_t hs = sPH.dayEpoch[sPH.day] + (time_t)sPH.hour * 3600;
+  if (hs + 3600 > nowE) {
+    // Час ещё не прожит (или заказ включает сегодня) — среднее будет неполным.
+    if (sPH.part == 0) {
+      sPH.ok[sPH.day][sPH.hour] = 0;
+      sPH.hoursMissing++;
+      Serial.printf("PWRHIST: %s час %02d — ещё не прожит, пропуск\n",
+                    sPH.dayStr[sPH.day], sPH.hour);
+    }
+    sPH.hour++; sPH.part = 0; sPH.retry = 0;
+    if (sPH.hour >= 24) { sPH.hour = 0; sPH.day++; }
+    return;
+  }
+
+  if (sPH.rows[sPH.day][sPH.hour] == 0) {
+    // В CSV нет ни одной строки этого часа — заменять нечего, облако не зовём.
+    sPH.ok[sPH.day][sPH.hour] = 0;
+    sPH.hoursMissing++;
+    Serial.printf("PWRHIST: %s час %02d — нет строк в CSV, пропуск\n",
+                  sPH.dayStr[sPH.day], sPH.hour);
+    sPH.hour++; sPH.part = 0; sPH.retry = 0;
+    if (sPH.hour >= 24) { sPH.hour = 0; sPH.day++; }
+    return;
+  }
+
+  if (!cloudToken()) { pwrHistAbort("облако не дало токен"); return; }
+  if (sPH.part == 0) { sPH.sum = 0; sPH.n = 0; sPH.peakCur = 0; memset(sPH.mmin, 0, sizeof(sPH.mmin)); }
+
+  time_t a = hs + (time_t)sPH.part * 1200;
+  time_t b = a + 1200;
+  char path[240];
+  snprintf(path, sizeof(path),
+           "/v1.0/devices/%s/report-logs?codes=phase_a&end_time=%llu&size=100&start_time=%llu",
+           DEVICE_ID, (unsigned long long)b * 1000ULL, (unsigned long long)a * 1000ULL);
+
+  String body;
+  if (repWait()) return;                          // общий лимит report-logs
+  bool okPh = cloudCall("GET", String(path), body, 12000);
+  repDone();
+  if (!okPh) {
+    // Облако изредка не отвечает одним запросом из двадцати (этап connect —
+    // видно в /pwrhist/status). Три отказа подряд не повод бросать прогон
+    // на 24 часа: ждём дольше и пробуем ещё.
+    sPH.retry++;
+    if (sPH.retry >= 6) { pwrHistAbort("облако не ответило 6 раз подряд"); return; }
+    sPH.nextMs = millis() + (sPH.retry <= 3 ? 2500UL : 10000UL);
+    return;
+  }
+  if (body.indexOf("\"success\":true") < 0) {
+    // Лимит частоты — не ошибка данных: ждём и повторяем этот же запрос.
+    if (body.indexOf("too frequent") >= 0) {
+      sPH.retry = 0;
+      sPH.nextMs = millis() + 10000UL;
+      return;
+    }
+    sPH.nextMs = millis() + 3000UL;
+    if (++sPH.retry >= 3) pwrHistAbort("облако вернуло success=false");
+    return;
+  }
+  sPH.retry = 0;
+  sPH.nextMs = millis() + 1300UL;
+  pwrHistParse(body, hs);
+
+  if (++sPH.part < 3) return;
+
+  int d = sPH.day, h = sPH.hour;
+  int dd = (sPH.dayStr[d][8] - '0') * 10 + (sPH.dayStr[d][9] - '0');
+  int mm = (sPH.dayStr[d][5] - '0') * 10 + (sPH.dayStr[d][6] - '0');
+  if (sPH.n > 0) {
+    float avg = sPH.sum / (float)sPH.n;
+    sPH.avg[d][h] = avg;
+    sPH.peak[d][h] = (uint16_t)sPH.peakCur;
+    // Минута пика и число минут выше 80 % пика — из минутных максимумов часа.
+    int pk = 0, pm = 0;
+    for (int m = 0; m < 60; m++)
+      if (sPH.mmin[m] > pk) { pk = (int)sPH.mmin[m]; pm = m; }
+    int dur = 0;
+    if (pk > 0) {
+      float lim = (float)pk * 0.8f;
+      for (int m = 0; m < 60; m++)
+        if ((float)sPH.mmin[m] > lim) dur++;
+    }
+    sPH.peakMin[d][h] = (uint8_t)pm;
+    sPH.peakDur[d][h] = (uint8_t)(dur > 255 ? 255 : dur);
+    sPH.ok[d][h] = 1;
+    sPH.hoursOk++;
+    Serial.printf("PWRHIST: %02d.%02d час %02d = %.0f Вт, пик %d Вт в %02d:%02d, >80%% %d мин (%d точек)\n",
+                  dd, mm, h, avg, sPH.peakCur, h, pm, dur, sPH.n);
+  } else {
+    sPH.ok[d][h] = 0;
+    sPH.hoursMissing++;
+    Serial.printf("PWRHIST: %02d.%02d час %02d — облако пусто\n", dd, mm, h);
+  }
+
+  sPH.part = 0;
+  sPH.hour++;
+  if (sPH.hour >= 24) { sPH.hour = 0; sPH.day++; }
+  esp_task_wdt_reset();
+}
+
+// Разбор аргументов:
+//   PWRHIST                         — последние 7 дней (сегодня-7 .. сегодня-1)
+//   PWRHIST 2026-10-23 2026-10-29   — диапазон дат включительно
+//   PWRHIST 23 29                   — числа текущего месяца
+//   PWRHIST 29                      — один день текущего месяца
+bool pwrHistStart(const String& args) {
+  if (sPH.active) { Serial.println("PWRHIST: уже выполняется"); return false; }
+  if (!gSdOk) { Serial.println("PWRHIST-ERR: нет карты"); return false; }
+  long todayKey = todayDayKey();
+  if (todayKey <= 0) {
+    Serial.println("PWRHIST-ERR: часы не синхронизированы");
+    return false;
+  }
+
+  String a = args;
+  a.trim();
+  struct tm ti;
+  bool haveNow = getLocalTime(&ti, 10);
+  int cy = haveNow ? ti.tm_year + 1900 : 2026;
+  int cm = haveNow ? ti.tm_mon + 1 : 1;
+  int y1 = 0, m1 = 0, d1 = 0, y2 = 0, m2 = 0, d2 = 0;
+
+  int n6 = sscanf(a.c_str(), "%d-%d-%d %d-%d-%d", &y1, &m1, &d1, &y2, &m2, &d2);
+  if (a.length() == 0) {
+    long k = todayKey;
+    int yy, mm, dd;
+    civilFromDays(k - 7, &yy, &mm, &dd); y1 = yy; m1 = mm; d1 = dd;
+    civilFromDays(k - 1, &yy, &mm, &dd); y2 = yy; m2 = mm; d2 = dd;
+  } else if (n6 == 6) {
+    // полные даты уже разобраны
+  } else if (n6 == 1 || n6 == 2) {
+    int dd1 = 0, dd2 = 0;
+    int n2 = sscanf(a.c_str(), "%d %d", &dd1, &dd2);
+    if (n2 == 2)      { y1 = y2 = cy; m1 = m2 = cm; d1 = dd1; d2 = dd2; }
+    else if (n2 == 1) { y1 = y2 = cy; m1 = m2 = cm; d1 = d2 = dd1; }
+    else {
+      Serial.println("PWRHIST: формат: PWRHIST [ГГГГ-ММ-ДД ГГГГ-ММ-ДД | ДД ДД]");
+      return false;
+    }
+  } else {
+    Serial.println("PWRHIST: формат: PWRHIST [ГГГГ-ММ-ДД ГГГГ-ММ-ДД | ДД ДД]");
+    return false;
+  }
+
+  if (y1 < 2020 || y1 > 2100 || m1 < 1 || m1 > 12 || d1 < 1 || d1 > 31 ||
+      y2 < 2020 || y2 > 2100 || m2 < 1 || m2 > 12 || d2 < 1 || d2 > 31) {
+    Serial.println("PWRHIST-ERR: неверная дата");
+    return false;
+  }
+
+  long k1 = daysFromCivil(y1, (unsigned)m1, (unsigned)d1);
+  long k2 = daysFromCivil(y2, (unsigned)m2, (unsigned)d2);
+  if (k1 > k2) { long t = k1; k1 = k2; k2 = t; }
+  long today = todayKey;
+  if (k2 > today) {
+    Serial.println("PWRHIST-ERR: конец диапазона в будущем");
+    return false;
+  }
+  int days = (int)(k2 - k1 + 1);
+  if (days < 1 || days > PH_MAX_DAYS) {
+    Serial.printf("PWRHIST-ERR: дней %d, а можно 1..%d\n", days, PH_MAX_DAYS);
+    return false;
+  }
+
+  memset(&sPH, 0, sizeof(sPH));
+  sPH.days = days;
+  for (int i = 0; i < days; i++) {
+    int yy, mm, dd;
+    civilFromDays(k1 + i, &yy, &mm, &dd);
+    snprintf(sPH.dayStr[i], sizeof(sPH.dayStr[i]), "%04d-%02d-%02d", yy, mm, dd);
+    struct tm t;
+    memset(&t, 0, sizeof(t));
+    t.tm_year = yy - 1900; t.tm_mon = mm - 1; t.tm_mday = dd;
+    t.tm_hour = 0; t.tm_min = 0; t.tm_sec = 0; t.tm_isdst = -1;
+    time_t e = mktime(&t);
+    if (e < 1600000000) {
+      Serial.println("PWRHIST-ERR: не смог посчитать время дня");
+      return false;
+    }
+    sPH.dayEpoch[i] = e;
+  }
+
+  int rowsTotal = pwrHistCountRows();
+  if (rowsTotal == 0) {
+    Serial.println("PWRHIST: в /energy.csv нет строк за эти дни — нечего заполнять");
+    return false;
+  }
+  Serial.printf("PWRHIST: строк в диапазоне %d\n", rowsTotal);
+
+  sPH.active = true;
+  sPH.day = 0; sPH.hour = 0; sPH.part = 0; sPH.retry = 0;
+  sPH.started = millis();
+  strcpy(sPH.msg, "идёт");
+  Serial.printf("PWRHIST: %s..%s, дней %d, часов %d; облако Tuya\n",
+                sPH.dayStr[0], sPH.dayStr[days - 1], days, days * 24);
+  if (k1 < today - 7)
+    Serial.println("PWRHIST: внимание, часть дней старше 7 суток — облако может не отдать");
+  Serial.println("PWRHIST: идёт в фоне, прогресс в serial; файл трогаю только в конце");
+  return true;
+}
+
+// ============================================================================
+//  GAPFILL — заполнение пропусков в /energy.csv данными из облака Tuya
+// ============================================================================
+// Зачем: плата перезагружается при прошивке, уходит в бутлоадер, теряет Wi-Fi —
+// и в /energy.csv появляются дыры в несколько минут. В дыре нет ни напряжения,
+// ни мощности, ни температуры, поэтому МИН/МАКС напряжения за сутки и ПИК
+// мощности могут быть неверными. Энергия при этом НЕ теряется: счётчик
+// непрерывный, расход считается по разнице концов.
+//
+// Схема (как PWRHIST, чтобы не изобретать второй способ порчи файла):
+//   1. проход по /energy.csv блоками 512 байт -> список пропусков > 120 с;
+//   2. на каждый пропуск — облако (phase_a + temp_current + счётчик) окнами
+//      по 20 минут, по одному HTTP-запросу за проход loop();
+//   3. строки копятся в пуле, вставляются ОДНИМ проходом перезаписи:
+//      /energy.csv -> /energy.bak.tmp (проверка) -> /energy.bak
+//      /energy.csv + вставки -> /energy.tmp
+//      /energy.csv -> /energy.old, /energy.tmp -> /energy.csv, .old удаляем.
+// При любой ошибке /energy.csv остаётся прежним, /energy.bak — целым.
+// Пределы, типы и состояние (sGF/sGf/sGfRow) объявлены в начале файла —
+// Arduino строит прототипы функций до этого места.
+
+bool gapFillActive() { return sGF.phase != GF_IDLE; }
+int  gapTodayCount() { return sGF.todayN; }
+int  gapTodayMinutes() { return sGF.todayMin; }
+
+// Время строки CSV в epoch. Ручной разбор быстрее sscanf и не тянет String.
+static long gfLineEpoch(const char* s, int len) {
+  if (len < 19) return 0;
+  if (s[4] != '-' || s[7] != '-' || s[10] != ' ' || s[13] != ':' || s[16] != ':') return 0;
+  for (int i = 0; i < 19; i++) {
+    if (i == 4 || i == 7 || i == 10 || i == 13 || i == 16) continue;
+    if (s[i] < '0' || s[i] > '9') return 0;
+  }
+  int y  = (s[0] - '0') * 1000 + (s[1] - '0') * 100 + (s[2] - '0') * 10 + (s[3] - '0');
+  int mo = (s[5] - '0') * 10 + (s[6] - '0');
+  int d  = (s[8] - '0') * 10 + (s[9] - '0');
+  int h  = (s[11] - '0') * 10 + (s[12] - '0');
+  int mi = (s[14] - '0') * 10 + (s[15] - '0');
+  int se = (s[17] - '0') * 10 + (s[18] - '0');
+  if (y < 2020 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31) return 0;
+  if (h > 23 || mi > 59 || se > 59) return 0;
+  return daysFromCivil(y, (unsigned)mo, (unsigned)d) * 86400L
+       + h * 3600L + mi * 60L + se;
+}
+
+// 4-е поле строки (счётчик) в сотых кВт·ч. 0 — поля нет.
+static int32_t gfFieldE(const char* s, int len) {
+  const char* end = s + len;
+  const char* p = (const char*)memchr(s, ',', len);
+  if (!p) return 0;
+  p = (const char*)memchr(p + 1, ',', (int)(end - p) - 1);
+  if (!p) return 0;
+  p = (const char*)memchr(p + 1, ',', (int)(end - p) - 1);
+  if (!p) return 0;
+  p++;
+  int32_t ip = 0;
+  int frac = 0, fdiv = 1;
+  bool any = false;
+  while (p < end && *p >= '0' && *p <= '9') { ip = ip * 10 + (*p - '0'); p++; any = true; }
+  if (p < end && *p == '.') {
+    p++;
+    while (p < end && *p >= '0' && *p <= '9' && fdiv < 1000) {
+      frac = frac * 10 + (*p - '0'); fdiv *= 10; p++;
+    }
+  }
+  if (!any) return 0;
+  return ip * 100 + (fdiv > 1 ? (int32_t)((frac * 100) / fdiv) : 0);
+}
+
+static void gfStamp(long t, char* out, int cap) {
+  // В файле и во всей прошивке время «местное» (см. lineEpoch/nowLocalEpoch),
+  // поэтому разбираем его через gmtime_r, а не localtime_r: иначе +3 часа.
+  time_t et = (time_t)t;
+  struct tm lt;
+  gmtime_r(&et, &lt);
+  snprintf(out, cap, "%02d.%02d %02d:%02d:%02d",
+           lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec);
+}
+
+// Смещение «местное минус UTC» в секундах. Облако живёт по UTC, файл — по
+// местному, поэтому в запрос время уходит с вычетом, а из ответа — с прибавкой.
+static long gfTzOffset() {
+  long L = nowLocalEpoch();
+  if (L <= 0) return 0;
+  time_t t = (time_t)L;
+  struct tm lt;
+  gmtime_r(&t, &lt);            // поля = местные (L уже сдвинут на смещение)
+  lt.tm_isdst = -1;
+  time_t u = mktime(&lt);       // обратно в настоящий UTC
+  if (u < 1600000000) return 0;
+  long off = L - (long)u;
+  if (off < -12L * 3600L || off > 14L * 3600L) return 0;
+  return off;
+}
+
+// ---------------------------------------------------------------- шаг 1: поиск
+// Один проход по файлу: пары соседних строк с разрывом > 2 минут. Заодно
+// считаем пропуски за сегодня — их показывает экран ИТОГИ и поле /data.
+// Возвращает число пропусков (или -1 при ошибке чтения).
+static int gapScan() {
+  sGF.gaps = 0; sGF.gapSec = 0;
+  sGF.todayN = 0; sGF.todayMin = 0; sGF.yestN = 0; sGF.yestMin = 0;
+  if (!gSdOk) return -1;
+  long nowE = nowLocalEpoch();
+  if (nowE <= 0) return -1;
+  long todayKey = nowE / 86400L;
+  long scopeStart = (todayKey - (GF_SCOPE_DAYS - 1)) * 86400L;
+
+  File f = SD.open("/energy.csv", FILE_READ);
+  if (!f) return -1;
+
+  static uint8_t buf[512 + 256];
+  int carry = 0;
+  uint32_t li = 0;                 // номер строки в файле (с 0)
+  long prevT = 0, prevE = 0;
+  uint32_t prevLine = 0;
+  bool bad = false;
+
+  while (f.available()) {
+    int n = f.read(buf + carry, 512);
+    if (n <= 0) break;
+    int total = carry + n;
+    int i = 0;
+    while (i < total) {
+      uint8_t* nl = (uint8_t*)memchr(buf + i, '\n', total - i);
+      if (!nl) break;
+      int len = (int)(nl - (buf + i));
+      if (len > 0 && buf[i + len - 1] == '\r') len--;
+      long t = 0;
+      long e = 0;
+      if (len >= 20 && isDatePrefix((const char*)(buf + i), len)) {
+        t = gfLineEpoch((const char*)(buf + i), len);
+        if (t > 0) e = gfFieldE((const char*)(buf + i), len);
+      }
+      if (t > 0) {
+        if (prevT > 0) {
+          long d = t - prevT;
+          if (d > GF_MIN_GAP) {
+            int mins = (int)((d + 59) / 60);
+            long dk = t / 86400L;
+            if (dk == todayKey)            { sGF.todayN++; sGF.todayMin += mins; }
+            else if (dk == todayKey - 1)   { sGF.yestN++;  sGF.yestMin += mins; }
+            // Заполняем только: не старьше scope, не длиннее 6 ч, старше 5 мин.
+            if (t >= scopeStart && d <= GF_MAX_GAP && (nowE - t) >= GF_AGE &&
+                sGF.gaps < GF_MAX_GAPS) {
+              GapItem& g = sGf[sGF.gaps];
+              memset(&g, 0, sizeof(g));
+              g.a = prevT; g.b = t;
+              g.ea = (int32_t)prevE; g.eb = (int32_t)e;
+              g.line = prevLine;
+              sGF.gaps++;
+              sGF.gapSec += d;
+            }
+          }
+        }
+        prevT = t; prevE = e; prevLine = li;
+      }
+      li++;
+      i = (int)(nl - buf) + 1;
+      if ((li & 1023) == 0) esp_task_wdt_reset();
+    }
+    carry = total - i;
+    if (carry > 0) memmove(buf, buf + i, carry);
+    if (carry > 240) { bad = true; break; }     // строка длиннее буфера
+    esp_task_wdt_reset();
+  }
+  f.close();
+  if (bad) { Serial.println("GAPFILL-ERR: строка в CSV длиннее буфера"); sGF.gaps = 0; return -1; }
+  return sGF.gaps;
+}
+
+// ---------------------------------------------------------------- шаг 2: облако
+// Разбор одного ответа report-logs. Записи разных кодов идут вперемешку,
+// поэтому смотрим на "code": phase_a — байты, temp_current — десятые,
+// total_forward_energy — сотые.
+static void gfParseWindow(const String& body, const GapItem& g,
+                          int* nPh, int* nT, int* nE) {
+  int pos = 0;
+  int len = body.length();
+  while (true) {
+    int ei = body.indexOf("\"event_time\":", pos);
+    if (ei < 0) break;
+    int ci = body.indexOf("\"code\":\"", pos);
+    String code;
+    if (ci >= 0 && ci < ei) {
+      int cs = ci + 8;
+      int ce = body.indexOf('"', cs);
+      if (ce > cs) code = body.substring(cs, ce);
+    }
+    int i = ei + 13;
+    while (i < len && (body[i] == ' ' || body[i] == '"')) i++;
+    int j = i;
+    while (j < len && isDigit(body[j])) j++;
+    if (j == i) { pos = ei + 13; break; }
+    unsigned long long ms = strtoull(body.substring(i, j).c_str(), NULL, 10);
+    pos = j;
+
+    int v = body.indexOf("\"value\":", pos);
+    if (v < 0) break;
+    v += 8;
+    while (v < len && body[v] == ' ') v++;
+    int e2 = -1;
+    String val;
+    if (v < len && body[v] == '"') {
+      int vs = v + 1;
+      e2 = body.indexOf('"', vs);
+      if (e2 < 0) break;
+      val = body.substring(vs, e2);
+    } else {
+      e2 = v;
+      while (e2 < len && (isDigit(body[e2]) || body[e2] == '-' || body[e2] == '.')) e2++;
+      val = body.substring(v, e2);
+    }
+    pos = e2 + 1;
+
+    time_t et = (time_t)(ms / 1000ULL);
+    // облако отдаёт UTC — переводим в «местное» время файла
+    long etLoc = (long)et + sGF.tzOff;
+    if (code.length() == 0) {
+      // облако не сказало код: цифры — температура, иначе phase_a (как в histTick)
+      bool digits = val.length() > 0;
+      for (int k = 0; k < (int)val.length(); k++)
+        if (!isDigit(val[k]) && val[k] != '-' && val[k] != '.') { digits = false; break; }
+      code = digits ? "temp_current" : "phase_a";
+    }
+
+    if (code == "phase_a") {
+      // только внутри пропуска: границы уже есть в файле
+      if (etLoc <= g.a || etLoc >= g.b) continue;
+      if (sGF.poolN >= GF_POOL) continue;
+      uint8_t raw[12];
+      if (b64decode(val.c_str(), raw, sizeof(raw)) < 8) continue;
+      int volt = ((uint16_t)raw[0] << 8) | raw[1];
+      int pwr  = ((uint16_t)raw[6] << 8) | raw[7];
+      if (volt < 800 || volt > 4000) continue;      // 80.0..400.0 В
+      if (pwr < 0 || pwr > 20000) continue;
+      GapRow& r = sGfRow[sGF.poolN++];
+      r.t = (uint32_t)etLoc;
+      r.v = (uint16_t)((volt + 5) / 10);
+      r.p = (uint16_t)pwr;
+      r.e = 0;
+      r.tc = INT16_MIN;
+      (*nPh)++;
+    } else if (code == "temp_current") {
+      if (etLoc < g.a - 120 || etLoc > g.b + 120) continue;
+      // temp_current приходит в десятых градуса («223» = 22.3)
+      float tv = val.toFloat();
+      int t10 = (int)(tv + (tv >= 0 ? 0.5f : -0.5f));
+      if (t10 < -400 || t10 > 1000) continue;
+      if (sGF.nTmp < GF_MAX_TMP) {
+        sGfTmp[sGF.nTmp].t = (uint32_t)etLoc;
+        sGfTmp[sGF.nTmp].v = (int16_t)t10;
+        sGF.nTmp++;
+        (*nT)++;
+      }
+    } else if (code == "total_forward_energy") {
+      if (etLoc < g.a - 3600 || etLoc > g.b + 60) continue;
+      int32_t ev = (int32_t)(val.toFloat() + 0.5f);   // сотые кВт·ч
+      if (ev <= 0) continue;
+      if (sGF.nEn < GF_MAX_EN) {
+        sGfEn[sGF.nEn].t = (uint32_t)etLoc;
+        sGfEn[sGF.nEn].e = ev;
+        sGF.nEn++;
+        (*nE)++;
+      }
+    }
+    esp_task_wdt_reset();
+  }
+}
+
+static int gfRowCmp(const void* a, const void* b) {
+  const GapRow* x = (const GapRow*)a;
+  const GapRow* y = (const GapRow*)b;
+  if (x->t < y->t) return -1;
+  if (x->t > y->t) return 1;
+  return 0;
+}
+
+// ---------------------------------------------------------------- шаг 3: значения
+// Счётчик: облачные записи берём, только если они попадают в диапазон
+// [до пропуска .. после пропуска]. Иначе — линейная интерполяция между
+// соседними строками. Так счётчик внутри пропуска не убывает и энергия
+// за сутки не меняется — она и раньше считалась по разнице концов.
+static void gfFinalize(GapItem& g) {
+  if (g.rowN > 1) {
+    qsort(sGfRow + g.row0, g.rowN, sizeof(GapRow), gfRowCmp);
+    int w = 1;                                    // убрать дубли по времени
+    for (int k = 1; k < g.rowN; k++)
+      if (sGfRow[g.row0 + k].t != sGfRow[g.row0 + w - 1].t) {
+        if (w != k) sGfRow[g.row0 + w] = sGfRow[g.row0 + k];
+        w++;
+      }
+    g.rowN = (uint16_t)w;
+  }
+  bool interp = (g.ea > 0 && g.eb >= g.ea && g.b > g.a);
+  int32_t prevE = g.ea;
+  g.srcE = 0;
+  for (int k = 0; k < g.rowN; k++) {
+    GapRow& r = sGfRow[g.row0 + k];
+    // счётчик
+    int32_t e = 0;
+    if (interp) {
+      long long num = (long long)(g.eb - g.ea) * (long long)((long)r.t - g.a);
+      e = g.ea + (int32_t)(num / (long long)(g.b - g.a));
+      if (sGF.nEn > 0) {
+        int best = -1;
+        uint32_t bd = 0xFFFFFFFFUL;
+        for (int j = 0; j < sGF.nEn; j++) {
+          uint32_t d = (sGfEn[j].t > r.t) ? (sGfEn[j].t - r.t) : (r.t - sGfEn[j].t);
+          if (d < bd) { bd = d; best = j; }
+        }
+        if (best >= 0 && sGfEn[best].e >= g.ea && sGfEn[best].e <= g.eb) {
+          e = sGfEn[best].e;
+          g.srcE++;
+        }
+      }
+      if (e < g.ea) e = g.ea;
+      if (e > g.eb) e = g.eb;
+      if (e < prevE) e = prevE;             // монотонно внутри пропуска
+      prevE = e;
+    }
+    r.e = e;
+    // температура: ближайшая запись, если она рядом
+    r.tc = INT16_MIN;
+    if (sGF.nTmp > 0) {
+      int best = -1;
+      uint32_t bd = 0xFFFFFFFFUL;
+      for (int j = 0; j < sGF.nTmp; j++) {
+        uint32_t d = (sGfTmp[j].t > r.t) ? (sGfTmp[j].t - r.t) : (r.t - sGfTmp[j].t);
+        if (d < bd) { bd = d; best = j; }
+      }
+      if (best >= 0 && bd <= (uint32_t)GF_TEMP_NEAR) r.tc = sGfTmp[best].v;
+    }
+  }
+}
+
+// ---------------------------------------------------------------- шаг 4: запись
+// Одна строка CSV: время,В,Вт,кВт·ч,реле,0.00,°C
+// Рубли 0.00 — метка «восстановлено облаком».
+static int gfMakeRow(const GapRow* r, char* out, int cap) {
+  time_t et = (time_t)r->t;
+  struct tm lt;
+  gmtime_r(&et, &lt);            // местное время, как во всём файле
+  char et2[12];
+  if (r->e > 0) snprintf(et2, sizeof(et2), "%d.%02d", (int)(r->e / 100), (int)(r->e % 100));
+  else          strcpy(et2, "0");
+  int relay = (r->p > 0) ? 1 : 0;
+  int ol;
+  if (r->tc == INT16_MIN)
+    ol = snprintf(out, cap, "%04d-%02d-%02d %02d:%02d:%02d,%u,%u,%s,%d,0.00,\n",
+                  lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday,
+                  lt.tm_hour, lt.tm_min, lt.tm_sec,
+                  (unsigned)r->v, (unsigned)r->p, et2, relay);
+  else
+    ol = snprintf(out, cap, "%04d-%02d-%02d %02d:%02d:%02d,%u,%u,%s,%d,0.00,%.1f\n",
+                  lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday,
+                  lt.tm_hour, lt.tm_min, lt.tm_sec,
+                  (unsigned)r->v, (unsigned)r->p, et2, relay, r->tc / 10.0f);
+  if (ol < 0 || ol >= cap) return -1;
+  return ol;
+}
+
+// Перезапись /energy.csv -> /energy.tmp с вставкой строк в нужные места.
+// Вставляем ПОСЛЕ строки с номером g.line — номера посчитаны при сканировании,
+// а файл с тех пор только дописывался в конец, поэтому номера не съехали.
+// Если байт прочитано не столько, сколько было, — отказ (файл изменился).
+static bool gfRewrite(size_t expect, int* outIns, size_t* outSz, size_t* outLines) {
+  File src = SD.open("/energy.csv", FILE_READ);
+  if (!src) return false;
+  File dst = SD.open("/energy.tmp", FILE_WRITE);
+  if (!dst) { src.close(); return false; }
+
+  static uint8_t buf[512 + 256];
+  char line[200];
+  int carry = 0;
+  uint32_t li = 0;
+  int gi = 0;
+  int ins = 0;
+  size_t readTotal = 0, wrote = 0, lines = 0;
+  bool ok = true;
+
+  while (src.available() && ok) {
+    int n = src.read(buf + carry, 512);
+    if (n <= 0) break;
+    readTotal += (size_t)n;
+    int total = carry + n;
+    int i = 0;
+    while (i < total) {
+      uint8_t* nl = (uint8_t*)memchr(buf + i, '\n', total - i);
+      if (!nl) break;
+      int len = (int)(nl - (buf + i));
+      if (len > 0 && buf[i + len - 1] == '\r') len--;
+      if (dst.write(buf + i, (size_t)len) != (size_t)len) { ok = false; break; }
+      if (dst.write((uint8_t*)"\n", 1) != 1) { ok = false; break; }
+      wrote += (size_t)len + 1;
+      lines++;
+
+      while (gi < sGF.gaps && (int32_t)sGf[gi].line == (int32_t)li) {
+        GapItem& g = sGf[gi];
+        for (int k = 0; k < g.rowN; k++) {
+          int ol = gfMakeRow(&sGfRow[g.row0 + k], line, sizeof(line));
+          if (ol <= 0 || dst.write((uint8_t*)line, (size_t)ol) != (size_t)ol) { ok = false; break; }
+          wrote += (size_t)ol;
+          ins++;
+        }
+        gi++;
+        if (!ok) break;
+      }
+      li++;
+      i = (int)(nl - buf) + 1;
+      if ((li & 255) == 0) { esp_task_wdt_reset(); yield(); }
+    }
+    if (!ok) break;
+    carry = total - i;
+    if (carry > 0) memmove(buf, buf + i, carry);
+    if (carry > 240) { ok = false; break; }      // строка длиннее буфера
+    esp_task_wdt_reset();
+  }
+
+  // Последняя строка без перевода строки.
+  if (ok && carry > 0) {
+    int len = carry;
+    if (len > 0 && buf[len - 1] == '\r') len--;
+    if (dst.write(buf, (size_t)len) != (size_t)len ||
+        dst.write((uint8_t*)"\n", 1) != 1) ok = false;
+    else { wrote += (size_t)len + 1; lines++; }
+  }
+
+  if (readTotal != expect) ok = false;         // файл вырос/подменён под нами
+
+  dst.flush();
+  dst.close();
+  src.close();
+
+  if (!ok || lines == 0 || ins == 0) {
+    SD.remove("/energy.tmp");
+    Serial.printf("GAPFILL-ERR: перезапись не удалась (прочитано %u из %u, строк %u, вставок %d)\n",
+                  (unsigned)readTotal, (unsigned)expect, (unsigned)lines, ins);
+    return false;
+  }
+  File t = SD.open("/energy.tmp", FILE_READ);
+  size_t ts = t ? t.size() : 0;
+  t.close();
+  if (ts == 0 || ts != wrote) {
+    SD.remove("/energy.tmp");
+    Serial.printf("GAPFILL-ERR: размер .tmp %u != записано %u\n", (unsigned)ts, (unsigned)wrote);
+    return false;
+  }
+  *outIns = ins;
+  *outSz = ts;
+  *outLines = lines;
+  return true;
+}
+
+// Бэкап, перезапись, подмена файла. Вызывается один раз, когда все окна
+// облака собраны. Любая ошибка -> /energy.csv остаётся прежним.
+static bool gfCommit(int* outIns) {
+  *outIns = 0;
+  int total = 0;
+  for (int i = 0; i < sGF.gaps; i++) total += sGf[i].rowN;
+  Serial.printf("GAPFILL: пропусков %d, строк к вставке %d\n", sGF.gaps, total);
+  if (total == 0) {
+    Serial.println("GAPFILL: облако не дало строк — /energy.csv не трогаю");
+    return false;
+  }
+  if (!gSdOk) { Serial.println("GAPFILL-ERR: карта недоступна"); return false; }
+
+  // Хвосты прошлого запуска.
+  if (SD.exists("/energy.old") && !SD.exists("/energy.csv"))
+    SD.rename("/energy.old", "/energy.csv");
+  if (SD.exists("/energy.old")) SD.remove("/energy.old");
+  if (SD.exists("/energy.tmp")) SD.remove("/energy.tmp");
+
+  size_t sz = csvFileSize();
+  if (sz < 20) {
+    Serial.println("GAPFILL-ERR: /energy.csv пуст или недоступен");
+    return false;
+  }
+
+  uint64_t totalB = SD.totalBytes();
+  uint64_t used   = SD.usedBytes();
+  uint64_t freeB  = (totalB > used) ? (uint64_t)(totalB - used) : 0;
+  uint64_t need   = (uint64_t)sz * 4ULL + 65536ULL;
+  if (totalB > 0) {
+    Serial.printf("GAPFILL: место: свободно %llu, нужно %llu\n",
+                  (unsigned long long)freeB, (unsigned long long)need);
+    if (freeB < need) {
+      Serial.println("GAPFILL-ERR: МАЛО МЕСТА для .bak и .tmp — файл не трогаю");
+      return false;
+    }
+  }
+
+  // 1. Проверенная копия в /energy.bak (сначала .bak.tmp, потом подмена).
+  if (SD.exists("/energy.bak.tmp")) SD.remove("/energy.bak.tmp");
+  size_t copied = 0;
+  Serial.printf("GAPFILL: копия /energy.bak (%u байт)\n", (unsigned)sz);
+  if (!pwrHistCopy("/energy.csv", "/energy.bak.tmp", sz, &copied)) {
+    Serial.printf("GAPFILL-ERR: копия не удалась (%u из %u) — файл не трогаю\n",
+                  (unsigned)copied, (unsigned)sz);
+    return false;
+  }
+  File b = SD.open("/energy.bak.tmp", FILE_READ);
+  size_t bs = b ? b.size() : 0;
+  b.close();
+  if (bs != sz) {
+    SD.remove("/energy.bak.tmp");
+    Serial.printf("GAPFILL-ERR: размер копии %u != %u — файл не трогаю\n",
+                  (unsigned)bs, (unsigned)sz);
+    return false;
+  }
+  if (SD.exists("/energy.bak.old")) SD.remove("/energy.bak.old");
+  bool moved = true;
+  if (SD.exists("/energy.bak")) moved = SD.rename("/energy.bak", "/energy.bak.old");
+  if (!moved) {
+    SD.remove("/energy.bak.tmp");
+    Serial.println("GAPFILL-ERR: не смог отодвинуть старый /energy.bak");
+    return false;
+  }
+  if (!SD.rename("/energy.bak.tmp", "/energy.bak")) {
+    if (SD.exists("/energy.bak.old")) SD.rename("/energy.bak.old", "/energy.bak");
+    Serial.println("GAPFILL-ERR: не смог поставить /energy.bak");
+    return false;
+  }
+  if (SD.exists("/energy.bak.old")) SD.remove("/energy.bak.old");
+  Serial.println("GAPFILL: копия проверена, собираю новый файл");
+
+  // 2. Новый файл с вставками.
+  int ins = 0;
+  size_t tmpSz = 0, lines = 0;
+  if (!gfRewrite(sz, &ins, &tmpSz, &lines)) {
+    Serial.println("GAPFILL-ERR: перезапись не удалась — /energy.csv не тронут, /energy.bak цел");
+    return false;
+  }
+  Serial.printf("GAPFILL: строк %u, вставлено %d, /energy.tmp %u байт\n",
+                (unsigned)lines, ins, (unsigned)tmpSz);
+  if (ins != total) {
+    SD.remove("/energy.tmp");
+    Serial.printf("GAPFILL-ERR: вставлено %d из %d — файл не трогаю\n", ins, total);
+    return false;
+  }
+
+  // 3. Подмена: оригинал -> .old, .tmp -> /energy.csv.
+  if (!SD.rename("/energy.csv", "/energy.old")) {
+    SD.remove("/energy.tmp");
+    Serial.println("GAPFILL-ERR: не смог переименовать /energy.csv — файл не тронут");
+    return false;
+  }
+  if (!SD.rename("/energy.tmp", "/energy.csv")) {
+    SD.rename("/energy.old", "/energy.csv");
+    SD.remove("/energy.tmp");
+    Serial.println("GAPFILL-ERR: не смог поставить новый файл — вернул оригинал из .old");
+    return false;
+  }
+  if (SD.exists("/energy.old")) SD.remove("/energy.old");
+
+  File chk = SD.open("/energy.csv", FILE_READ);
+  size_t newSz = chk ? chk.size() : 0;
+  chk.close();
+  if (newSz != tmpSz) {
+    Serial.printf("GAPFILL-ERR: размер после подмены %u != %u; оригинал в /energy.bak\n",
+                  (unsigned)newSz, (unsigned)tmpSz);
+  } else {
+    Serial.printf("GAPFILL: /energy.csv обновлён, %u байт (было %u)\n",
+                  (unsigned)newSz, (unsigned)sz);
+  }
+
+  // 4. Кэши карты и статистика — заново: мин/макс/пик считаются с учётом
+  //    восстановленных строк.
+  sDaysFileSize = 0; sDaysAt = 0; histCacheDrop(); gSdGen++;
+  sEvFileSize = 0;   sEvAt = 0;
+  gDayLoaded = -1;
+  resetStats();
+  statsSeeded = false;
+  seedStatsFromSd();
+  if (gDayOffset > 0) dayLoadFromSd(gDayOffset);
+  gLastDraw = 0; gLastWinFull = 0; gLastSig = 0;
+  *outIns = ins;
+  return true;
+}
+
+// Отмена: вернуть /energy.csv из проверенной копии /energy.bak.
+// Нужна, если заполнение оказалось неверным (например, облако отдало чужое
+// время). Схема та же: временная копия -> проверка размера -> подмена.
+static bool gfRestoreBak() {
+  if (!gSdOk) { Serial.println("GAPFILL-ERR: нет карты"); return false; }
+  if (!SD.exists("/energy.bak")) { Serial.println("GAPFILL-ERR: файла /energy.bak нет"); return false; }
+  File b = SD.open("/energy.bak", FILE_READ);
+  size_t bs = b ? b.size() : 0;
+  b.close();
+  if (bs < 1000) {
+    Serial.printf("GAPFILL-ERR: /energy.bak подозрительно мал (%u байт)\n", (unsigned)bs);
+    return false;
+  }
+  uint64_t totalB = SD.totalBytes();
+  uint64_t used   = SD.usedBytes();
+  uint64_t freeB  = (totalB > used) ? (uint64_t)(totalB - used) : 0;
+  if (totalB > 0 && freeB < (uint64_t)bs + 65536ULL) {
+    Serial.println("GAPFILL-ERR: мало места для восстановления из .bak");
+    return false;
+  }
+  if (SD.exists("/energy.rest.tmp")) SD.remove("/energy.rest.tmp");
+  size_t copied = 0;
+  if (!pwrHistCopy("/energy.bak", "/energy.rest.tmp", bs, &copied)) {
+    Serial.printf("GAPFILL-ERR: копия из .bak не удалась (%u из %u)\n",
+                  (unsigned)copied, (unsigned)bs);
+    return false;
+  }
+  if (SD.exists("/energy.old")) SD.remove("/energy.old");
+  if (!SD.rename("/energy.csv", "/energy.old")) {
+    SD.remove("/energy.rest.tmp");
+    Serial.println("GAPFILL-ERR: не смог отодвинуть /energy.csv");
+    return false;
+  }
+  if (!SD.rename("/energy.rest.tmp", "/energy.csv")) {
+    SD.rename("/energy.old", "/energy.csv");
+    SD.remove("/energy.rest.tmp");
+    Serial.println("GAPFILL-ERR: не смог поставить файл из .bak — вернул как было");
+    return false;
+  }
+  if (SD.exists("/energy.old")) SD.remove("/energy.old");
+  File chk = SD.open("/energy.csv", FILE_READ);
+  size_t newSz = chk ? chk.size() : 0;
+  chk.close();
+  Serial.printf("GAPFILL: /energy.csv восстановлен из /energy.bak, %u байт\n", (unsigned)newSz);
+  sDaysFileSize = 0; sDaysAt = 0; histCacheDrop(); gSdGen++;
+  sEvFileSize = 0;   sEvAt = 0;
+  gDayLoaded = -1;
+  resetStats();
+  statsSeeded = false;
+  seedStatsFromSd();
+  if (gDayOffset > 0) dayLoadFromSd(gDayOffset);
+  gLastDraw = 0; gLastWinFull = 0; gLastSig = 0;
+  return newSz == bs;
+}
+
+// ---------------------------------------------------------------- автомат
+bool gapFillStart(bool run) {
+  if (sGF.phase != GF_IDLE) { Serial.println("GAPFILL: уже выполняется"); return false; }
+  if (!gSdOk) { Serial.println("GAPFILL-ERR: нет карты"); return false; }
+  if (pwrHistActive()) { Serial.println("GAPFILL: ждёт PWRHIST"); return false; }
+  if (gHistStep != 0) { Serial.println("GAPFILL: ждёт histTick"); return false; }
+  if (nowLocalEpoch() <= 0) { Serial.println("GAPFILL-ERR: часы не выставлены"); return false; }
+  sGF.run = run ? 1 : 0;
+  sGF.phase = GF_SCAN;
+  sGF.gi = 0;
+  sGF.poolN = 0;
+  sGF.inserted = 0;
+  sGF.retry = 0;
+  sGF.nextMs = millis();
+  sGF.started = millis();
+  strcpy(sGF.msg, run ? "поиск пропусков" : "проверка пропусков");
+  return true;
+}
+
+void gapFillSchedule(unsigned long delayMs) {
+  sGF.phase = GF_IDLE;
+  sGF.run = 1;
+  sGF.gi = 0;
+  sGF.poolN = 0;
+  sGF.inserted = 0;
+  sGF.retry = 0;
+  sGF.nextMs = millis() + delayMs;
+  sGF.started = millis();
+  sGF.pending = 1;
+  strcpy(sGF.msg, "запланировано");
+  Serial.printf("GAPFILL: запуск через %lu с\n", delayMs / 1000UL);
+}
+
+void gapFillTick() {
+  // Напряжение устарело — сеть отдаётся облаку (cloudTick). GAPFILL — самая
+  // тяжёлая задача (десятки запросов report-logs) и ждёт.
+  if (voltStale(180000UL) && sGF.phase != GF_IDLE && sGF.phase != GF_COMMIT) return;
+  if (sGF.phase == GF_IDLE) {
+    // Отложенный запуск (после старта платы, чтобы не мешать загрузке).
+    if (sGF.pending && (long)(millis() - sGF.nextMs) >= 0) {
+      sGF.pending = 0;
+      if (pwrHistActive() || gHistStep != 0) { sGF.pending = 1; sGF.nextMs = millis() + 15000UL; }
+      else gapFillStart(true);
+    }
+    return;
+  }
+  if ((long)(millis() - sGF.nextMs) < 0) return;
+  if (millis() < gTouchSkip) return;
+  if (millis() - gTouchMs < 1500UL) return;
+
+  // ---- шаг 1: поиск пропусков
+  if (sGF.phase == GF_SCAN) {
+    int n = gapScan();
+    if (n < 0) {
+      sGF.phase = GF_IDLE;
+      strcpy(sGF.msg, "ошибка чтения карты");
+      Serial.println("GAPFILL-ERR: не смог прочитать /energy.csv");
+      return;
+    }
+    Serial.printf("GAPFILL: пропусков %d, суммарно %ld мин, сегодня %d (%d мин)\n",
+                  n, sGF.gapSec / 60, sGF.todayN, sGF.todayMin);
+    for (int i = 0; i < n; i++) {
+      char s1[24], s2[24];
+      gfStamp(sGf[i].a, s1, sizeof(s1));
+      gfStamp(sGf[i].b, s2, sizeof(s2));
+      Serial.printf("GAPFILL:   %d) %s -> %s, %.1f мин\n",
+                    i + 1, s1, s2, (sGf[i].b - sGf[i].a) / 60.0);
+    }
+    gLastDraw = 0;                    // на экране ИТОГИ появится пометка
+    if (n == 0) {
+      sGF.phase = GF_IDLE;
+      strcpy(sGF.msg, "пропусков нет");
+      if (sGF.run) Serial.println("GAPFILL: пропусков нет — заполнять нечего");
+      return;
+    }
+    if (!sGF.run) {
+      sGF.phase = GF_IDLE;
+      strcpy(sGF.msg, "dry-run: показал, не писал");
+      return;
+    }
+    if (WiFi.status() != WL_CONNECTED) { sGF.phase = GF_IDLE; strcpy(sGF.msg, "нет Wi-Fi"); return; }
+    if (!netOnline()) { sGF.phase = GF_IDLE; strcpy(sGF.msg, "нет интернета"); return; }
+    sGF.tzOff = gfTzOffset();
+    sGF.gi = 0;
+    sGF.poolN = 0;
+    sGF.phase = GF_FETCH;
+    sGF.nextMs = millis() + 300UL;
+    strcpy(sGF.msg, "облако: окна");
+    return;
+  }
+
+  // ---- шаг 2: окна облака
+  if (sGF.phase == GF_FETCH) {
+    if (WiFi.status() != WL_CONNECTED) { sGF.phase = GF_IDLE; strcpy(sGF.msg, "нет Wi-Fi"); return; }
+    if (!netOnline()) { sGF.phase = GF_IDLE; strcpy(sGF.msg, "нет интернета"); return; }
+    if (sGF.gi >= sGF.gaps) {
+      sGF.phase = GF_COMMIT;
+      sGF.nextMs = millis() + 100UL;
+      return;
+    }
+    GapItem& g = sGf[sGF.gi];
+    if (g.st == 0) {                       // начать пропуск
+      g.row0 = (uint16_t)sGF.poolN;
+      g.rowN = 0;
+      g.srcE = 0;
+      g.st = 1;
+      g.w = 0;
+      long span = g.b - g.a;
+      long wn = (span + GF_WIN - 1) / GF_WIN;
+      if (wn < 1) wn = 1;
+      if (wn > GF_MAX_WIN) wn = GF_MAX_WIN;
+      g.wN = (uint16_t)wn;
+      sGF.nEn = 0;
+      sGF.nTmp = 0;
+      sGF.retry = 0;
+      char s1[24], s2[24];
+      gfStamp(g.a, s1, sizeof(s1));
+      gfStamp(g.b, s2, sizeof(s2));
+      Serial.printf("GAPFILL: %d/%d %s -> %s, окон %d\n", sGF.gi + 1, sGF.gaps, s1, s2, (int)g.wN);
+      sGF.nextMs = millis();
+      return;
+    }
+
+    if (!cloudToken()) {
+      sGF.phase = GF_IDLE;
+      strcpy(sGF.msg, "облако не дало токен");
+      Serial.println("GAPFILL-ERR: облако не дало токен");
+      return;
+    }
+
+    long ws = g.a + (long)g.w * GF_WIN;
+    long we = ws + GF_WIN;
+    if (we > g.b) we = g.b;
+    // В запрос — UTC: вычитаем местное смещение, иначе окно уедет на +3 часа.
+    long wsU = ws - sGF.tzOff;
+    long weU = we - sGF.tzOff;
+    char path[280];
+    snprintf(path, sizeof(path),
+             "/v1.0/devices/%s/report-logs?codes=phase_a,temp_current,total_forward_energy"
+             "&end_time=%llu&size=100&start_time=%llu",
+             DEVICE_ID, (unsigned long long)weU * 1000ULL, (unsigned long long)wsU * 1000ULL);
+    String body;
+    if (repWait()) return;                        // общий лимит report-logs
+    bool okGf = cloudCall("GET", String(path), body, 14000);
+    repDone();
+    if (!okGf) {
+      if (++sGF.retry >= 3) {
+        sGF.phase = GF_IDLE;
+        strcpy(sGF.msg, "облако не ответило 3 раза");
+        Serial.println("GAPFILL-ERR: облако не ответило 3 раза");
+        return;
+      }
+      sGF.nextMs = millis() + 2500UL;
+      return;
+    }
+    if (body.indexOf("\"success\":true") < 0) {
+      if (body.indexOf("too frequent") >= 0) {
+        sGF.retry = 0;
+        sGF.nextMs = millis() + 10000UL;
+        return;
+      }
+      if (++sGF.retry >= 3) {
+        sGF.phase = GF_IDLE;
+        strcpy(sGF.msg, "облако вернуло ошибку");
+        return;
+      }
+      sGF.nextMs = millis() + 3000UL;
+      return;
+    }
+    sGF.retry = 0;
+
+    int nph = 0, nt = 0, ne = 0;
+    int before = sGF.poolN;
+    gfParseWindow(body, g, &nph, &nt, &ne);
+    g.rowN = (uint16_t)(sGF.poolN - g.row0);
+    int hm = body.indexOf("\"has_more\":");
+    if (hm >= 0) {
+      int hp = hm + 11;
+      while (hp < (int)body.length() && (body[hp] == ' ' || body[hp] == '"')) hp++;
+      if (body.substring(hp, hp + 4) == "true")
+        Serial.println("GAPFILL: внимание, окно обрезано облаком (has_more)");
+    }
+    Serial.printf("GAPFILL:   окно %d/%d — phase_a %d, темп %d, счётчик %d, строк %d\n",
+                  (int)g.w + 1, (int)g.wN, nph, nt, ne, sGF.poolN - before);
+    sGF.nextMs = millis() + 1300UL;
+    if (++g.w >= g.wN) {
+      gfFinalize(g);
+      g.st = 2;
+      char s1[24], s2[24];
+      gfStamp(g.a, s1, sizeof(s1));
+      gfStamp(g.b, s2, sizeof(s2));
+      Serial.printf("GAPFILL: %s -> %s готово, строк %d (счётчик из облака у %d)\n",
+                    s1, s2, (int)g.rowN, (int)g.srcE);
+      sGF.gi++;
+      sGF.nextMs = millis() + 700UL;
+    }
+    return;
+  }
+
+  // ---- шаг 3: запись в файл
+  if (sGF.phase == GF_COMMIT) {
+    gGapBusy = true;
+    int ins = 0;
+    bool ok = gfCommit(&ins);
+    gGapBusy = false;
+    sGF.inserted = ins;
+    sGF.phase = GF_IDLE;
+    if (ok) {
+      sGF.insTotal += ins;
+      strcpy(sGF.msg, "готово");
+      Serial.printf("GAPFILL-DONE: вставлено %d строк; /energy.bak цел\n", ins);
+      gapScan();                      // пометка о пропусках — по новому файлу
+    } else {
+      strcpy(sGF.msg, "не вышло, файл не тронут");
+      Serial.println("GAPFILL: заполнение не удалось — /energy.csv не тронут");
+    }
+    gLastDraw = 0;
+    return;
+  }
+}
+
+// Отчёт о найденных пропусках в JSON — для /gapfill (dry-run).
+// Кэш: gapScan() читает весь файл (~0.5-1.1 с) прямо в обработчике. Отчёт
+// зависит только от содержимого файла, поэтому годен, пока размер не изменился.
+// 10 секунд — чтобы веб-страница, дёргающая /gapfill при каждом открытии,
+// не заставляла плату читать 0.5 МБ заново.
+static String sGapJsonCache;
+static size_t sGapJsonSize = 0;
+static unsigned long sGapJsonAt = 0;
+#define GAPJSON_TTL 10000UL
+
+String gapFillJson() {
+  String out;
+  long nowE = nowLocalEpoch();
+  out.reserve(1200);
+  out = "{\"ok\":true,\"n\":";
+  out += String(sGF.gaps);
+  out += ",\"sec\":";
+  out += String(sGF.gapSec);
+  out += ",\"min\":";
+  out += String((int)((sGF.gapSec + 59) / 60));
+  out += ",\"todayN\":";
+  out += String(sGF.todayN);
+  out += ",\"todayMin\":";
+  out += String(sGF.todayMin);
+  out += ",\"active\":";
+  out += String(gapFillActive() ? 1 : 0);
+  out += ",\"inserted\":";
+  out += String(sGF.insTotal);
+  out += ",\"gaps\":[";
+  for (int i = 0; i < sGF.gaps; i++) {
+    char s1[24], s2[24];
+    gfStamp(sGf[i].a, s1, sizeof(s1));
+    gfStamp(sGf[i].b, s2, sizeof(s2));
+    if (i) out += ',';
+    out += "{\"a\":\"";
+    out += s1;
+    out += "\",\"b\":\"";
+    out += s2;
+    out += "\",\"min\":";
+    out += String((int)((sGf[i].b - sGf[i].a + 30) / 60));
+    // can=1 — пропуск уже старше 5 минут, его можно заполнять (пауза свежая
+    // дыра может быть ещё в процессе записи)
+    out += ",\"age\":";
+    out += String(nowE > sGf[i].b ? (long)(nowE - sGf[i].b) : 0L);
+    out += ",\"can\":";
+    out += String((nowE - sGf[i].b) >= GF_AGE ? 1 : 0);
+    out += '}';
+  }
+  out += "]}";
+  return out;
 }
 
 void webSetup() {
-  gWeb.on("/", []() { gWeb.send(200, "text/html; charset=utf-8", webPage()); });
+  gWeb.on("/", []() { pageSend(); });
 
   gWeb.on("/data", []() {
-    char b[320];
+    char b[2400];   // запас: ответ ~800 Б, +новые поля
+    char nows[24] = "";
+    struct tm ti;
+    if (getLocalTime(&ti, 10))
+      snprintf(nows, sizeof(nows), "%04d-%02d-%02d %02d:%02d:%02d",
+               ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday,
+               ti.tm_hour, ti.tm_min, ti.tm_sec);
+    // Возраст и epoch-время получения для КАЖДОГО показателя. Пока значение
+    // ни разу не приходило (gXxxMs == 0) — возраст и время равны нулю.
+    unsigned long aV = (millis() - gPhaseMs) / 1000UL;
+    unsigned long aT = gTempMs   ? (millis() - gTempMs)   / 1000UL : 0;
+    unsigned long aP = gPowerMs  ? (millis() - gPowerMs)  / 1000UL : 0;
+    unsigned long aE = gEnergyMs ? (millis() - gEnergyMs) / 1000UL : 0;
+    // cAge — сколько секунд назад была последняя ПОПЫТКА облака (не удача).
+    unsigned long aC = gCloudTryMs ? (millis() - gCloudTryMs) / 1000UL : 0;
+    time_t nowT = time(nullptr);
+    bool clockOk = (nowT > 1700000000L);        // время синхронизировано по NTP
+    long atV = (gPhaseMs  && clockOk) ? (long)(nowT - aV) : 0;
+    long atT = (gTempMs   && clockOk) ? (long)(nowT - aT) : 0;
+    long atP = (gPowerMs  && clockOk) ? (long)(nowT - aP) : 0;
+    long atE = (gEnergyMs && clockOk) ? (long)(nowT - aE) : 0;
     snprintf(b, sizeof(b),
       "{\"v\":%.0f,\"temp\":%.1f,\"p\":%.1f,\"amp\":%.2f,\"e\":%.2f,"
       "\"r\":%s,\"tkwh\":%.3f,\"tcost\":%.2f,\"ykwh\":%.3f,\"ykost\":%.2f,"
       "\"mkwh\":%.2f,\"mcost\":%.2f,\"tariff\":%.2f,\"rssi\":%d,\"sdRows\":%d,"
-      "\"vAge\":%lu,\"stale\":%s,"
-      "\"net\":%s,\"heap\":%u}",
+      "\"vAge\":%lu,\"tAge\":%lu,\"pAge\":%lu,\"eAge\":%lu,"
+      "\"vAt\":%ld,\"tAt\":%ld,\"pAt\":%ld,\"eAt\":%ld,\"stale\":%s,"
+      "\"tapRawX\":%d,\"tapRawY\":%d,\"tapX\":%d,\"tapY\":%d,\"chartHour\":%d,"
+      "\"calYL\":%d,\"calYR\":%d,\"calXT\":%d,\"calXB\":%d,\"tlN\":%d,\"tl\":[[%d,%d,%d,%d],[%d,%d,%d,%d],[%d,%d,%d,%d],[%d,%d,%d,%d],[%d,%d,%d,%d],[%d,%d,%d,%d],[%d,%d,%d,%d],[%d,%d,%d,%d]],"
+      "\"net\":%s,\"heap\":%u,\"up\":%lu,\"redraw\":%lu,\"drawN\":%lu,\"winRefresh\":%lu,"
+      "\"ph\":%d,\"phDay\":%d,\"phHour\":%d,\"phOk\":%d,\"phMiss\":%d,"
+      "\"gaps\":%d,\"gapMin\":%d,\"gapN\":%d,\"gapFillOk\":%d,\"gapAct\":%d,\"gapPh\":%d,"
+      "\"day\":%d,\"dayMs\":%lu,\"dayRows\":%d,\"pageN\":%lu,\"pageMs\":%lu,"
+      "\"pageSend\":%lu,"
+      "\"loopMs\":%lu,\"loopMaxMs\":%lu,\"loopMaxAll\":%lu,"
+      "\"sdMs\":%lu,\"gapMs\":%lu,\"histMs\":%lu,\"apiN\":%lu,"
+      "\"cTry\":%lu,\"cOk\":%lu,\"tk\":%lu,\"ns\":%d,\"phf\":%d,\"wfs\":%d,"
+      // Диагностика цепочки облака: почему не пришло напряжение.
+      "\"cWhy\":%d,\"cAge\":%lu,\"cFail\":%lu,\"cliSt\":%d,\"cliHttp\":%d,"
+      "\"cliLen\":%d,\"cliWant\":%d,\"vSeen\":%d,\"maxAlloc\":%u,\"free\":%u,"
+      "\"msCloud\":%lu,\"msTuya\":%lu,\"msWrite\":%lu,\"creuse\":%lu,"
+      "\"p1\":%d,\"p2\":%d,\"ty\":%d,\"msDns\":%lu,\"msTls\":%lu,\"phN\":%lu,\"phR\":%lu,"
+      "\"disp\":%d,\"bright\":%d,\"wake\":%lu,\"dtouch\":%d,\"beep\":%d,\"vol\":%d,\"led\":%d,"
+      "\"now\":\"%s\"}",
       gVoltage, gTemp, gPower, gCurrent, gEnergy,
       gRelay ? "true" : "false", myTodayKwh, myTodayCost, yKwh, yCost,
       mKwh, mCost, measuredTariff(), gRssi, gSdRows,
-      (unsigned long)((millis() - gPhaseMs) / 1000UL),
-      ((millis() - gPhaseMs) > 120000UL) ? "true" : "false",
-      gNetOk ? "true" : "false", ESP.getFreeHeap());
+      aV, aT, aP, aE, atV, atT, atP, atE,
+      ((millis() - gPhaseMs) > 180000UL) ? "true" : "false",
+      gTapRawX, gTapRawY, gTapMapX, gTapMapY, gChartHour,
+      calYleft, calYright, calXtop, calXbottom, gTLn,
+      gTLraw[0][0],gTLraw[0][1],gTLmap[0][0],gTLmap[0][1],
+      gTLraw[1][0],gTLraw[1][1],gTLmap[1][0],gTLmap[1][1],
+      gTLraw[2][0],gTLraw[2][1],gTLmap[2][0],gTLmap[2][1],
+      gTLraw[3][0],gTLraw[3][1],gTLmap[3][0],gTLmap[3][1],
+      gTLraw[4][0],gTLraw[4][1],gTLmap[4][0],gTLmap[4][1],
+      gTLraw[5][0],gTLraw[5][1],gTLmap[5][0],gTLmap[5][1],
+      gTLraw[6][0],gTLraw[6][1],gTLmap[6][0],gTLmap[6][1],
+      gTLraw[7][0],gTLraw[7][1],gTLmap[7][0],gTLmap[7][1],
+      gNetOk ? "true" : "false", ESP.getFreeHeap(),
+      millis() / 1000UL, gRedrawN, gDrawN, gWinRefreshN,
+      sPH.active ? 1 : 0, sPH.day, sPH.hour, sPH.hoursOk, sPH.hoursMissing,
+      // gaps/gapMin — пропуски СЕГОДНЯ (метка на экране ИТОГИ и в вебе),
+      // gapN — сколько нашёл последний проход, gapFillOk — сколько вставлено.
+      gapTodayCount(), gapTodayMinutes(), sGF.gaps, sGF.insTotal,
+      gapFillActive() ? 1 : 0, (int)sGF.phase,
+      gDayOffset, (unsigned long)gDayMs, (gDayOffset > 0) ? gDayRows : 0,
+      sPageBuildN, sPageBuildMs,
+      sPageSendMs,
+      gLoopLast, gLoopMaxWin, gLoopMaxAll,
+      gMsSd, gMsGap, gMsHist, gApiN,
+      gCloudTry, gCloudOkN, gTokenN, gNetStep, gPwrFillHour, gWifiSetState,
+      gCloudWhy, aC, gCloudFailRun, gCliStage, gCliHttp,
+      gCliLen, gCliWant, gPhaseMs ? 1 : 0, ESP.getMaxAllocHeap(), ESP.getFreeHeap(),
+      gMsCloud, gMsTuya, gMsWrite, gCloudReuse,
+      gProbe1 ? 1 : 0, gProbe2 ? 1 : 0, gTuyaOk ? 1 : 0, gMsDns, gMsTls, gPhaseN, gPhaseRelayN,
+      gDispOn ? 1 : 0, gDispOn ? gDispBright : 0,
+      dispWakeActive() ? (unsigned long)((gDispWakeUntil - millis()) / 1000UL) : 0,
+      gDispTouch ? 1 : 0, gBeepOn ? 1 : 0, gBeepVol, gLedState,
+      nows);
     gWeb.send(200, "application/json", String(b));
+  });
+
+  // Почасовая история за день: /history?date=YYYY-MM-DD
+  gWeb.on("/history", []() {
+    // мусорная дата не должна молча отдавать сегодняшние данные
+    if (gWeb.hasArg("date")) {
+      String dd = gWeb.arg("date");
+      bool okDate = (dd.length() == 10 && dd[4] == (char)45 && dd[7] == (char)45);
+      for (int k = 0; okDate && k < 10; k++)
+        if (k != 4 && k != 7 && !isDigit(dd[k])) okDate = false;
+      if (!okDate) { gWeb.send(400, "application/json", "{\"error\":\"date\"}"); return; }
+    }
+    char date[12];
+    bool ok = false;
+    if (gWeb.hasArg("date")) {
+      String d = gWeb.arg("date");
+      if (d.length() == 10) {
+        bool good = true;
+        for (int i = 0; i < 10; i++) {
+          char c = d[i];
+          if (i == 4 || i == 7) { if (c != '-') good = false; }
+          else if (c < '0' || c > '9') good = false;
+        }
+        if (good) { memcpy(date, d.c_str(), 10); date[10] = 0; ok = true; }
+      }
+    }
+    if (!ok) {
+      struct tm ti;
+      if (getLocalTime(&ti, 10)) {
+        snprintf(date, sizeof(date), "%04d-%02d-%02d",
+                 ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+        ok = true;
+      }
+    }
+    if (!ok) {
+      gWeb.send(400, "application/json; charset=utf-8", "{\"error\":\"date\"}");
+      return;
+    }
+    unsigned long ms = 0;
+    bool trunc = false;
+    // Кэш: тот же день и тот же размер файла — отдаём готовый JSON, карту не
+    // трогаем. Иначе каждый заход = чтение до 1 МБ внутри handleClient.
+    size_t csz = csvFileSize();
+    bool isToday = false;
+    {
+      struct tm ti2;
+      if (getLocalTime(&ti2, 5)) {
+        char td[12];
+        snprintf(td, sizeof(td), "%04d-%02d-%02d",
+                 ti2.tm_year + 1900, ti2.tm_mon + 1, ti2.tm_mday);
+        isToday = (strcmp(td, date) == 0);
+      }
+    }
+    unsigned long ttl = isToday ? HIST_TTL_TODAY : HIST_TTL_PAST;
+    if (sHistAt != 0 && sHistJsonOut.length() > 0 && sHistFileSize == csz &&
+        strcmp(sHistDate, date) == 0 && millis() - sHistAt < ttl) {
+      gWeb.send(200, "application/json; charset=utf-8", sHistJsonOut);
+      return;
+    }
+    if (!histScan(date, &ms, &trunc)) {
+      gWeb.send(500, "application/json; charset=utf-8", "{\"error\":\"sd\"}");
+      return;
+    }
+    gMsHist = ms;
+    sHistJsonOut = histJson(date, ms, trunc);
+    memcpy(sHistDate, date, 10);
+    sHistDate[10] = 0;
+    sHistFileSize = csz;
+    sHistAt = millis();
+    gWeb.send(200, "application/json; charset=utf-8", sHistJsonOut);
+  });
+
+  // Список дат с данными (свежие первыми, до 30)
+  gWeb.on("/days", []() {
+    if (!gSdOk) {
+      gWeb.send(500, "application/json; charset=utf-8", "{\"days\":[]}");
+      return;
+    }
+    size_t sz = csvFileSize();
+    if (!daysFresh(sz)) {
+      unsigned long ms = 0;
+      size_t scanned = 0;
+      if (!scanDays(&scanned, &ms)) {
+        gWeb.send(500, "application/json; charset=utf-8", "{\"days\":[]}");
+        return;
+      }
+      sDaysFileSize = scanned;
+      sDaysAt = millis();
+      buildDaysJson(ms);
+    }
+    gWeb.send(200, "application/json; charset=utf-8", sDaysJson);
+  });
+
+  // Последние переключения реле (по 5-му полю истории)
+  gWeb.on("/events", []() {
+    if (!gSdOk) {
+      gWeb.send(500, "application/json; charset=utf-8", "{\"events\":[]}");
+      return;
+    }
+    size_t sz = csvFileSize();
+    if (!eventsFresh(sz)) {
+      uint32_t ts[10];
+      uint8_t rs[10];
+      size_t scanned = 0;
+      unsigned long ms = 0;
+      int n = scanEvents(ts, rs, &scanned, &ms);
+      if (n < 0) {
+        gWeb.send(500, "application/json; charset=utf-8", "{\"events\":[]}");
+        return;
+      }
+      sEvFileSize = scanned;
+      sEvAt = millis();
+      buildEventsJson(ts, rs, n, ms);
+    }
+    gWeb.send(200, "application/json; charset=utf-8", sEvJson);
+  });
+
+  // Диагностика тача без COM-порта: /tap?x=120&y=82 возвращает номер экрана.
+  // Нужна для проверки диспетчера, когда USB-порт занят монитором.
+  gWeb.on("/tap", []() {
+    if (!gWeb.hasArg("x") || !gWeb.hasArg("y")) {
+      gWeb.send(400, "application/json", "{\"err\":\"x,y\"}");
+      return;
+    }
+    int x = gWeb.arg("x").toInt();
+    int y = gWeb.arg("y").toInt();
+    handleTapAt(x, y);
+    char b[32];
+    snprintf(b, sizeof(b), "{\"scr\":%d}", gScreen);
+    gWeb.send(200, "application/json", String(b));
+  });
+
+  // Смена сети БЕЗ USB: /wifiset?ssid=...&pass=...
+  // Нужно для проверки: чтобы отправить команду по serial, компьютер открывает
+  // COM5, а это дёргает DTR/RTS и ПЕРЕЗАГРУЖАЕТ плату — потом это выглядит как
+  // «плата перезагрузилась при смене сети», хотя виноват USB, а не прошивка.
+  gWeb.on("/wifiset", []() {
+    if (!gWeb.hasArg("ssid") || gWeb.arg("ssid").length() == 0) {
+      gWeb.send(200, "application/json; charset=utf-8",
+                "{\"ok\":false,\"err\":\"нужен ?ssid=...&pass=...\"}");
+      return;
+    }
+    if (gWifiSetState != 0) {
+      char b[80];
+      snprintf(b, sizeof(b), "{\"ok\":false,\"err\":\"busy\",\"state\":%d}", gWifiSetState);
+      gWeb.send(200, "application/json; charset=utf-8", String(b));
+      return;
+    }
+    String cmd = "WIFISET \"" + gWeb.arg("ssid") + "\" \"" + gWeb.arg("pass") + "\"";
+    gWifiSetPendingCmd = cmd;          // запустим СЛЕДУЮЩИМ проходом loop()
+    gWeb.send(200, "application/json; charset=utf-8",
+              "{\"ok\":true,\"started\":true,\"ssid\":\"" + gWeb.arg("ssid") + "\"}");
+  });
+
+  // Запуск PWRHIST без USB: /pwrhist?range=2026-10-23%202026-10-29  // Прогресс — в /data (ph, phDay, phHour, phOk, phMiss) и в serial.
+  gWeb.on("/pwrhist", []() {
+    String args = gWeb.hasArg("range") ? gWeb.arg("range") : "";
+    bool ok = pwrHistStart(args);
+    if (!ok) {
+      String why = sPH.msg[0] ? String(sPH.msg) : String("см. serial");
+      gWeb.send(200, "application/json; charset=utf-8",
+                "{\"ok\":false,\"err\":\"" + why + "\"}");
+      return;
+    }
+    gWeb.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // Итог PWRHIST без COM-порта: чем кончилось и на каком этапе облако.
+  // Обработчик ОДИН (см. ниже, у /gapfill/status) — здесь только заготовка
+  // комментария, чтобы не плодить второй gWeb.on на тот же путь.
+
+  // Один запрос report-logs напрямую — проверить облако без COM-порта.
+  // /cloudtest                — окно 20 мин, закончившееся 10 минут назад
+  // /cloudtest?code=phase_a&size=100&t0=<epoch>&t1=<epoch>
+  gWeb.on("/cloudtest", []() {
+    time_t nowE = time(nullptr);
+    if (nowE < 1600000000) {
+      gWeb.send(200, "text/plain; charset=utf-8", "часы не выставлены");
+      return;
+    }
+    long t1 = gWeb.hasArg("t1") ? gWeb.arg("t1").toInt() : (long)(nowE - 600);
+    long t0 = gWeb.hasArg("t0") ? gWeb.arg("t0").toInt() : (t1 - 1200);
+    String code = gWeb.hasArg("code") ? gWeb.arg("code") : "phase_a";
+    int size = gWeb.hasArg("size") ? gWeb.arg("size").toInt() : 100;
+    char path[280];
+    snprintf(path, sizeof(path),
+             "/v1.0/devices/%s/report-logs?codes=%s&end_time=%llu&size=%d&start_time=%llu",
+             DEVICE_ID, code.c_str(), (unsigned long long)t1 * 1000ULL, size,
+             (unsigned long long)t0 * 1000ULL);
+    String body;
+    unsigned long q0 = millis();
+    bool ok = cloudCall("GET", String(path), body, 16000);
+    unsigned long qm = millis() - q0;
+    char h[220];
+    snprintf(h, sizeof(h),
+             "ok=%d stage=%d http=%d len=%d want=%d ms=%lu\npath=%s\n---\n",
+             ok ? 1 : 0, gCliStage, gCliHttp, (int)body.length(), gCliWant, qm, path);
+    String out = h;
+    out += body.substring(0, 800);
+    gWeb.send(200, "text/plain; charset=utf-8", out);
+  });
+
+  // История последних облачных запросов (кольцо из 8) — после 2 часов работы
+  // видно, были ли отказы между опросами /data.
+  gWeb.on("/clog", []() {
+    String out = "uptime_ms stage why http len\n";
+    int n = gClRingI < 8 ? gClRingI : 8;
+    for (int k = 0; k < n; k++) {
+      ClRec& r = gClRing[(gClRingI - n + k) & 7];
+      char l[80];
+      snprintf(l, sizeof(l), "%lu %s %d %d %d\n", r.at, cliStageName(r.stage),
+               (int)r.why, (int)r.http, (int)r.len);
+      out += l;
+    }
+    out += "cTry="; out += String(gCloudTry);
+    out += " cOk=";  out += String(gCloudOkN);
+    out += " cFail="; out += String(gCloudFailRun);
+    out += " cAge="; out += String(gCloudTryMs ? (millis() - gCloudTryMs) / 1000UL : 0);
+    out += " vAge="; out += String(voltAgeMs() / 1000UL);
+    out += " vSeen="; out += String(gPhaseMs ? 1 : 0);
+    out += "\n";
+    gWeb.send(200, "text/plain; charset=utf-8", out);
+  });
+
+  // ГДЕ именно рвётся облако: DNS -> TCP:443 -> TLS. Без этого «connect failed»
+  // не отличить отказ TCP от нехватки памяти под TLS (mbedTLS просит ~16 КБ
+  // одним куском, а фрагментированная куча его не даёт).
+  gWeb.on("/netdiag", []() {
+    String out;
+    char b[300];
+    IPAddress ip;
+    unsigned long t0 = millis();
+    int dn = WiFi.hostByName(TUYA_HOST, ip);
+    snprintf(b, sizeof(b), "dns=%d ip=%s ms=%lu free=%u maxAlloc=%u\n",
+             dn, ip.toString().c_str(), millis() - t0,
+             ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    out += b;
+    // проба: можно ли взять блоки, которые нужны TLS (16 и 32 КБ)
+    {
+      char pr[80] = "";
+      void* p1 = malloc(16384);
+      void* p2 = malloc(32768);
+      snprintf(pr, sizeof(pr), "malloc16=%d malloc32=%d\n", p1 ? 1 : 0, p2 ? 1 : 0);
+      out += pr;
+      free(p1); free(p2);
+    }
+    WiFiClient pc;
+    t0 = millis();
+    bool tcp = (pc.connect(ip, 443, 3000) == 1);
+    snprintf(b, sizeof(b), "tcp443=%d ms=%lu\n", tcp ? 1 : 0, millis() - t0);
+    out += b;
+    pc.stop();
+    {
+      WiFiClientSecure sc;
+      sc.setInsecure(); sc.setTimeout(10);
+      t0 = millis();
+      bool tls = (sc.connect(TUYA_HOST, 443, 3000) == 1);
+      char eb[100] = "";
+      sc.lastError(eb, sizeof(eb));
+      snprintf(b, sizeof(b), "tls=%d ms=%lu free=%u maxAlloc=%u err=%s\n",
+               tls ? 1 : 0, millis() - t0, ESP.getFreeHeap(), ESP.getMaxAllocHeap(), eb);
+      out += b;
+      sc.stop();
+    }
+    gWeb.send(200, "text/plain; charset=utf-8", out);
+  });
+
+  // Освободить кэш страницы (30 КБ) — проверить, влияет ли он на TLS.
+  // sPage = String() память НЕ отдаёт (строка оставляет буфер), поэтому
+  // пересоздаём объект: сначала деструктор, потом новый на том же месте.
+  gWeb.on("/pagefree", []() {
+    unsigned free0 = ESP.getFreeHeap();
+    unsigned max0 = ESP.getMaxAllocHeap();
+    pageCacheFree();
+    char b[180];
+    snprintf(b, sizeof(b), "free %u -> %u, maxAlloc %u -> %u\n",
+             free0, ESP.getFreeHeap(), max0, ESP.getMaxAllocHeap());
+    gWeb.send(200, "text/plain; charset=utf-8", String(b));
+  });
+
+  // GAPFILL: /gapfill — показать найденные пропуски (dry-run, ничего не пишет),
+  // /gapfill?run=1 — запустить заполнение в фоне, /gapfill/status — прогресс.
+  gWeb.on("/gapfill", []() {
+    if (!gSdOk) {
+      gWeb.send(500, "application/json; charset=utf-8", "{\"ok\":false,\"err\":\"sd\"}");
+      return;
+    }
+    if (gWeb.hasArg("run") && gWeb.arg("run") == "1") {
+      bool ok = gapFillStart(true);
+      sGapJsonAt = 0;
+      char b[160];
+      snprintf(b, sizeof(b), "{\"ok\":%s,\"started\":%s,\"gaps\":%d,\"active\":%d}",
+               ok ? "true" : "false", ok ? "true" : "false", sGF.gaps,
+               gapFillActive() ? 1 : 0);
+      gWeb.send(200, "application/json; charset=utf-8", String(b));
+      return;
+    }
+    if (gWeb.hasArg("undo") && gWeb.arg("undo") == "1") {
+      // отмена: вернуть файл из проверенной копии /energy.bak
+      gGapBusy = true;
+      bool ok = gfRestoreBak();
+      gGapBusy = false;
+      sGapJsonAt = 0;
+      gWeb.send(ok ? 200 : 500, "application/json; charset=utf-8",
+                ok ? "{\"ok\":true,\"restored\":true}"
+                   : "{\"ok\":false,\"err\":\"см. serial\"}");
+      return;
+    }
+    // dry-run: отчёт зависит только от файла — не читаем его заново, если
+    // размер не изменился и отчёту меньше 10 с.
+    size_t gsz = csvFileSize();
+    if (sGapJsonAt != 0 && sGapJsonCache.length() > 0 && sGapJsonSize == gsz &&
+        millis() - sGapJsonAt < GAPJSON_TTL) {
+      gWeb.send(200, "application/json; charset=utf-8", sGapJsonCache);
+      return;
+    }
+    unsigned long gapT0 = millis();
+    int n = gapScan();       // блокирующе, ~0.5 с: файл 400 КБ читается один раз
+    gMsGap = millis() - gapT0;
+    if (n < 0) {
+      gWeb.send(500, "application/json; charset=utf-8", "{\"ok\":false,\"err\":\"read\"}");
+      return;
+    }
+    gLastDraw = 0;
+    sGapJsonCache = gapFillJson();
+    sGapJsonSize = gsz;
+    sGapJsonAt = millis();
+    gWeb.send(200, "application/json; charset=utf-8", sGapJsonCache);
+  });
+
+  // Откат одним адресом: /restorebak (то же, что /gapfill?undo=1).
+  gWeb.on("/restorebak", []() {
+    gGapBusy = true;
+    bool ok = gfRestoreBak();
+    gGapBusy = false;
+    gWeb.send(ok ? 200 : 500, "application/json; charset=utf-8",
+              ok ? "{\"ok\":true,\"restored\":true}"
+                 : "{\"ok\":false,\"err\":\"см. serial\"}");
+  });
+
+  gWeb.on("/gapfill/status", []() {
+    File f = SD.open("/energy.csv", FILE_READ);
+    size_t csvSz = f ? f.size() : 0; f.close();
+    f = SD.open("/energy.bak", FILE_READ);
+    size_t bakSz = f ? f.size() : 0; f.close();
+    char b[300];
+    snprintf(b, sizeof(b),
+             "{\"active\":%d,\"phase\":%d,\"gap\":%d,\"gaps\":%d,\"rows\":%d,"
+             "\"ins\":%d,\"insTotal\":%d,\"ok\":%d,\"todayN\":%d,\"todayMin\":%d,"
+             "\"csv\":%u,\"bak\":%u,\"msg\":\"%s\"}",
+             gapFillActive() ? 1 : 0, (int)sGF.phase, sGF.gi, sGF.gaps, sGF.poolN,
+             sGF.inserted, sGF.insTotal, sGF.phase == GF_IDLE && sGF.inserted > 0 ? 1 : 0,
+             sGF.todayN, sGF.todayMin, (unsigned)csvSz, (unsigned)bakSz, sGF.msg);
+    gWeb.send(200, "application/json; charset=utf-8", String(b));
+  });
+
+  // Прогресс/итог PWRHIST без COM-порта. Один обработчик на путь: поля
+  // msg/cliSt/... добавлены к прежним csv/bak/peak, контракт не сломан.
+  gWeb.on("/pwrhist/status", []() {
+    File f = SD.open("/energy.csv", FILE_READ);
+    size_t csvSz = f ? f.size() : 0; f.close();
+    f = SD.open("/energy.bak", FILE_READ);
+    size_t bakSz = f ? f.size() : 0; f.close();
+    f = SD.open("/energy.peak", FILE_READ);
+    size_t peakSz = f ? f.size() : 0; f.close();
+    char b[520];
+    snprintf(b, sizeof(b),
+             "{\"active\":%d,\"day\":%d,\"hour\":%d,\"ok\":%d,\"miss\":%d,"
+             "\"csv\":%u,\"bak\":%u,\"peak\":%u,"
+             "\"msg\":\"%s\",\"cliSt\":%d,\"cliHttp\":%d,\"cliLen\":%d,\"cliWant\":%d}",
+             sPH.active ? 1 : 0, sPH.day, sPH.hour, sPH.hoursOk, sPH.hoursMissing,
+             (unsigned)csvSz, (unsigned)bakSz, (unsigned)peakSz,
+             sPH.msg, gCliStage, gCliHttp, gCliLen, gCliWant);
+    gWeb.send(200, "application/json; charset=utf-8", String(b));
   });
 
   // Полная выгрузка истории потоком — для бэкапа на компьютер/NAS
@@ -4068,9 +9681,20 @@ void webSetup() {
   // качается кусками по 4 МБ, каждый кусок укладывается в таймаут.
   gWeb.on("/full", []() {
     if (!gSdOk) { gWeb.send(500, "text/plain", "нет карты"); return; }
-    File f = SD.open("/energy.csv", FILE_READ);
+    // ?file=energy-2026-09.csv — выгрузка месячного архива.
+    // Пускаем только имена energy.csv и energy-YYYY-MM.csv (без слэшей).
+    String fname = "/energy.csv";
+    if (gWeb.hasArg("file")) {
+      String a = gWeb.arg("file");
+      if (a == "energy.csv" ||
+          (a.startsWith("energy-") && a.endsWith(".csv") && a.length() == 18)) {
+        fname = "/" + a;
+      }
+    }
+    File f = SD.open(fname, FILE_READ);
     if (!f) { gWeb.send(500, "text/plain", "нет файла"); return; }
     size_t total = f.size();
+
 
     size_t from = 0, want = total;
     if (gWeb.hasArg("from")) from = (size_t)strtoul(gWeb.arg("from").c_str(), NULL, 10);
@@ -4082,7 +9706,7 @@ void webSetup() {
     char hdr[80];
     snprintf(hdr, sizeof(hdr), "%u/%u", (unsigned)total, (unsigned)(from + want));
     gWeb.sendHeader("X-File-Size", hdr);
-    gWeb.sendHeader("Content-Disposition", "attachment; filename=energy.csv");
+    gWeb.sendHeader("Content-Disposition", "attachment; filename=" + fname.substring(1));
     gWeb.setContentLength(want);
     gWeb.send(200, "text/csv; charset=utf-8", "");
 
@@ -4094,12 +9718,31 @@ void webSetup() {
       size_t n = f.read(buf, sizeof(buf));
       if (n == 0) break;
       if (n > want - sent) n = want - sent;
-      gWeb.client().write(buf, n);
-      sent += n;
+      // write() может принять МЕНЬШЕ, чем просили (буфер TCP полон, Wi-Fi
+      // просел). Раньше результат не проверялся — и выгрузка молча теряла
+      // хвост: IncompleteRead 292 209 из 293 233 байт.
+      size_t off = 0;
+      while (off < n) {
+        size_t w = gWeb.client().write(buf + off, n - off);
+        if (w == 0) {
+          if (!gWeb.client().connected()) break;
+          delay(1);
+          esp_task_wdt_reset();
+          continue;
+        }
+        off += w;
+      }
+      sent += off;
       esp_task_wdt_reset();
+      if (off < n) break;                    // клиент отвалился на середине
+      if ((sent & 0x7FFF) == 0) yield();     // каждые 32 КБ — тачу и вебу
       if (millis() - t0 > 100000UL) break;   // кусок не больше 100 с
     }
+    bool conn = gWeb.client().connected();
     f.close();
+    if (!conn || sent != want)
+      Serial.printf("веб: выгрузка ОБОРВАНА %u из %u байт (connected=%d)\n",
+                    (unsigned)sent, (unsigned)want, conn ? 1 : 0);
     Serial.printf("веб: выгрузка %u..%u из %u байт\n",
                   (unsigned)from, (unsigned)(from + sent), (unsigned)total);
   });
@@ -4113,8 +9756,10 @@ void webSetup() {
     f.seek(off);
     String out = "datetime,voltage,power,energy_kwh,relay,cost,temp\n";
     bool first = (off > 0);
+    int rd = 0;
     while (f.available()) {
       String l = f.readStringUntil('\n');
+      if ((++rd & 1023) == 0) { esp_task_wdt_reset(); yield(); }
       if (first) { first = false; continue; }
       out += l; out += '\n';
     }
@@ -4133,19 +9778,128 @@ void webSetup() {
     int per[24];
     memset(per, 0, sizeof(per));
     String out = String("строки по часам за ") + pre + ": ";
+    // Только хвост файла (~200 КБ): сутки — это ~130-150 КБ строк. Читаем
+    // БЛОКАМИ, а не readStringUntil: построчный разбор 200 КБ занимал 3.2 с
+    // (String на каждую строку), блочный — доли секунды.
+    size_t sz = f.size();
+    size_t off = (sz > 200000UL) ? (sz - 200000UL) : 0;
+    f.seek(off);
+    if (off > 0) f.readStringUntil('\n');     // первая строка может быть обрезана
+    static char buf[4096 + 160];
+    int carry = 0, rd = 0;
     while (f.available()) {
-      String l = f.readStringUntil('\n');
-      if (!l.startsWith(pre)) continue;
-      int hh = l.substring(11, 13).toInt();
-      if (hh >= 0 && hh < 24) per[hh]++;
+      int n = (int)f.read((uint8_t*)(buf + carry), 4096);
+      if (n <= 0) break;
+      int total = carry + n;
+      int i = 0;
+      while (i < total) {
+        int nl = -1;
+        for (int j = i; j < total; j++) if (buf[j] == '\n') { nl = j; break; }
+        if (nl < 0) break;
+        int len = nl - i;
+        if (len >= 14 && memcmp(buf + i, pre, 10) == 0 &&
+            buf[i + 10] == ' ' && buf[i + 13] == ':') {
+          int hh = (buf[i + 11] - '0') * 10 + (buf[i + 12] - '0');
+          if (hh >= 0 && hh < 24) per[hh]++;
+        }
+        i = nl + 1;
+      }
+      carry = total - i;
+      if (carry > 0) memmove(buf, buf + i, carry);
+      if (carry > 150) carry = 0;
+      if ((++rd & 15) == 0) { esp_task_wdt_reset(); yield(); }
     }
     f.close();
     for (int i = 0; i < 24; i++) { out += String(i) + ":" + String(per[i]) + " "; }
     gWeb.send(200, "text/plain; charset=utf-8", out);
   });
 
+  // Список файлов истории — для бэкапа рабочих и месячных архивов.
+  gWeb.on("/files", []() {
+    if (!gSdOk) { gWeb.send(500, "text/plain", "нет карты"); return; }
+    String out = "{\"ok\":true,\"files\":[";
+    bool first = true;
+    File dir = SD.open("/");
+    if (dir) {
+      File e = dir.openNextFile();
+      while (e) {
+        if (!e.isDirectory()) {
+          String n = e.name();
+          int slash = n.lastIndexOf('/');
+          if (slash >= 0) n = n.substring(slash + 1);
+          if (n == "energy.csv" || n == "energy.bak" || n == "energy.peak" ||
+              (n.startsWith("energy-") && n.endsWith(".csv") && n.length() == 18)) {
+            if (!first) out += ",";
+            first = false;
+            out += "{\"name\":\"" + n + "\",\"size\":" +
+                   String((unsigned long)e.size()) + "}";
+          }
+        }
+        e.close();
+        e = dir.openNextFile();
+      }
+      dir.close();
+    }
+    out += "]}";
+    gWeb.send(200, "application/json", out);
+  });
+
+  // Диагностика ротации. По умолчанию dry-run: только показывает,
+  // нужна ли ротация. ?force=1 — выполнить (использовать осознанно).
+  gWeb.on("/rotate", []() {
+    if (!gSdOk) { gWeb.send(500, "text/plain", "нет карты"); return; }
+    struct tm ti;
+    if (!getLocalTime(&ti, 100)) { gWeb.send(500, "text/plain", "нет времени"); return; }
+    int stamp = (ti.tm_year + 1900) * 12 + ti.tm_mon;
+    int fileMonth = gSdMonth;
+    bool need = (fileMonth >= 0 && stamp != fileMonth);
+    bool force = gWeb.hasArg("force") && gWeb.arg("force") == "1";
+    bool rotated = false;
+    if (need && force) {
+      rotated = rotateHistory(stamp, false);
+      if (rotated) gSdMonth = stamp;
+    }
+    char b[240];
+    snprintf(b, sizeof(b),
+      "{\"ok\":true,\"month\":\"%04d-%02d\",\"file_month\":\"%04d-%02d\","
+      "\"need\":%s,\"force\":%s,\"rotated\":%s}",
+      ti.tm_year + 1900, ti.tm_mon + 1,
+      fileMonth >= 0 ? fileMonth / 12 : 0, fileMonth >= 0 ? fileMonth % 12 + 1 : 0,
+      need ? "true" : "false", force ? "true" : "false", rotated ? "true" : "false");
+    gWeb.send(200, "application/json", String(b));
+  });
+
+  // Подсветка без USB: /disp?on=0, /disp?bright=30, /disp?touch=0, /disp?wake=1
+  gWeb.on("/disp", []() {
+    if (gWeb.hasArg("bright")) {
+      int v = gWeb.arg("bright").toInt();
+      if (v < 0) v = 0;
+      if (v > 100) v = 100;
+      if (v == 0) dispSet(false, 0);
+      else        dispSet(true, (uint8_t)((v * 255 + 50) / 100));
+    }
+    if (gWeb.hasArg("on")) {
+      if (gWeb.arg("on").toInt() != 0) {
+        if (gDispBright == 0) gDispBright = 255;
+        dispSet(true, 0);
+      } else dispSet(false, 0);
+    }
+    if (gWeb.hasArg("touch")) {
+      gDispTouch = (gWeb.arg("touch").toInt() != 0);
+      dispSave();
+    }
+    if (gWeb.hasArg("wake") && gWeb.arg("wake") == "1") dispWake();
+    char b[96];
+    snprintf(b, sizeof(b),
+      "{\"ok\":true,\"on\":%d,\"bright\":%d,\"touch\":%d,\"wake\":%lu}",
+      gDispOn ? 1 : 0, gDispOn ? gDispBright : 0, gDispTouch ? 1 : 0,
+      dispWakeActive() ? (unsigned long)((gDispWakeUntil - millis()) / 1000UL) : 0);
+    gWeb.send(200, "application/json", String(b));
+  });
+
   gWeb.begin();
   Serial.println("веб: http://" + WiFi.localIP().toString() + "/");
+  mdnsBegin();                       // плата = cyd.local
 }
 
 // ============================================================================
@@ -4156,9 +9910,11 @@ void setup() {
   delay(1200);
   Serial.printf("\n=== ДОМ %s ===\n", FW_VER);
 
-  pinMode(21, OUTPUT);
-  analogWrite(21, 255);
-  ledInit();
+  dispLoad();          // яркость/вкл из NVS — до экрана, чтобы ночью не вспыхнуть
+  dispPwmBegin();      // ШИМ подсветки до tft.init()
+  ledInit();           // синий на время загрузки
+  gLedBootUntil = millis() + 3000;
+  beepInit();          // динамик: тишина (звук по умолчанию выключен)
 
   tpInit();
   loadCal();
@@ -4166,6 +9922,7 @@ void setup() {
 
   tft.init();
   tft.setRotation(0);
+  dispPwmBegin();      // TFT_eSPI трогает TFT_BL (21) — привязываем ШИМ заново
   tft.fillScreen(TFT_BLACK);
 
   // заставка своим шрифтом
@@ -4199,6 +9956,7 @@ void setup() {
   pickTheme();
 
   gSdOk = initSD();
+  if (gSdOk) initHistoryMonth();
   Serial.printf("SD: %s, строк %d\n", gSdOk ? "ok" : "нет", gSdRows);
 
   loadToday();
@@ -4217,6 +9975,12 @@ void setup() {
 
   drawScreen();
   gLastDraw = millis();
+  gPwrFillHour = 0;          // график мощности за прошлые часы — из облака
+  gPwrFillStopH = -1;
+  // GAPFILL: через минуту после старта добираем пропуски в /energy.csv из
+  // облака (перезагрузка при прошивке, бутлоадер, потеря Wi-Fi). Именно через
+  // минуту: загрузка экрана, счётчика и погоды важнее.
+  gapFillSchedule(60000);    // 60 с; sGF.phase = GF_IDLE до этого момента
   webSetup();                 // веб-страница для проверки без USB
   sendJsonStatus();
   sendJsonData();
@@ -4226,30 +9990,57 @@ void setup() {
 //  LOOP
 // ============================================================================
 void loop() {
+  unsigned long gLoopT0 = millis();      // замер затупаний (см. конец loop)
   static unsigned long lastPoll = 0;
   static unsigned long lastWeather = 0;
   static unsigned long lastToday = 0;
   static unsigned long lastPeriods = 0;
   static unsigned long lastSeed = 0;
-  static uint8_t netStep = 0;
+  static unsigned long lastSb = 0;
+  // gNetStep теперь глобальный (gNetStep) — его видно в /data
 
   // 1. Касание — САМЫМ ПЕРВЫМ, до любых тяжёлых операций: раньше HTTP,
   //    облако и SD держали цикл десятками секунд, и тач «умирал».
   handleTouch();
+  dispTick();               // подсветка: погасить после 20 с «касание — свет»
+  ledTick();                // светодиод: цвет по состоянию + мигание 1 Гц
+  beepTick();               // проигрывание пиков
+  beepEvents();             // тревоги: напряжение, перегрев, карта, час
+  wifiSetTick();            // WIFISET: смена сети шаг за шагом, без delay 20 с
+  // ОБЛАКО — ПЕРВЫМ, до любых дозаполнений: свежее напряжение важнее
+  // истории. Свой таймер (20 с), не зависит от gNetStep/PWRFILL/GAPFILL.
+  cloudTick();
+  pwrHistTick();            // PWRHIST: дозаполнение мощности прошлых дней
+  pwrFillTick();            // график мощности за прошлые часы — из облака
+  gapFillTick();            // GAPFILL: пропуски в /energy.csv из облака
   { // раз в 10 минут запоминаем время: пригодится после перезагрузки без сети
     static unsigned long lastClk = 0;
     if (millis() - lastClk > 600000UL) { lastClk = millis(); saveClock(); }
   }
   gWeb.handleClient();          // веб-страница: проверка без USB
+  // Кэш страницы (30 КБ) нужен, только пока страницу смотрят. Если её не
+  // просили 15 с — отдаём память обратно: она нужна TLS-запросу в облако.
+  // Симптом без этого: открыл /, и напряжение замирает до перезагрузки
+  // (mbedTLS: "SSL - Memory allocation failed").
+  if (sPage.length() && millis() - sPageAt > 15000UL) pageCacheFree();
+  // отложенная смена сети: ответ уже ушёл клиенту, теперь можно уходить из сети
+  if (gWifiSetPendingCmd.length()) {
+    String c2 = gWifiSetPendingCmd;
+    gWifiSetPendingCmd = "";
+    cmdWifiSet(c2);
+  }
   statsTick();
   // История на карту — ВСЕГДА: без Wi-Fi, без интернета, без облака.
   // Данные с реле идут по локальной сети, карта от интернета не зависит.
-  writeSd();
+  // histTick — ДО writeSd: если надо дозаполнить вчера, он успевает
+  // придержать запись сегодняшней строки (см. gHistHold).
+  histTick();                      // дозаполнение пропущенных часов из облака
+  { unsigned long w0 = millis(); writeSd(); unsigned long dw = millis() - w0;
+    if (dw > gMsWrite) gMsWrite = dw; }
   // v4.3: сторож устройств отключён — wdTick() не вызываем, чтобы не
   // тратить время на TCP. Функция осталась ниже для большого экрана.
   // wdTick();
   netOnline();                     // интернет? (проверка не чаще раза в 30 с)
-  histTick();                      // дозаполнение пропущенных часов из облака
 
   // 2. «сегодня» — раз в 5 с (карта читается не чаще раза в минуту)
   if (millis() - lastToday > 5000UL) {
@@ -4268,41 +10059,50 @@ void loop() {
   }
 
   // 3. Сеть: ОДНА тяжёлая операция за проход, между ними снова читаем тач.
-  if (netStep == 0 && millis() - lastPoll > 15000UL) netStep = 1;
-  if (netStep != 0) {
+  //    Пока идёт смена сети (WIFISET) — сетевые шаги не запускаем вовсе:
+  //    обрыв связи не должен занимать цикл.
+  //    5 с вместо 15: опрос реле локальный и дешёвый (~250 мс), зато
+  //    напряжение приходит чаще и vAge не растёт до минут.
+  if (gWifiSetState != 0) { gNetStep = 0; lastPoll = millis(); }
+  if (gNetStep == 0 && millis() - lastPoll > 5000UL) gNetStep = 1;
+  if (gNetStep != 0) {
     if (WiFi.status() != WL_CONNECTED) {
       if (!gWifiOff) WiFi.reconnect();   // WIFIOFF — не трогаем радио вообще
-      netStep = 0;
+      gNetStep = 0;
       lastPoll = millis();
     } else {
-      switch (netStep) {
+      switch (gNetStep) {
         case 1:
           gRssi = WiFi.RSSI();
-          gTuyaOk = tuyaQuery();
+          { unsigned long q0 = millis(); bool okq = tuyaQuery(); gMsTuya = millis() - q0;
+            gTuyaOk = okq;
+            if (okq) gRelayFailRun = 0;
+            else if (gRelayFailRun < 10) gRelayFailRun++; }
           break;
         case 2:
-          // раз в минуту — облако: даёт напряжение и мощность, даже если
-          // локальный протокол реле их не прислал.
-          // Если реле только что ответило (меньше 30 с назад), облако не нужно:
-          // это лишний TLS-запрос на 2-6 с.
-          // Без интернета cloudStatus() выходит сразу (netOnline()).
-          if (millis() - gCloudLast > 60000UL) {
-            gCloudLast = millis();
-            if (millis() - gPhaseMs > 30000UL) cloudStatus();
-          }
+          // ОБЛАКО ЗДЕСЬ БОЛЬШЕ НЕ ВЫЗЫВАЕТСЯ. Раньше стояло именно тут, и это
+          // была главная поломка: cloudStatus() получал управление только если
+          // автомат доходил до шага 2 (после tuyaQuery на шаге 1), а gNetStep
+          // сбрасывался при смене сети и на каждом «нет Wi-Fi». Плюс проверка
+          // millis()-gPhaseMs > 80000 выполнялась лишь раз в 30 с — стоило
+          // одному проходу застрять, и напряжение не обновлялось часами.
+          // Теперь облако живёт в cloudTick() первым делом в loop().
           break;
         case 3:
-          fetchFromApi();
+          // ПК-API (192.168.1.20:8090) уже мёртв. Раньше здесь на КАЖДОМ
+          // проходе было два таймаута по 2,5 с — это и были затупания.
+          // Теперь спрашиваем не чаще раза в 5 минут, и только при живом сети.
+          if (millis() - gApiLast > 300000UL && netOnline()) fetchFromApi();
           break;
         default:
           pushHistory();
           ledUpdate();
           sendJsonData();
           lastPoll = millis();
-          netStep = 0;
+          gNetStep = 0;
           break;
       }
-      if (netStep != 0) netStep++;      // 1 -> 2 -> 3 -> 4(default) -> 0
+      if (gNetStep != 0) gNetStep++;      // 1 -> 2 -> 3 -> 4(default) -> 0
       handleTouch();                    // между операциями — снова тач
     }
   }
@@ -4324,10 +10124,17 @@ void loop() {
     }
   }
 
-  // 5. Перерисовка — по СИГНАТУРЕ видимых данных, а не вслепую раз в 30 с.
+  // 5. Перерисовка — по СИГНАТУРЕ видимых данных, но НЕ чаще раза в 2 минуты:
+  //    напряжение/мощность меняются раз в 20-40 с, и без порога каждая такая
+  //    мелочь заливала все пять карточек (~139 КБ SPI) — 5 перерисовок за 3 мин.
+  //    Статус-бар при этом обновляется отдельно раз в 60 с.
+  if (!gDayLoading) {
   if (gScreen == SCR_MAIN) {
     uint32_t sig = screenSig();
-    if (gLastDraw == 0 || sig != gLastSig || millis() - gLastDraw > 60000UL) {
+    bool changed = (sig != gLastSig);
+    bool due = (millis() - gLastDraw > 300000UL);
+    if (gLastDraw == 0 || due ||
+        (changed && millis() - gLastDraw > 120000UL)) {
       gLastDraw = millis();
       refreshMain();
       gLastSig = screenSig();
@@ -4343,10 +10150,28 @@ void loop() {
       drawScreen();
       gLastSig = screenSig();
     } else if (screenSig() != gLastSig) {
-      gLastSig = screenSig();
-      refreshWindow();
+      // Прошлый день: живые ватты/вольты НЕ повод перерисовывать окно.
+      // Раньше statsTick() менял daySumP каждые 5 с, сигнатура «менялась»,
+      // и область 216x82 заливалась белым — это и было частое моргание.
+      // Историю обновляем только полным кадром раз в 5 минут (или при
+      // переключении дня). Для сегодняшнего дня — не чаще раза в 10 с.
+      if (gDayOffset > 0) {
+        gLastSig = screenSig();          // изменение запоминаем, но не рисуем
+      } else if (millis() - gLastWinRefresh > 10000UL) {
+        gLastSig = screenSig();
+        refreshWindow();
+      }
     }
     gLastDraw = millis();           // окно открыто — полную перерисовку не делаем
+  }
+  }
+
+  // Статус-бар (сеть / SD / сигнал) — отдельно от сигнатуры: rssi и число
+  // строк меняются постоянно, но перерисовывать из-за них пять карточек
+  // нельзя. Достаточно обновить нижнюю полоску раз в минуту.
+  if (gScreen == SCR_MAIN && millis() - lastSb > 60000UL) {
+    lastSb = millis();
+    drawStatusBar();
   }
 
   // статус в порт
@@ -4407,6 +10232,44 @@ void loop() {
       gWifiOff = false; gNetProbeMs = 0;
       bool okw = connectWifi(15000);
       Serial.printf("WiFi ВКЛЮЧЁН: %s\n", okw ? "подключился" : "нет связи");
+    } else if (up == "PWRFILL") {
+      // ВАЖНО: resetStats() стирает ВСЕ массивы. Без повторного заполнения
+      // из карты графики напряжения и температуры остаются пустыми.
+      resetStats();
+      statsSeeded = false;      // без этого seedStatsFromSd() выходит сразу
+      seedStatsFromSd();
+      gPwrFillHour = 0;
+      gPwrFillStopH = -1;
+      Serial.println("мощность: начинаю дозаполнение графика из облака");
+    } else if (up.startsWith("PWRHIST")) {
+      // PWRHIST [ГГГГ-ММ-ДД ГГГГ-ММ-ДД | ДД ДД] — мощность прошлых дней
+      String args = cmd.substring(7);
+      pwrHistStart(args);
+    } else if (up.startsWith("GAPFILL")) {
+      // GAPFILL — найти пропуски и заполнить; GAPFILL DRY — только показать
+      bool dry = (up.indexOf("DRY") >= 0);
+      if (!gapFillStart(!dry)) Serial.println("GAPFILL: не запустился (см. выше)");
+    } else if (up == "TAPTEST") {
+      gTapTest = !gTapTest;
+      gScreen = SCR_MAIN;
+      gChartHour = -1;
+      drawScreen();
+      gLastDraw = millis(); gLastSig = screenSig(); gLastWinFull = millis();
+      Serial.println(gTapTest ? "тач-тест ВКЛ" : "тач-тест ВЫКЛ");
+    } else if (up == "CALTOUCH") {
+      calTouchStart();
+    } else if (up == "CAL") {
+      Serial.printf("калибровка: yleft=%d yright=%d xtop=%d xbottom=%d\n",
+                    calYleft, calYright, calXtop, calXbottom);
+    } else if (up == "CALRESET") {
+      { Preferences p; p.begin("touchcal", false); p.clear(); p.end(); }
+      Serial.println("калибровка сброшена, перезагрузка...");
+      ledSetRaw(0, 0, 255);        // синий: плата уходит в перезагрузку
+      delay(300); ESP.restart();
+    } else if (up == "REBOOT") {
+      Serial.println("перезагрузка...");
+      ledSetRaw(0, 0, 255);
+      delay(300); ESP.restart();
     } else if (up == "PERIODRESET") {
     // Сброс базы месяца/вчера/сегодня в памяти платы.
     // Нужен после исправлений расчёта: иначе висят старые закэшированные цифры.
@@ -4445,8 +10308,18 @@ void loop() {
       gLastWinFull = 0;
       gLastDraw = 0;
       if (gScreen == SCR_TODAY) { drawScreen(); gLastSig = screenSig(); }
+  } else if (up.startsWith("WIFISET")) {
+      cmdWifiSet(cmd);
+  } else if (up == "IP") {
+      printIp();
   } else if (up == "STATUS") {
       sendJsonStatus();
+    } else if (up == "DISP" || up.startsWith("DISP ")) {
+      dispCommand(up);
+    } else if (up == "BEEP" || up.startsWith("BEEP ")) {
+      beepCommand(up);
+    } else if (up == "LED" || up.startsWith("LED ")) {
+      ledCommand(up);
     } else if (up.startsWith("TAP")) {
       int x = 0, y = 0;
       sscanf(up.c_str(), "TAP %d %d", &x, &y);
@@ -4456,5 +10329,13 @@ void loop() {
   }
 
   esp_task_wdt_reset();
+
+  // ---- замер: сколько длился этот проход (без delay внизу) -------------------
+  gLoopLast = millis() - gLoopT0;
+  if (gLoopLast > gLoopMaxWin) gLoopMaxWin = gLoopLast;
+  if (gLoopLast > gLoopMaxAll) gLoopMaxAll = gLoopLast;
+  if (gLoopWinAt == 0) gLoopWinAt = millis();
+  else if (millis() - gLoopWinAt > 60000UL) { gLoopWinAt = millis(); gLoopMaxWin = 0; }
+
   delay(5);          // 30 мс → 5 мс: цикл чаще, тач и сеть отзывчивее
 }
