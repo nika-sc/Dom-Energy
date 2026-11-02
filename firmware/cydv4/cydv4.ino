@@ -22,7 +22,9 @@
 #include <SPI.h>
 #include <SD.h>
 #include <time.h>
+#include <ArduinoJson.h>
 
+#include "secrets.h"      // MQTT и ключ OpenWeatherMap (OWM_KEY)
 #include "font5x7.h"
 
 // ---- GAPFILL: пределы и типы -----------------------------------------------
@@ -542,9 +544,12 @@ var opt={tip:function(x,i){
   if(!x.n)return out;
   out+="<br><b>"+num(x.kwh,2)+" кВт·ч</b> = средняя <b>"+num(x.p,0)+" Вт</b>";
   if(x.pmax>0){
-    out+="<br>пик <b>"+num(x.pmax,0)+" Вт</b>";
-    if(x.pmaxT)out+=" в "+x.pmaxT;
-    if(x.pmaxDur>0)out+=" ("+x.pmaxDur+" мин)";
+    var tp="<br>пик <b>"+num(x.pmax,0)+" Вт</b>";
+    if(x.pmaxT)tp+=" в "+x.pmaxT;
+    // pmaxDur в /history — СЕКУНДЫ (так удобнее и прошивке, и приложению),
+    // на экран выводим минуты: 180 → «длился 3 мин».
+    if(x.pmaxDur>0)tp+=", длился "+Math.max(1,Math.round(x.pmaxDur/60))+" мин";
+    out+=tp;
   }
   return out;
 }};
@@ -714,11 +719,12 @@ const char* TUYA_CID    = "YOUR_TUYA_CLIENT_ID";
 const char* TUYA_SECRET = "YOUR_TUYA_SECRET";
 const char* TUYA_HOST   = "openapi.tuyaeu.com";
 
-// wttr.in отдаёт компактную строку: +11°C|86%|↑5km/h|Partly Cloudy
-// Координаты ВАШЕГО ГОРОДА: YOUR_LAT, YOUR_LON. По названию wttr.in путает город
-// («your city» давало +4 °C вместо +14 °C), по координатам — верно.
+// Погода — OpenWeatherMap: wttr.in в сети пользователя заблокирован,
+// open-meteo (таймаут) и met.no (403) тоже недоступны. Координаты ВАШЕГО ГОРОДА:
+// YOUR_LAT, YOUR_LON. units=metric -> °C и м/с, lang=ru -> русское описание.
 const char* WEATHER_URL =
-  "http://wttr.in/~YOUR_LAT,YOUR_LON?format=%t|%h|%w|%C";
+  "https://api.openweathermap.org/data/2.5/weather?lat=YOUR_LAT&lon=YOUR_LON"
+  "&appid=" OWM_KEY "&units=metric&lang=ru";
 
 #define CMD_SESS_START   3
 #define CMD_SESS_RESP    4
@@ -1023,6 +1029,10 @@ double ddSumT = 0; long ddSecT = 0;
 float  ddMaxP = 0;
 double ddSumP = 0; long ddSecP = 0;
 int    ddMinVMin = -1, ddMaxVMin = -1, ddMinTMin = -1, ddMaxTMin = -1, ddPMin = -1;
+// Гистограмма мощности дня — чтобы окно МОЩНОСТЬ показало ДЛИТЕЛЬНОСТЬ пика
+// («ПИК 1840 Вт 14:23 (3 мин)»). В корзинах СЕКУНДЫ: строки CSV дают 30 с,
+// живые отсчёты recordStats() — свой dt. Тип корзин — pkdBucket()/pkDurSec().
+uint32_t gPkHist[33];
 
 // GAPFILL: пока идёт подмена /energy.csv, writeSd() новые строки не пишет —
 // иначе файл вырастет прямо под нами и перезапись отменится.
@@ -1087,6 +1097,7 @@ void resetStats() {
   statDayKwh = 0; statNightKwh = 0;
   for (int i = 0; i < H24_N; i++) { h24V[i] = 0; h24T[i] = 0; h24P[i] = 0; h24Mask[i] = 0; }
   for (int i = 0; i < 24; i++) { h24Pm[i] = 0; h24PmOk[i] = false; h24PmMin[i] = 0; }
+  memset(gPkHist, 0, sizeof(gPkHist));       // длительность пика — с чистого листа
 }
 
 void statsTick() {
@@ -1128,6 +1139,9 @@ void statsTick() {
     dayPSec += dt;
     h24P[slot] = gPower;
     h24Mask[slot] |= 4;
+    // Длительность пика СЕГОДНЯ: живые отсчёты добавляются сюда же, иначе
+    // гистограмма кончалась бы моментом загрузки (seedStatsFromSd).
+    if (gPower > 0) gPkHist[pkdBucket(gPower)] += (uint32_t)dt;
   }
 }
 
@@ -1252,7 +1266,9 @@ float gHistMin = 999, gHistMax = 0;
 
 float wTemp = 0, wWind = 0, wHum = 0;
 int   wCode = -1;
-String wDescEn = "";
+String wDescEn = "";     // английское (weather[0].main) — только для иконки
+String wDescRu = "";     // русское (weather[0].description) — на экран
+uint32_t wHeap = 0;      // heap сразу после последнего запроса — для /data
 unsigned long wLast = 0;
 time_t wTime = 0;
 bool  wOk = false;
@@ -1960,6 +1976,10 @@ bool seedStatsFromSd() {
   }
   f.seek(off);
 
+  // Гистограмму длительности пика строим заново по строкам файла: они уже
+  // содержат всё, что записали до загрузки, а живые отсчёты recordStats()
+  // начнут добавлять с этого момента. Так перекрытие не удваивается.
+  memset(gPkHist, 0, sizeof(gPkHist));
   long prevT = 0, firstT = 0, lastT = 0;
   int rows = 0, usedV = 0, usedT = 0;
   int rd = 0;
@@ -2018,6 +2038,7 @@ bool seedStatsFromSd() {
       dayPSec += (long)dt;
       h24P[slot] = p;
       h24Mask[slot] |= 4;
+      if (p > 0) gPkHist[pkdBucket(p)] += (uint32_t)dt;   // длительность пика
     }
     if (hasT && tv > -40.0f && tv < 100.0f) {
       if (tv < dayMinT) { dayMinT = tv; dayMinTMin = minute; }
@@ -2167,6 +2188,7 @@ static void dayAddRow(const char* s, int len) {
     if (pw >= 0) {
       dayP[slot] = pw; dayMask[slot] |= 4;
       if (pw > ddMaxP) { ddMaxP = pw; ddPMin = minute; }
+      if (pw > 0) gPkHist[pkdBucket(pw)] += 30;   // для длительности пика дня
       ddSumP += (double)pw * dt; ddSecP += (long)dt;
     }
   }
@@ -2188,6 +2210,7 @@ static void dayClear() {
   ddMinT = 999; ddMaxT = -999; ddSumT = 0; ddSecT = 0;
   ddMaxP = 0; ddSumP = 0; ddSecP = 0;
   ddMinVMin = -1; ddMaxVMin = -1; ddMinTMin = -1; ddMaxTMin = -1; ddPMin = -1;
+  memset(gPkHist, 0, sizeof(gPkHist));
   gDayRows = 0;
 }
 
@@ -2366,10 +2389,21 @@ bool tpPoint(int* sx, int* sy) {
 // работала болгарка на 1300 Вт). Поэтому график мощности за прошедшие часы
 // восстанавливаем из облака: там phase_a с шагом 16 секунд.
 // Один час за проход loop(), чтобы не держать цикл.
-bool cloudCall(const String& method, const String& path, String& body, int maxRaw);  // объявлена ниже
+bool cloudCall(const String& method, const String& path, String& body, int maxRaw = 3500);  // объявлена ниже
 extern unsigned long gCloudFailRun;   // неудач облака подряд (см. cloudTick)
 unsigned long netBudgetLeft();        // остаток сетевого бюджета прохода (см. cloudCall)
 int b64decode(const char* in, uint8_t* out, int maxOut);
+
+// «Фоновый» облачный запрос — дозаполнение (PWRFILL/PWRHIST/GAPFILL).
+// При отказе connect cloudCall() делает ВТОРУЮ попытку; для фона она не нужна:
+// два TLS-коннекта в одном проходе loop() и давали затык до 10.7 с (blk=pwrfill).
+// Флаг ставит CloudBgScope (снимается на любом return — деструктор).
+bool gCloudBgCall = false;
+struct CloudBgScope {
+  bool prev;
+  CloudBgScope() : prev(gCloudBgCall) { gCloudBgCall = true; }
+  ~CloudBgScope() { gCloudBgCall = prev; }
+};
 
 // PWRHIST: дозаполнение мощности прошлых дней из облака (команда в serial).
 // Реализация ниже, после всех функций карты и статистики.
@@ -2398,8 +2432,17 @@ static bool repWait() { return (millis() - gRepLastMs) < 1800UL; }
 static void repDone() { gRepLastMs = millis(); }
 unsigned long gPwrRetryMs = 0;   // пауза перед повтором окна PWRFILL
 int           gPwrRetry   = 0;   // сколько раз подряд не вышло
+// диагностика последнего прохода PWRFILL (видно в /clog)
+extern int gCliStage;            // этап последнего облачного запроса (объявлен ниже)
+extern unsigned long gMsTls;     // ms TLS-рукопожатия облака (объявлен ниже)
+unsigned long gPwrFillMs  = 0;   // сколько занял весь pwrFillTick
+int           gPwrFillN    = 0;  // сколько облачных запросов он сделал
+int           gPwrFillTls  = 0;  // ms TLS последнего запроса
+int           gPwrFillSt   = 0;  // этап, на котором кончился последний запрос
 
 void pwrFillTick() {
+  CloudBgScope bg;               // фоновый режим: без второй попытки connect
+  gPwrFillN = 0;
   if (pwrHistActive()) return;                  // не мешаем PWRHIST
   if (gapFillActive()) return;                  // и GAPFILL тоже
   if (gPwrFillHour < 0) return;
@@ -2418,6 +2461,9 @@ void pwrFillTick() {
   if (millis() - gTouchMs < 1500) return;        // не мешаем тачу
   if (millis() < gPwrRetryMs) return;            // пауза после неудачи
   if (!cloudToken()) return;
+  // Токен мог сам сходить в облако и занять проход — окно откладываем на
+  // следующий loop(), второй TLS-запрос в этом же проходе не начинаем.
+  if (netBudgetLeft() < 1500UL) return;
 
   struct tm ti;
   if (!getLocalTime(&ti, 10)) return;
@@ -2458,11 +2504,21 @@ void pwrFillTick() {
 
   String body;
   if (repWait()) return;                        // не частим в report-logs
+  // Перед самым запросом — ещё раз бюджет: он мог кончиться, пока считали окно.
+  if (netBudgetLeft() < 1500UL) return;
+  gPwrFillN++;
   bool okCall = cloudCall("GET", String(path), body, 12000);
+  gPwrFillTls = (int)gMsTls;
+  gPwrFillSt  = gCliStage;
   repDone();
   if (!okCall) {
     // Одна неудача не должна убивать весь график мощности (раньше ставился
     // gPwrFillHour = -1 и дозаполнение прекращалось до перезагрузки).
+    esp_task_wdt_reset();                        // connect уже сжёг время цикла
+    // Отказ connect (2) или кончившийся бюджет (8) — это СЕТЬ, а не «окно не
+    // читается». Такие отказы час не пропускают: ждём и пробуем то же окно
+    // снова, иначе серия обрывов на старте съедала час графика целиком.
+    if (gCliStage == 2 || gCliStage == 8) { gPwrRetryMs = millis() + 3000UL; return; }
     if (++gPwrRetry < 4) { gPwrRetryMs = millis() + 3000UL; return; }
     gPwrRetry = 0; gPwrRetryMs = 0;
     gPwrPart = 0;
@@ -3328,7 +3384,7 @@ unsigned long netBudgetLeft() {
 }
 // (connect идёт по IP с SNI-хостом, поэтому таймаут задаётся setTimeout.)
 
-bool cloudCall(const String& method, const String& path, String& body, int maxRaw = 3500) {
+bool cloudCall(const String& method, const String& path, String& body, int maxRaw) {
   gCliStage = 0; gCliHttp = 0; gCliLen = 0; gCliWant = -1;
   time_t now = time(nullptr);
   if (now < 1600000000) { gCliStage = 1; return false; }   // часы не выставлены
@@ -3390,6 +3446,13 @@ bool cloudCall(const String& method, const String& path, String& body, int maxRa
     // двухсекундный затык делал плату неотзывчивой при отказе облака.
     handleTouch();
     if (!gWebInHandler) gWeb.handleClient();
+    esp_task_wdt_reset();
+    // Фоновый запрос (дозаполнение): второй коннект в ЭТОМ проходе не делаем —
+    // он удваивал блокировку цикла (до 10.7 с), а данные не срочные. Выход,
+    // повтор — следующим проходом loop() (pwrFillTick держит паузу 3 с).
+    if (gCloudBgCall) { gCliStage = 2; clRingAdd(2, gCloudWhy, 0, 0); return false; }
+    // Бюджет прохода: на вторую попытку должно остаться хотя бы 1.5 с.
+    if (netBudgetLeft() < 1500UL) { gCliStage = 8; clRingAdd(8, gCloudWhy, 0, 0); return false; }
     delay(10);
     esp_task_wdt_reset();
     unsigned long left2 = netBudgetLeft();
@@ -4676,7 +4739,12 @@ bool fetchFromApi() {
   gApiN++;
   gApiLast = millis();
   String body;
-  if (!httpGet(String(PC_API) + "/relay", body)) return false;
+  // ПК-API (192.168.1.20:8090) давно мёртв, но раз в 5 минут всё равно
+  // опрашивался с таймаутом 2.5 с: 01.11.2026 на живой плате это давало ровно
+  // один проход loop() на 5.0-5.6 с каждые 5 минут (loopMaxAll 5014, 5566),
+  // никак не связанный с pwrfill. 0.9 с на коннект и чтение: живой сервер в
+  // локальной сети отвечает за десятки миллисекунд, мёртвый — не держит цикл.
+  if (!httpGet(String(PC_API) + "/relay", body, 900)) return false;
 
   auto num = [&](const char* key) -> float {
     String pat = String("\"") + key + "\":";
@@ -4704,7 +4772,7 @@ bool fetchFromApi() {
   static unsigned long lastStats = 0;
   String st;
   if ((lastStats == 0 || millis() - lastStats > 300000UL) &&
-      httpGet(String(PC_API) + "/stats", st)) {
+      httpGet(String(PC_API) + "/stats", st, 900)) {
     lastStats = millis();
     int i = st.indexOf("\"today\":");
     if (i >= 0) {
@@ -4753,57 +4821,99 @@ void descToRus(const String& en, char* out, size_t n) {
   else                                           snprintf(out, n, "ПЕРЕМЕННО");
 }
 
-bool fetchWeather() {
-  // Погода — из интернета. Нет интернета — просто «НЕТ ДАННЫХ» на экране,
-  // ничего не ждём и не блокируем.
-  // 5 с было мало: wttr.in отвечает то за 0.3 с, то вообще не отвечает, и
-  // httpGet ждал полный таймаут — ровно 5014 мс блокировки цикла (loopMaxAll
-  // 01.11.2026). 2 с: нормальный ответ укладывается, а зависший сервер держит
-  // цикл всего 2 с — и повторим через минуту (wOk=false -> период 60 с).
-  if (!netOnline()) return false;
-  String j;
-  if (!httpGet(WEATHER_URL, j, 2000)) return false;
-  j.trim();
-  if (j.length() < 4) return false;
-
-  // разбиваем по вертикальной черте
-  String parts[4];
-  int idx = 0;
-  for (int i = 0; i < (int)j.length() && idx < 4; i++) {
-    if (j[i] == '|') { idx++; continue; }
-    parts[idx] += j[i];
+// Кириллица в шрифте 5x7 только ЗАГЛАВНАЯ: OWM с lang=ru отдаёт описание
+// строчными («пасмурно»), поэтому перед выводом поднимаем регистр.
+static void upperRus(char* s) {
+  for (unsigned char* p = (unsigned char*)s; *p; p++) {
+    if (*p >= 'a' && *p <= 'z') { *p -= 32; continue; }
+    // а-п (D0 B0..BF) -> А-П (D0 90..9F)
+    if (p[0] == 0xD0 && p[1] >= 0xB0 && p[1] <= 0xBF) { p[1] -= 0x20; p++; continue; }
+    // р-я (D1 80..8F) -> Р-Я (D0 A0..AF)
+    if (p[0] == 0xD1 && p[1] >= 0x80 && p[1] <= 0x8F) { p[0] = 0xD0; p[1] += 0x20; p++; continue; }
+    // ё (D1 91) -> Ё (D0 81)
+    if (p[0] == 0xD1 && p[1] == 0x91) { p[0] = 0xD0; p[1] = 0x81; p++; }
   }
-  if (idx < 3) return false;
+}
 
-  // температура: "+11°C" -> 11
-  String t = parts[0];
-  t.replace("+", "");
-  int deg = t.indexOf((char)0xC2);       // начало "°C" в UTF-8
-  if (deg > 0) t = t.substring(0, deg);
-  deg = t.indexOf("C");
-  if (deg > 0) t = t.substring(0, deg);
-  wTemp = t.toFloat();
+// Текст описания для экрана: русское из OWM, иначе перевод английского.
+// maxChars — предел по СИМВОЛАМ (UTF-8), а не по байтам.
+static void weatherDesc(char* out, size_t n, int maxChars) {
+  if (wDescRu.length()) snprintf(out, n, "%s", wDescRu.c_str());
+  else                  descToRus(wDescEn, out, n);
+  upperRus(out);
+  int k = 0;
+  for (char* p = out; *p; ) {
+    if (k >= maxChars) { *p = 0; break; }
+    p += utf8len((unsigned char)*p);
+    k++;
+  }
+}
 
-  // влажность: "86%"
-  String h = parts[1];
-  int pct = h.indexOf('%');
-  if (pct > 0) h = h.substring(0, pct);
-  wHum = h.toFloat();
+bool fetchWeather() {
+  // Погода — OpenWeatherMap по HTTPS. wttr.in в сети пользователя заблокирован.
+  // TLS-клиент живёт на стеке: после запроса stop() и деструктор возвращают
+  // память mbedTLS (без этого течёт ~40 КБ на каждый запрос).
+  if (!netOnline()) return false;
 
-  // ветер: "↑5km/h" -> 5
-  String w = parts[2];
-  String digits;
-  for (int i = 0; i < (int)w.length(); i++) if (isDigit(w[i])) digits += w[i];
-  wWind = digits.toFloat();
+  uint32_t heap0 = ESP.getFreeHeap();
+  String j;
+  {
+    WiFiClientSecure tls;
+    tls.setInsecure();              // сертификат не проверяем — как у Tuya
+    tls.setHandshakeTimeout(3);     // секунды; иначе зависший TLS держит цикл 120 с
+    HTTPClient h;
+    h.setTimeout(2500);
+    esp_task_wdt_reset();
+    if (!h.begin(tls, WEATHER_URL)) {
+      Serial.println("погода: begin не принял URL");
+      return false;
+    }
+    int code = h.GET();
+    if (code == 200) j = h.getString();
+    h.end();
+    tls.stop();                     // освободить mbedTLS до разбора JSON
+    esp_task_wdt_reset();
+    if (code != 200) {
+      Serial.printf("погода: HTTP %d\n", code);
+      return false;
+    }
+  }
 
-  wDescEn = parts[3];
-  wDescEn.trim();
+  if (j.length() < 20) { wCode = 0; return false; }
 
-  wOk = true;
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, j);
+  if (err) {
+    wCode = 0;                      // не распарсилось -> повтор через 2 минуты
+    Serial.printf("погода: JSON %s (%u Б)\n", err.c_str(), (unsigned)j.length());
+    return false;
+  }
+
+  JsonObject m  = doc["main"];
+  JsonArray  wa = doc["weather"];
+  int id = (wa.isNull() || wa.size() == 0) ? 0 : (int)(wa[0]["id"] | 0);
+  if (m.isNull() || id == 0) {
+    wCode = 0;
+    Serial.println("погода: в JSON нет main/weather[0].id");
+    return false;
+  }
+
+  wCode   = id;
+  wTemp   = m["temp"] | 0.0f;
+  wHum    = m["humidity"] | 0;
+  // OWM units=metric отдаёт ветер в М/С; на экране и в сигнатуре — км/ч.
+  wWind   = (doc["wind"]["speed"] | 0.0f) * 3.6f;
+  wDescRu = wa[0]["description"].as<String>();
+  wDescRu.trim();
+  wDescEn = wa[0]["main"].as<String>();   // английское — только для иконки
+  if (wDescEn.length() == 0) wDescEn = "Clouds";
+
+  wOk   = true;
   wLast = millis();
   wTime = time(nullptr);
-  Serial.printf("погода: %.0f C, %.0f%%, %.0f км/ч, %s\n",
-                wTemp, wHum, wWind, wDescEn.c_str());
+  wHeap = ESP.getFreeHeap();
+  Serial.printf("погода: %.1f C, %.0f%%, %.1f км/ч, id=%d, %s (heap %u -> %u)\n",
+                wTemp, wHum, wWind, wCode, wDescRu.c_str(), heap0, wHeap);
   return true;
 }
 
@@ -6111,8 +6221,8 @@ void drawMain() {
     seg7Str(wb.x + 46, wb.y + 12, 22, b, cSky, 5);
     drawTxt(wb.x + 46 + seg7W(b, 22, 5) + 4, wb.y + 20, "C", cMuted, cSurf, 1);
 
-    char d[20];
-    descToRus(wDescEn, d, sizeof(d));
+    char d[64];
+    weatherDesc(d, sizeof(d), 22);   // 22 символа = 131 px до края блока
     drawTxt(wb.x + 100, wb.y + 10, d, cText, cSurf, 1);
     snprintf(b, sizeof(b), "ВЕТЕР %.1f М/С", wWind / 3.6f);
     drawTxt(wb.x + 100, wb.y + 24, b, cMuted, cSurf, 1);
@@ -6318,8 +6428,19 @@ void drawPowerScreen() {
   if (past && ddSecP == 0) strcpy(b, "--");
   else                     snprintf(b, sizeof(b), "%.0f ВТ", peakP);
   drawTxt(118, 136, b, cWarn, cBg, 2);
-  if (peakH >= 0) snprintf(b, sizeof(b), "%02d:%02d", peakH, (int)h24PmMin[peakH]);
-  else            hhmm(past ? ddPMin : dayMaxPMin, b, sizeof(b));
+  char pkT[12];
+  if (peakH >= 0) snprintf(pkT, sizeof(pkT), "%02d:%02d", peakH, (int)h24PmMin[peakH]);
+  else            hhmm(past ? ddPMin : dayMaxPMin, pkT, sizeof(pkT));
+  // ДЛИТЕЛЬНОСТЬ пика: сколько записей дня было не ниже 80 % пика (шаг ~30 с).
+  // Оценка по гистограмме gPkHist — см. pkDurSec(); точнее без второго
+  // прохода по файлу не посчитать.
+  int pkMin = 0;
+  if (!(past && ddSecP == 0) && peakP > 0.5f) {
+    pkMin = (pkDurSec(gPkHist, peakP) + 59) / 60;   // 20 с — уже «1 МИН»
+    if (pkMin > 999) pkMin = 999;
+  }
+  if (pkMin > 0) snprintf(b, sizeof(b), "%s  %d МИН", pkT, pkMin);
+  else           snprintf(b, sizeof(b), "%s", pkT);
   drawTxt(118, 154, b, cMuted, cBg, 1);
 
   drawTxt(12, 166, "ТОК", cMuted, cBg, 1);
@@ -6469,9 +6590,9 @@ void drawWeatherScreen() {
 
   drawWeatherIcon(192, 92, 34, true);
 
-  char d[24];
-  descToRus(wDescEn, d, sizeof(d));
-  drawTxt(12, 124, d, cText, cBg, 2);
+  char d[64];
+  weatherDesc(d, sizeof(d), 34);
+  drawTxt(12, 124, d, cText, cBg, fitScale(d, 216, 2));
 
   uiHLine(12, 150, 216, cLine);
 
@@ -6492,7 +6613,7 @@ void drawWeatherScreen() {
   drawTxtR(228, 210, b, cText, cBg, 2);
 
   drawTxt(12, 238, "ИСТОЧНИК", cMuted, cBg, 1);
-  drawTxtR(228, 236, "WTTR.IN", cText, cBg, 2);
+  drawTxtR(228, 238, "OPENWEATHERMAP", cText, cBg, 1);
 
   uiHLine(12, 262, 216, cLine);
   drawTxt(12, 270, "ТЕМПЕРАТУРА ВОЗДУХА", cMuted, cBg, 1);
@@ -6679,9 +6800,12 @@ uint32_t screenSig() {
       break;
   }
   for (int i = 0; i < n; i++) { h ^= v[i]; h *= 16777619u; }
-  // строки (описание погоды) — по символам, они тоже видны на экране
-  if (gScreen == SCR_MAIN || gScreen == SCR_WEATHER)
+  // строки (описание погоды) — по байтам, они тоже видны на экране
+  if (gScreen == SCR_MAIN || gScreen == SCR_WEATHER) {
+    for (int i = 0; i < (int)wDescRu.length(); i++) { h ^= (uint8_t)wDescRu[i]; h *= 16777619u; }
+    // wDescEn меняет иконку (Clouds/Rain/Snow), даже если русский текст тот же
     for (int i = 0; i < (int)wDescEn.length(); i++) { h ^= (uint8_t)wDescEn[i]; h *= 16777619u; }
+  }
   return h;
 }
 
@@ -6966,7 +7090,7 @@ void printRaw() {
 // Диагностика: забыть погоду — проверить, что экран покажет «НЕТ ДАННЫХ»
 // и цикл не начнёт дёргать интернет каждый проход.
 void clearWeather() {
-  wOk = false; wTemp = 0; wHum = 0; wWind = 0; wCode = -1; wDescEn = "";
+  wOk = false; wTemp = 0; wHum = 0; wWind = 0; wCode = -1; wDescEn = ""; wDescRu = "";
   gLastDraw = 0;
   Serial.println("погода сброшена (НЕТ ДАННЫХ)");
 }
@@ -7223,6 +7347,49 @@ static bool dateValid(const char* d, int len) {
   return true;
 }
 
+// ---- гистограмма мощности для ДЛИТЕЛЬНОСТИ пика ----
+// Задача: «сколько времени мощность держалась не ниже 80 % пика часа» — без
+// второго прохода по файлу (поток один, вернуться назад нельзя). Поэтому
+// копим гистограмму мощности: 33 корзины, шаг 100 Вт до 2 кВт, 500 Вт до 6 кВт,
+// 1 кВт до 10 кВт, последняя — «10 кВт и выше». 33 × 4 байта = 132 байта на час.
+// В корзинах лежат СЕКУНДЫ (строка CSV = 30 с, живой отсчёт = его dt), поэтому
+// длительность не зависит от того, ровные ли шаги у записей.
+// Точность: порог 0.8·пик округляется к ближайшей границе корзины (100 Вт до
+// 2 кВт) — длительность может отличаться на одну-две записи (±30-60 с).
+// Это оценка, а не секундомер; см. комментарий в histJson.
+#define PKD_BUCKETS 33
+
+static inline uint8_t pkdBucket(float w) {
+  if (!(w > 0)) return 0;
+  if (w < 2000.0f) { int b = (int)(w * 0.01f); return b > 19 ? 19 : (uint8_t)b; }
+  if (w < 6000.0f) { int b = (int)((w - 2000.0f) * 0.002f); return (uint8_t)(20 + (b > 7 ? 7 : b)); }
+  if (w < 10000.0f) { int b = (int)((w - 6000.0f) * 0.001f); return (uint8_t)(28 + (b > 3 ? 3 : b)); }
+  return 32;
+}
+// нижняя граница корзины, Вт
+static inline float pkdBound(uint8_t b) {
+  if (b < 20) return b * 100.0f;
+  if (b < 28) return 2000.0f + (b - 20) * 500.0f;
+  if (b < 32) return 6000.0f + (b - 28) * 1000.0f;
+  return 10000.0f;
+}
+// Длительность, секунды: сумма секунд в корзинах не ниже 80 % пика.
+static int pkDurSec(const uint32_t* hist, float peak) {
+  if (!(peak > 0.5f)) return 0;
+  float th = peak * 0.8f;
+  if (th <= 0) return 0;
+  uint8_t b = pkdBucket(th);
+  // ближе к нижней границе своей корзины или к следующей?
+  if (b < 32) {
+    float lo = pkdBound(b), hi = pkdBound((uint8_t)(b + 1));
+    if ((th - lo) > (hi - th)) b++;
+  }
+  uint32_t sec = 0;
+  for (int k = b; k < PKD_BUCKETS; k++) sec += hist[k];
+  if (sec > 86400UL) sec = 86400UL;        // больше суток в часе быть не может
+  return (int)sec;
+}
+
 // ---- агрегат одного часа для /history ----
 struct HourAgg {
   uint16_t n;          // всего строк за час
@@ -7232,7 +7399,9 @@ struct HourAgg {
   float pSum, pMax, vSum, tSum;
   int32_t eFirstT;     // ЧЧММСС первого счётчика в часе
   int32_t eLastT;      // ЧЧММСС последнего счётчика в часе
+  int32_t pMaxTod;     // ЧЧММСС ПИКА часа (-1 — данных не было)
   float eFirstE, eLastE;
+  uint32_t pk[PKD_BUCKETS];  // секунды по корзинам мощности — для pmaxDur
 };
 static HourAgg sHA[24];
 // Пики часов из облака (файл /energy.peak, его пишет PWRHIST). Нужны, чтобы
@@ -7362,7 +7531,12 @@ static void histAdd(const char* s, int len) {
   // подставил туда среднюю из облака. Строки с pw=0 по-прежнему не шумят.
   if (v > 50.0f || pw > 0.5f) {
     a.pSum += pw; a.pN++;
-    if (pw > a.pMax) a.pMax = pw;
+    // Время пика часа: раньше histAdd хранил только pMax, и /history не мог
+    // сказать, КОГДА был пик у локальных записей (было только у облачных).
+    if (pw > a.pMax) { a.pMax = pw; a.pMaxTod = tod; }
+    // гистограмма для длительности (см. pkDurSec): сколько СЕКУНД в часе
+    // мощность была не ниже 80 % пика — строки CSV идут с шагом 30 с
+    a.pk[pkdBucket(pw)] += 30;
   }
   // Счётчик: первый и последний ПО ВРЕМЕНИ. Файл не отсортирован
   // (архивные дни вклеены в середину), поэтому нельзя брать «как идёт».
@@ -7377,7 +7551,7 @@ static void histAdd(const char* s, int len) {
 // Цель — ответ быстрее 3 секунд; при переполнении времени отдаём что успели.
 static bool histScan(const char* date, unsigned long* msOut, bool* truncOut) {
   memset(sHA, 0, sizeof(sHA));
-  for (int i = 0; i < 24; i++) { sHA[i].eFirstT = -1; sHA[i].eLastT = -1; }
+  for (int i = 0; i < 24; i++) { sHA[i].eFirstT = -1; sHA[i].eLastT = -1; sHA[i].pMaxTod = -1; }
   loadPeakOverlay(date);
   if (msOut) *msOut = 0;
   if (truncOut) *truncOut = false;
@@ -7433,7 +7607,9 @@ static bool histScan(const char* date, unsigned long* msOut, bool* truncOut) {
     if (carry > 0) memmove(hbuf, hbuf + i, carry);
     if (carry > 240) carry = 0;          // защита от строки без перевода строки
     esp_task_wdt_reset();
-    if (millis() - t0 > 3000UL) { trunc = true; break; }
+    // Бюджет снижен 3000 → 2500 мс: /history собирается ВНУТРИ handleClient,
+    // и его время входит в blk=web. С ним проход loop() подбирался к 3.5 с.
+    if (millis() - t0 > 2500UL) { trunc = true; break; }
   }
   f.close();
   if (msOut) *msOut = millis() - t0;
@@ -7486,12 +7662,23 @@ static String histJson(const char* date, unsigned long ms, bool trunc) {
     float pmax = a.pMax;
     bool tOk = false;
     int  pmin = 0, pdur = 0;
+    // Сначала — локальный пик с карты: время записи и длительность по
+    // гистограмме (записи ~раз в 30 с). Если пик из облака (/energy.peak)
+    // не меньше — берём его: он посчитан по 20-минутным окнам, точнее.
+    if (a.pMax > 0.5f && a.pMaxTod >= 0) {
+      pmin = (int)((a.pMaxTod / 100) % 100);
+      pdur = pkDurSec(a.pk, a.pMax);
+      tOk = true;
+    }
     if (sPeakOk[i] && (float)sPeakP[i] >= pmax) {
+      bool bigger = ((float)sPeakP[i] > a.pMax + 1.0f);
       pmax = (float)sPeakP[i];
-      // пик из облака: вместе с ним известны минута пика и длительность
-      tOk = sPeakTValid[i];
-      pmin = sPeakMin[i];
-      pdur = sPeakDur[i];
+      if (sPeakTValid[i]) { tOk = true; pmin = sPeakMin[i]; }
+      // Пик из облака выше локального, а минуты в старом /energy.peak нет:
+      // время неизвестно — честнее отдать null, чем минуту от другого пика.
+      else if (bigger)    { tOk = false; pmin = 0; }
+      int du = (int)sPeakDur[i] * 60;   // в файле МИНУТЫ, в JSON — СЕКУНДЫ
+      if (du > pdur) pdur = du;         // иначе остаётся локальная оценка
     }
     if (i) out += ',';
     if (tOk)
@@ -7889,49 +8076,88 @@ static size_t csvFileSize() {
   return sz;
 }
 
-// Страница собирается в ГОТОВЫЙ буфер (а не в новый String на каждый запрос):
-// 24 КБ и ~20 replace на запрос — это заметная нагрузка, из-за неё изредка
-// рвалось соединение. Кэш живёт 3 с, за это время значения всё равно не
-// успевают измениться заметно.
-static void webPageBuild(String& h) {
-  h = PAGE_TMPL;                       // шаблон из web/page.html (PROGMEM)
-  char b[40];
-  h.replace("__FW__", FW_VER);
-  h.replace("__NETCLS__", gNetOk ? "ok" : "bad");
-  h.replace("__NETTXT__", gNetOk ? "сеть ok" : "нет сети");
-  snprintf(b, sizeof(b), "%d", gRssi);
-  h.replace("__RSSI__", b);
-  snprintf(b, sizeof(b), "%.2f", myTodayKwh);
-  h.replace("__TKWH__", b);
-  snprintf(b, sizeof(b), "%.2f", myTodayCost);
-  h.replace("__TCOST__", b);
-  snprintf(b, sizeof(b), "%.0f", gVoltage);
-  h.replace("__MV__", b);
-  snprintf(b, sizeof(b), "%.0f", gPower);
-  h.replace("__MP__", b);
-  snprintf(b, sizeof(b), "%.2f", gCurrent);
-  h.replace("__MA__", b);
-  snprintf(b, sizeof(b), "%.1f", gTemp);
-  h.replace("__MT__", b);
-  h.replace("__RELCLS__", gRelay ? "ok" : "bad");
-  h.replace("__RELTXT__", gRelay ? "ВКЛ" : "ВЫКЛ");
-  snprintf(b, sizeof(b), "%.2f", measuredTariff());
-  h.replace("__TAR__", b);
-  snprintf(b, sizeof(b), "%.2f", gEnergy);
-  h.replace("__PE__", b);
-  snprintf(b, sizeof(b), "%.3f", yKwh);
-  h.replace("__YKWH__", String(yKwh, 2));
-  snprintf(b, sizeof(b), "%.2f", yCost);
-  h.replace("__YKOST__", b);
-  snprintf(b, sizeof(b), "%.2f", mKwh);
-  h.replace("__MKWH__", b);
-  snprintf(b, sizeof(b), "%.2f", mCost);
-  h.replace("__MCOST__", b);
-  snprintf(b, sizeof(b), "%.2f", TARIFF_DAY);
-  h.replace("__TARDAY__", b);
-  snprintf(b, sizeof(b), "%.2f", TARIFF_NIGHT);
-  h.replace("__TARNIGHT__", b);
+// ---------------------------------------------------------------- страница
+// ЗАЧЕМ ПОТОКОВАЯ СБОРКА (02.11.2026). Раньше страница собиралась в String:
+// копия шаблона (30 КБ) + 22 × String::replace = 86 мс и 30 КБ кучи на каждый
+// запрос. Эти 30 КБ отнимали память у mbedTLS, и кэш приходилось отдавать
+// куче перед каждым TLS-коннектом к облаку.
+// Теперь значения подстановок лежат в маленьком массиве (22 × ~16 байт),
+// длина ответа считается заранее по шаблону, а сама страница пишется в сокет
+// ОДНИМ проходом по PAGE_TMPL (PROGMEM) кусками по 4 КБ. Памяти — сотни байт,
+// сборка ~5 мс, кэш не нужен вовсе.
+//
+// ПОЧЕМУ БЫЛО 19 СЕКУНД (исправлено 02.11.2026): в /data было blk=web,
+// blkMs=18 953, loopMaxAll=19 174. Сборка тут не виновата — 86 мс это 0.3 %
+// от 19 с. Виноват цикл отдачи: если клиент перестал читать (закрыли вкладку,
+// моргнул Wi-Fi), c.write() возвращает 0, а c.connected() ещё true — цикл ждал
+// страховку 20 000 мс, держа loop(). Теперь отдача ограничена бюджетом
+// PAGE_SEND_BUDGET и сторожем «нет прогресса» PAGE_SEND_STALL: проход loop()
+// не стоит дольше ~4 с ни при каком клиенте (было 20 с).
 
+#define PAGE_SEND_BUDGET 4000UL   // вся отдача — не дольше 4 с
+#define PAGE_SEND_STALL   800UL   // нет прогресса 0.8 с — клиент мёртв, рвём
+#define PAGE_CHUNK       4096     // мельче — больше задержек на TCP
+#define PAGE_MAX_TAGS      22     // столько подстановок в web/page.html
+#define PAGE_CAP        32000     // предел ответа: больше — это уже ошибка
+
+struct PgVal {
+  const char* tag;      // "__FW__" и т.п.
+  uint8_t     n;        // длина значения
+  char        v[40];    // само значение
+};
+static PgVal  sPg[PAGE_MAX_TAGS];
+static int    sPgN = 0;
+static unsigned long sPageBuildN  = 0;   // сколько раз собирали страницу
+static unsigned long sPageBuildMs = 0;   // сколько заняла последняя сборка
+static unsigned long sPageSendMs  = 0;   // сколько заняла последняя отдача
+static unsigned long sPageCutN    = 0;   // сколько отдач оборвано по бюджету
+static unsigned long sPageAt      = 0;   // когда страницу отдавали в последний раз
+static size_t        sPageBytes   = 0;   // сколько байт ушло клиенту
+
+static void pgAdd(const char* tag, const char* val) {
+  if (sPgN >= PAGE_MAX_TAGS) return;
+  size_t n = val ? strlen(val) : 0;
+  if (n > sizeof(sPg[0].v) - 1) n = sizeof(sPg[0].v) - 1;
+  sPg[sPgN].tag = tag;
+  sPg[sPgN].n = (uint8_t)n;
+  if (n) memcpy(sPg[sPgN].v, val, n);
+  sPg[sPgN].v[n] = 0;
+  sPgN++;
+}
+static void pgAddI(const char* tag, const char* fmt, long v) {
+  char b[48];
+  snprintf(b, sizeof(b), fmt, v);
+  pgAdd(tag, b);
+}
+static void pgAddD(const char* tag, const char* fmt, double v) {
+  char b[48];
+  snprintf(b, sizeof(b), fmt, v);
+  pgAdd(tag, b);
+}
+
+// Значения всех подстановок. Порядок не важен — поиск идёт по тегам.
+static void pgFill() {
+  sPgN = 0;
+  pgAdd("__FW__", FW_VER);
+  pgAdd("__NETCLS__", gNetOk ? "ok" : "bad");
+  pgAdd("__NETTXT__", gNetOk ? "сеть ok" : "нет сети");
+  pgAddI("__RSSI__", "%d", (long)gRssi);
+  pgAddD("__TKWH__", "%.2f", (double)myTodayKwh);
+  pgAddD("__TCOST__", "%.2f", (double)myTodayCost);
+  pgAddD("__MV__", "%.0f", (double)gVoltage);
+  pgAddD("__MP__", "%.0f", (double)gPower);
+  pgAddD("__MA__", "%.2f", (double)gCurrent);
+  pgAddD("__MT__", "%.1f", (double)gTemp);
+  pgAdd("__RELCLS__", gRelay ? "ok" : "bad");
+  pgAdd("__RELTXT__", gRelay ? "ВКЛ" : "ВЫКЛ");
+  pgAddD("__TAR__", "%.2f", (double)measuredTariff());
+  pgAddD("__PE__", "%.2f", (double)gEnergy);
+  pgAddD("__YKWH__", "%.2f", (double)yKwh);      // было String(yKwh, 2)
+  pgAddD("__YKOST__", "%.2f", (double)yCost);
+  pgAddD("__MKWH__", "%.2f", (double)mKwh);
+  pgAddD("__MCOST__", "%.2f", (double)mCost);
+  pgAddD("__TARDAY__", "%.2f", (double)TARIFF_DAY);
+  pgAddD("__TARNIGHT__", "%.2f", (double)TARIFF_NIGHT);
   char dt[12] = "1970-01-01";
   int hh = 0;
   struct tm ti;
@@ -7940,73 +8166,90 @@ static void webPageBuild(String& h) {
              ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
     hh = ti.tm_hour;
   }
-  h.replace("__DATE__", dt);
-  snprintf(b, sizeof(b), "%d", hh);
-  h.replace("__HOUR__", b);
+  pgAdd("__DATE__", dt);
+  pgAddI("__HOUR__", "%d", (long)hh);
 }
 
-// ---------------------------------------------------------------- кэш страницы
-// Раньше страница собиралась на КАЖДЫЙ запрос: 24 КБ + ~20 String::replace,
-// и на медленном клиенте соединение изредка обрывалось (2 из 58, 3 из 10).
-// Теперь: готовая строка живёт в памяти, пересборка не чаще раза в 3 с,
-// отдача — чанками по 2 КБ с проверкой результата каждой записи.
-static String        sPage;            // готовая страница (24 КБ, выделяется раз)
-static unsigned long sPageAt      = 0; // millis() последней сборки
-static unsigned long sPageBuildN  = 0; // сколько раз собирали с момента старта
-static unsigned long sPageBuildMs = 0; // сколько заняла последняя сборка
-static unsigned long sPageSendMs  = 0; // сколько заняла последняя отдача
-#define PAGE_TTL_MS 3000UL
-#define PAGE_CAP  32000   // страница ~30 КБ + запас (было 30000 — впритык)
-#define PAGE_CHUNK  4096
-
-// Отдать 30 КБ кэша обратно. Вызывается из loop() по простою и из cloudCall,
-// когда TLS не смог взять память.
-void pageCacheFree() {
-  if (sPage.length() == 0) return;
-  sPage.~String();               // sPage = String() память НЕ отдаёт
-  new (&sPage) String();
-  sPageAt = 0;
+// Ближайший тег в [p,end): возвращает указатель на него и его индекс.
+// Проверяем только позиции, где стоит "__", — иначе это был бы полный перебор
+// 22 тегов на каждый байт 30-КБ шаблона.
+static const char* pgNextTag(const char* p, const char* end, int* idx) {
+  while (p + 3 < end) {
+    if (p[0] == '_' && p[1] == '_') {
+      for (int i = 0; i < sPgN; i++) {
+        size_t tl = strlen(sPg[i].tag);
+        if ((size_t)(end - p) >= tl && memcmp(p, sPg[i].tag, tl) == 0) {
+          *idx = i;
+          return p;
+        }
+      }
+    }
+    p++;
+  }
+  return NULL;
 }
+
+// Длина готового ответа: шаблон минус теги плюс значения.
+static size_t pgOutLen(const char* tmpl, const char* end) {
+  size_t len = (size_t)(end - tmpl);
+  int idx = 0;
+  const char* p = tmpl;
+  const char* q;
+  while ((q = pgNextTag(p, end, &idx)) != NULL) {
+    size_t tl = strlen(sPg[idx].tag);
+    len -= tl;
+    len += sPg[idx].n;
+    p = q + tl;
+  }
+  return len;
+}
+
+// Кусок в сокет — с теми же страховками, что были в pageSend.
+// false = клиент ушёл / встал / вышли за бюджет прохода.
+static bool pgWrite(WiFiClient& c, const char* p, size_t n,
+                    unsigned long t1, unsigned long* progAt) {
+  size_t off = 0;
+  while (off < n) {
+    size_t k = n - off;
+    if (k > PAGE_CHUNK) k = PAGE_CHUNK;
+    size_t w = c.write((const uint8_t*)p + off, k);
+    if (w == 0) {
+      if (!c.connected()) return false;                 // клиент ушёл
+      if (millis() - *progAt > PAGE_SEND_STALL) return false;  // встал
+      delay(1);
+      esp_task_wdt_reset();
+      continue;
+    }
+    off += w;
+    *progAt = millis();
+    esp_task_wdt_reset();
+    if (millis() - t1 > PAGE_SEND_BUDGET) return false;  // не держим loop()
+  }
+  return true;
+}
+
+// Кэша страницы больше нет: собираем на лету, память не занимаем.
+// Функция оставлена, потому что её зовут cloudCall и /pagefree.
+void pageCacheFree() {}
 
 static void pageSend() {
   unsigned long t0 = millis();
-  esp_task_wdt_reset();                // сторож: сборка 30 КБ страницы — до секунды
-  if (sPage.length() == 0 || (millis() - sPageAt) >= PAGE_TTL_MS) {
-    sPage.reserve(PAGE_CAP);           // один раз: дальше места хватает, replace не растит
-    webPageBuild(sPage);
-    esp_task_wdt_reset();
-    sPageAt = millis();
-    sPageBuildN++;
-    sPageBuildMs = millis() - t0;
-  }
-  size_t total = sPage.length();
-  if (total == 0) {
-    // Так бывает, когда 30 КБ забрал TLS-запрос к облаку (страницу мы
-    // освобождаем сразу после отдачи). Повторяем сборку ПОСЛЕ pageCacheFree():
-    // без возврата памяти вторая попытка упиралась в тот же дефицит.
-    pageCacheFree();
-    delay(5);
-    sPage.reserve(PAGE_CAP);
-    webPageBuild(sPage);
-    total = sPage.length();
-    if (total == 0) {
-      esp_task_wdt_reset();
-      delay(5);
-      sPage.reserve(PAGE_CAP);
-      webPageBuild(sPage);
-      total = sPage.length();
-    }
-  }
-  if (total == 0) {
-    Serial.printf("веб: страница не собралась (free=%u max=%u), отдаю 503\n",
-                  ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  esp_task_wdt_reset();
+  pgFill();
+  const char* tmpl = PAGE_TMPL;
+  const char* end  = tmpl + strlen(PAGE_TMPL);
+  size_t total = pgOutLen(tmpl, end);
+  sPageBuildMs = millis() - t0;
+  sPageBuildN++;
+  if (total == 0 || total > PAGE_CAP) {
+    Serial.printf("веб: страница не собралась (len=%u), отдаю 503\n", (unsigned)total);
     // 503, а не 200: клиент/мониторинг должен видеть, что страница не готова,
     // и повторить запрос, а не считать заглушку настоящей страницей.
     gWeb.sendHeader("Retry-After", "2");
     gWeb.send(503, "text/html; charset=utf-8",
       "<!DOCTYPE html><meta charset=utf-8><meta http-equiv=refresh content=2>"
       "<p style=\"font:16px system-ui,sans-serif;padding:20px\">"
-      "Плата занята облаком, страница обновится сама…</p>");
+      "Плата занята, страница обновится сама…</p>");
     return;
   }
   gWeb.setContentLength(total);
@@ -8014,41 +8257,40 @@ static void pageSend() {
   gWeb.send(200, "text/html; charset=utf-8", "");
   WiFiClient c = gWeb.client();        // копия — тот же сокет, но можно connected()
   // Без TCP_NODELAY каждый чанк ждал подтверждения предыдущего (задержка
-  // 40-200 мс), и 24 КБ уходили почти секунду. С ним — десятки миллисекунд.
+  // 40-200 мс), и 30 КБ уходили почти секунду. С ним — десятки миллисекунд.
   c.setNoDelay(true);
-  size_t sent = 0;
   unsigned long t1 = millis();
-  const char* src = sPage.c_str();
-  while (sent < total) {
-    size_t n = total - sent;
-    if (n > PAGE_CHUNK) n = PAGE_CHUNK;
-    size_t w = c.write((const uint8_t*)src + sent, n);
-    if (w == 0) {
-      if (!c.connected()) {                    // клиент ушёл — не висим на нём
-        Serial.printf("веб: / оборвано клиентом на %u из %u байт\n",
-                      (unsigned)sent, (unsigned)total);
-        break;
-      }
-      delay(1);
-      esp_task_wdt_reset();
-      continue;
+  unsigned long progAt = t1;
+  size_t sent = 0;
+  bool cut = false;
+  const char* p = tmpl;
+  for (;;) {
+    int idx = 0;
+    const char* q = pgNextTag(p, end, &idx);
+    const char* stop = q ? q : end;
+    size_t n = (size_t)(stop - p);
+    if (n) {
+      if (!pgWrite(c, p, n, t1, &progAt)) { cut = true; break; }
+      sent += n;
     }
-    sent += w;
-    esp_task_wdt_reset();
-    if (millis() - t1 > 20000UL) {             // страховка от вечного цикла
-      Serial.printf("веб: / таймаут отдачи, %u из %u байт\n",
-                    (unsigned)sent, (unsigned)total);
-      break;
+    if (!q) break;
+    size_t tl = strlen(sPg[idx].tag);
+    if (sPg[idx].n) {
+      if (!pgWrite(c, sPg[idx].v, sPg[idx].n, t1, &progAt)) { cut = true; break; }
+      sent += sPg[idx].n;
     }
+    p = q + tl;
   }
   sPageSendMs = millis() - t1;
-  if (sent != total && c.connected())
+  sPageBytes = sent;
+  sPageAt = millis();
+  if (cut) {
+    sPageCutN++;
+    Serial.printf("веб: / отдача оборвана на %u из %u байт (%lu мс)\n",
+                  (unsigned)sent, (unsigned)total, millis() - t1);
+  } else if (sent != total) {
     Serial.printf("веб: / недодано %u из %u байт\n", (unsigned)sent, (unsigned)total);
-  // Страницу отдали — 30 КБ сразу возвращаем куче. Держать кэш между запросами
-  // нельзя: именно занятый кэш отнимал у mbedTLS 16-КБ буферы, и TLS к облаку
-  // падал с "SSL - Memory allocation failed" (напряжение застывало на часы).
-  // Сборка страницы стоит ~85 мс и происходит реже, чем раз в 3 с.
-  pageCacheFree();
+  }
 }
 
 // ============================================================================
@@ -8497,6 +8739,7 @@ static void pwrHistCommit() {
 // Один шаг автомата за проход loop(): один HTTP-запрос к облаку. Так тач и
 // веб остаются живыми, а 72 запроса на день не превращаются в одну паузу.
 void pwrHistTick() {
+  CloudBgScope bg;                               // фон: без второй попытки connect
   if (!sPH.active) return;
   if (netBudgetLeft() < 1800UL) return;          // бюджет прохода уже занят облаком
   // Tuya ограничивает частоту report-logs («The log query is too frequent»).
@@ -8542,6 +8785,8 @@ void pwrHistTick() {
   }
 
   if (!cloudToken()) { pwrHistAbort("облако не дало токен"); return; }
+  // Токен мог занять проход — окно переносим на следующий loop().
+  if (netBudgetLeft() < 1500UL) return;
   if (sPH.part == 0) { sPH.sum = 0; sPH.n = 0; sPH.peakCur = 0; memset(sPH.mmin, 0, sizeof(sPH.mmin)); }
 
   time_t a = hs + (time_t)sPH.part * 1200;
@@ -8760,8 +9005,6 @@ int  gapTodayMinutes() { return sGF.todayMin; }
 //    • discovery-конфиги (13 шт.) уходят по одному за проход, не пачкой:
 //      иначе разом съедается несколько КБ буфера.
 // ============================================================================
-
-#include "secrets.h"
 
 #ifndef MQTT_HOST
 #define MQTT_HOST   ""
@@ -9977,6 +10220,7 @@ void gapDailyTick() {
 }
 
 void gapFillTick() {
+  CloudBgScope bg;                                   // фон: без второй попытки connect
   // Сетевой бюджет прохода уже израсходован (облако/веб) — не начинаем TLS.
   if (netBudgetLeft() < 1800UL) return;
   // Напряжение устарело — сеть отдаётся облаку (cloudTick). GAPFILL — самая
@@ -10074,6 +10318,8 @@ void gapFillTick() {
       Serial.println("GAPFILL-ERR: облако не дало токен");
       return;
     }
+    // Токен мог занять весь бюджет — окно берём следующим проходом loop().
+    if (netBudgetLeft() < 1500UL) return;
 
     long ws = g.a + (long)g.w * GF_WIN;
     long we = ws + GF_WIN;
@@ -10256,7 +10502,8 @@ void webSetup() {
       "\"ph\":%d,\"phDay\":%d,\"phHour\":%d,\"phOk\":%d,\"phMiss\":%d,"
       "\"gaps\":%d,\"gapMin\":%d,\"gapN\":%d,\"gapFillOk\":%d,\"gapAct\":%d,\"gapPh\":%d,"
       "\"day\":%d,\"dayMs\":%lu,\"dayRows\":%d,\"pageN\":%lu,\"pageMs\":%lu,"
-      "\"pageSend\":%lu,"
+      "\"pageSend\":%lu,\"pageCut\":%lu,"
+      "\"pageAge\":%lu,"
       "\"loopMs\":%lu,\"loopMaxMs\":%lu,\"loopMaxAll\":%lu,"
       "\"sdMs\":%lu,\"gapMs\":%lu,\"histMs\":%lu,\"apiN\":%lu,"
       "\"cTry\":%lu,\"cOk\":%lu,\"tk\":%lu,\"ns\":%d,\"phf\":%d,\"wfs\":%d,"
@@ -10271,6 +10518,8 @@ void webSetup() {
       "\"p1\":%d,\"p2\":%d,\"ty\":%d,\"msDns\":%lu,\"msTls\":%lu,\"phN\":%lu,\"phR\":%lu,"
       "\"disp\":%d,\"bright\":%d,\"wake\":%lu,\"dtouch\":%d,\"beep\":%d,\"vol\":%d,\"led\":%d,"
       "\"mq\":%d,\"mqN\":%lu,\"mqFail\":%lu,"
+      // Погода (OpenWeatherMap): видно с ПК, что пришло и сколько осталось heap
+      "\"wOk\":%d,\"wT\":%.1f,\"wH\":%.0f,\"wW\":%.1f,\"wCode\":%d,\"wHeap\":%u,\"wDesc\":\"%s\","
       "\"now\":\"%s\"}",
       gVoltage, gTemp, gPower, gCurrent, gEnergy,
       gRelay ? "true" : "false", myTodayKwh, myTodayCost, yKwh, yCost,
@@ -10297,6 +10546,8 @@ void webSetup() {
       gDayOffset, (unsigned long)gDayMs, (gDayOffset > 0) ? gDayRows : 0,
       sPageBuildN, sPageBuildMs,
       sPageSendMs,
+      sPageCutN,
+      sPageAt ? (millis() - sPageAt) / 1000UL : 0UL,
       gLoopLast, gLoopMaxWin, gLoopMaxAll,
       gMsSd, gMsGap, gMsHist, gApiN,
       gCloudTry, gCloudOkN, gTokenN, gNetStep, gPwrFillHour, gWifiSetState,
@@ -10310,6 +10561,7 @@ void webSetup() {
       dispWakeActive() ? (unsigned long)((gDispWakeUntil - millis()) / 1000UL) : 0,
       gDispTouch ? 1 : 0, gBeepOn ? 1 : 0, gBeepVol, gLedState,
       mqUp ? 1 : 0, mqMsgN, mqFailN,
+      wOk ? 1 : 0, wTemp, wHum, wWind, wCode, wHeap, wDescRu.c_str(),
       nows);
     gWeb.send(200, "application/json", String(b));
   });
@@ -10615,6 +10867,14 @@ void webSetup() {
     out += " cAge="; out += String(gCloudTryMs ? (millis() - gCloudTryMs) / 1000UL : 0);
     out += " vAge="; out += String(voltAgeMs() / 1000UL);
     out += " vSeen="; out += String(gPhaseMs ? 1 : 0);
+    out += "\n";
+    // PWRFILL: сколько занял последний проход и на чём кончился — по этому
+    // видно, бюджет соблюдён (не больше одного TLS-запроса за проход).
+    out += "pwrfill ms="; out += String(gPwrFillMs);
+    out += " calls=";     out += String(gPwrFillN);
+    out += " tls=";       out += String(gPwrFillTls);
+    out += " stage=";     out += String(gPwrFillSt);
+    out += " budget=";    out += String(netBudgetLeft());
     out += "\n";
     gWeb.send(200, "text/plain; charset=utf-8", out);
   });
@@ -11282,25 +11542,23 @@ void loop() {
   // MQTT — своим тиком, чтобы не мешать облаку Tuya
   { unsigned long b0 = millis(); mqttTick(); blkNote("mqtt", millis() - b0); }
   { unsigned long b0 = millis(); pwrHistTick(); blkNote("pwrhist", millis() - b0); }
-  { unsigned long b0 = millis(); pwrFillTick(); blkNote("pwrfill", millis() - b0); }
+  { unsigned long b0 = millis(); pwrFillTick(); gPwrFillMs = millis() - b0; blkNote("pwrfill", gPwrFillMs); }
   { unsigned long b0 = millis(); gapDailyTick(); gapFillTick(); blkNote("gapfill", millis() - b0); }
   { // раз в 10 минут запоминаем время: пригодится после перезагрузки без сети
     static unsigned long lastClk = 0;
-    if (millis() - lastClk > 600000UL) { lastClk = millis(); saveClock(); }
+    if (millis() - lastClk > 600000UL) { lastClk = millis();
+      unsigned long b0 = millis(); saveClock(); blkNote("nvs", millis() - b0); }
   }
   { unsigned long b0 = millis(); gWebInHandler = true; gWeb.handleClient(); gWebInHandler = false; blkNote("web", millis() - b0); }
-  // Кэш страницы (30 КБ) нужен, только пока страницу смотрят. Если её не
-  // просили 15 с — отдаём память обратно: она нужна TLS-запросу в облако.
-  // Симптом без этого: открыл /, и напряжение замирает до перезагрузки
-  // (mbedTLS: "SSL - Memory allocation failed").
-  if (sPage.length() && millis() - sPageAt > 15000UL) pageCacheFree();
+  // Страница теперь собирается потоково и память не занимает, поэтому
+  // освобождать нечего: кэш-правило (30 КБ / 15 с) больше не нужно.
   // отложенная смена сети: ответ уже ушёл клиенту, теперь можно уходить из сети
   if (gWifiSetPendingCmd.length()) {
     String c2 = gWifiSetPendingCmd;
     gWifiSetPendingCmd = "";
     cmdWifiSet(c2);
   }
-  statsTick();
+  { unsigned long b0 = millis(); statsTick(); blkNote("stats", millis() - b0); }
   // История на карту — ВСЕГДА: без Wi-Fi, без интернета, без облака.
   // Данные с реле идут по локальной сети, карта от интернета не зависит.
   // histTick — ДО writeSd: если надо дозаполнить вчера, он успевает
@@ -11320,13 +11578,13 @@ void loop() {
   }
   if (millis() - lastPeriods > 60000UL) {
     lastPeriods = millis();
-    updatePeriods();
+    unsigned long b0 = millis(); updatePeriods(); blkNote("periods", millis() - b0);
   }
   // статистику дня засеваем из карты, пока не получилось
   // (например, при старте ещё не было времени от NTP)
   if (!statsSeeded && millis() - lastSeed > 30000UL) {
     lastSeed = millis();
-    seedStatsFromSd();
+    unsigned long b0 = millis(); seedStatsFromSd(); blkNote("seed", millis() - b0);
   }
 
   // 3. Сеть: ОДНА тяжёлая операция за проход, между ними снова читаем тач.
@@ -11363,16 +11621,28 @@ void loop() {
         case 3:
           // ПК-API (192.168.1.20:8090) уже мёртв. Раньше здесь на КАЖДОМ
           // проходе было два таймаута по 2,5 с — это и были затупания.
-          // Теперь спрашиваем не чаще раза в 5 минут, и только при живом сети.
-          if (millis() - gApiLast > 300000UL && netOnline()) fetchFromApi();
+          // 01.11.2026: и «раз в 5 минут» не спасает — коннект к выключенному
+          // хосту ждёт ~5 с на уровне lwIP/ARP (таймаут HTTPClient на это не
+          // влияет), и один проход loop() занимал 5002-5566 мс каждые 5 минут.
+          // Пока ПК-API выключен, в цикле его не опрашиваем: fetchFromApi()
+          // остаётся для setup() и ручной проверки. Включить — PC_API_POLL=1.
+          #ifndef PC_API_POLL
+          #define PC_API_POLL 0
+          #endif
+          if (PC_API_POLL && millis() - gApiLast > 300000UL && netOnline()) {
+            unsigned long b0 = millis(); fetchFromApi(); blkNote("api", millis() - b0);
+          }
           break;
-        default:
+        default: {
+          unsigned long b0 = millis();
           pushHistory();
           ledUpdate();
           sendJsonData();
+          blkNote("netjson", millis() - b0);
           lastPoll = millis();
           gNetStep = 0;
           break;
+        }
       }
       if (gNetStep != 0) gNetStep++;      // 1 -> 2 -> 3 -> 4(default) -> 0
       handleTouch();                    // между операциями — снова тач
@@ -11384,9 +11654,12 @@ void loop() {
   //    Нет интернета — на экране просто «НЕТ ДАННЫХ», цикл не тормозит.
   {
     unsigned long period = wOk ? 600000UL : 60000UL;
+    if (wCode == 0) period = 120000UL;   // JSON не разобрался: повтор через 2 мин
     bool due = (lastWeather == 0) ? (millis() > 5000UL)
                                   : (millis() - lastWeather > period);
-    if (due) {
+    // Не начинаем TLS в проходе, где сетевой бюджет уже израсходован
+    // (облако/страница): иначе один проход выходит за 4 с.
+    if (due && netBudgetLeft() >= 1500UL) {
       lastWeather = millis();
       if (netOnline()) {
         handleTouch();
@@ -11478,6 +11751,14 @@ void loop() {
       printCsvHist();
     } else if (up == "WCLR") {
       clearWeather();
+    } else if (up == "WX") {
+      // Принудительный запрос погоды: проверка OpenWeatherMap и памяти без
+      // ожидания 10-минутного периода.
+      uint32_t h0 = ESP.getFreeHeap();
+      bool wxok = fetchWeather();
+      Serial.printf("WX: %s, heap %u -> %u, wCode=%d\n",
+                    wxok ? "ok" : "fail", h0, ESP.getFreeHeap(), wCode);
+      gLastDraw = 0;
     } else if (up == "RAW") {
       printRaw();
     } else if (up == "WD") {
@@ -11628,7 +11909,7 @@ void loop() {
       // запомнилась), дальше раз в 5 минут: флеш не изнашиваем.
       if (millis() > 30000UL && (lastUpNvs == 0 || millis() - lastUpNvs > 300000UL)) {
         lastUpNvs = millis();
-        bootSavePrevUp(gPrevUpRtc);
+        { unsigned long b0 = millis(); bootSavePrevUp(gPrevUpRtc); blkNote("nvs", millis() - b0); }
       }
     }
   }
