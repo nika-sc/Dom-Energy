@@ -203,6 +203,9 @@ h1{font-size:19px}
   </div>
   <div class="row"><span>Подсветка</span><b id="scrState">—</b></div>
   <div class="row"><span>Яркость</span><b id="scrBright">—</b></div>
+  <div class="row"><span>Гасить через</span><b><input id="scrIdle" type="number" min="0" max="60" step="1" inputmode="numeric" value="2" style="width:58px;text-align:right;border:1px solid #E2E8F0;border-radius:8px;padding:2px 6px;font:inherit;color:inherit;background:#fff"> мин</b></div>
+  <div class="row"><span>Экономия</span><b id="scrEco">—</b></div>
+  <div class="cs" style="margin-top:6px">0 — не гасить. При погашенном экране данные, MQTT и запись на SD идут как обычно; экран перерисовывается раз в минуту, касание возвращает подсветку.</div>
 </section>
 
 <section class="card totals">
@@ -630,12 +633,24 @@ loadEvents();
 })();
 
 function scrPaint(d){
-  var st=$("scrState"),br=$("scrBright"),b=$("scrBtn");
+  var st=$("scrState"),br=$("scrBright"),b=$("scrBtn"),id=$("scrIdle"),ec=$("scrEco");
   if(!d)return;
   var on=(d.disp===1||d.disp==="1");
   if(st)st.textContent=on?"включена":"выключена";
   if(br)br.textContent=(d.bright!=null?d.bright:"—")+" %";
   if(b)b.setAttribute("aria-pressed",on?"true":"false");
+  if(id&&document.activeElement!==id)id.value=(d.idle!=null?d.idle:0);
+  if(ec){
+    if(on&&d.idleMs>0){ var s=Math.round(d.idleMs/1000); ec.textContent="гаснет через "+(s>=60?Math.round(s/60)+" мин":s+" с"); }
+    else if(!on)ec.textContent="экран погашен";
+    else ec.textContent=d.idle>0?"ждёт бездействия":"автогашение выкл";
+  }
+}
+function scrIdleSet(v){
+  var n=parseInt(v,10); if(isNaN(n)||n<0||n>60)return;
+  fetch("/disp?idle="+n).then(function(r){return r.json()}).then(function(j){
+    if(j&&j.ok){var ec=$("scrEco");if(ec&&!j.on)ec.textContent="экран погашен";}
+  }).catch(function(){});
 }
 function scrToggle(){
   var on=$("scrState")&&$("scrState").textContent==="включена";
@@ -646,6 +661,13 @@ function scrToggle(){
 }
 document.addEventListener("DOMContentLoaded",function(){
   var b=$("scrBtn"); if(b)b.addEventListener("click",scrToggle);
+  var id=$("scrIdle"); if(id){
+    id.addEventListener("change",function(){
+      var v=parseInt(id.value,10);
+      if(isNaN(v)||v<0||v>60){id.value=2;v=2;}
+      scrIdleSet(v);
+    });
+  }
 });
 </script>
 </body>

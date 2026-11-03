@@ -18,6 +18,7 @@
 #include <TFT_eSPI.h>
 #include <Preferences.h>
 #include <HTTPClient.h>
+#include <StreamString.h>   // тело ответа с chunked -> String (прогноз OWM)
 #include <ESPmDNS.h>
 #include <SPI.h>
 #include <SD.h>
@@ -301,6 +302,9 @@ h1{font-size:19px}
   </div>
   <div class="row"><span>Подсветка</span><b id="scrState">—</b></div>
   <div class="row"><span>Яркость</span><b id="scrBright">—</b></div>
+  <div class="row"><span>Гасить через</span><b><input id="scrIdle" type="number" min="0" max="60" step="1" inputmode="numeric" value="2" style="width:58px;text-align:right;border:1px solid #E2E8F0;border-radius:8px;padding:2px 6px;font:inherit;color:inherit;background:#fff"> мин</b></div>
+  <div class="row"><span>Экономия</span><b id="scrEco">—</b></div>
+  <div class="cs" style="margin-top:6px">0 — не гасить. При погашенном экране данные, MQTT и запись на SD идут как обычно; экран перерисовывается раз в минуту, касание возвращает подсветку.</div>
 </section>
 
 <section class="card totals">
@@ -728,12 +732,24 @@ loadEvents();
 })();
 
 function scrPaint(d){
-  var st=$("scrState"),br=$("scrBright"),b=$("scrBtn");
+  var st=$("scrState"),br=$("scrBright"),b=$("scrBtn"),id=$("scrIdle"),ec=$("scrEco");
   if(!d)return;
   var on=(d.disp===1||d.disp==="1");
   if(st)st.textContent=on?"включена":"выключена";
   if(br)br.textContent=(d.bright!=null?d.bright:"—")+" %";
   if(b)b.setAttribute("aria-pressed",on?"true":"false");
+  if(id&&document.activeElement!==id)id.value=(d.idle!=null?d.idle:0);
+  if(ec){
+    if(on&&d.idleMs>0){ var s=Math.round(d.idleMs/1000); ec.textContent="гаснет через "+(s>=60?Math.round(s/60)+" мин":s+" с"); }
+    else if(!on)ec.textContent="экран погашен";
+    else ec.textContent=d.idle>0?"ждёт бездействия":"автогашение выкл";
+  }
+}
+function scrIdleSet(v){
+  var n=parseInt(v,10); if(isNaN(n)||n<0||n>60)return;
+  fetch("/disp?idle="+n).then(function(r){return r.json()}).then(function(j){
+    if(j&&j.ok){var ec=$("scrEco");if(ec&&!j.on)ec.textContent="экран погашен";}
+  }).catch(function(){});
 }
 function scrToggle(){
   var on=$("scrState")&&$("scrState").textContent==="включена";
@@ -744,6 +760,13 @@ function scrToggle(){
 }
 document.addEventListener("DOMContentLoaded",function(){
   var b=$("scrBtn"); if(b)b.addEventListener("click",scrToggle);
+  var id=$("scrIdle"); if(id){
+    id.addEventListener("change",function(){
+      var v=parseInt(id.value,10);
+      if(isNaN(v)||v<0||v>60){id.value=2;v=2;}
+      scrIdleSet(v);
+    });
+  }
 });
 </script>
 </body>
@@ -5039,7 +5062,18 @@ bool fetchForecast() {
     }
     h.setReuse(false);
     int code = h.GET();
-    if (code == 200) j = h.getString();
+    if (code == 200) {
+      // getString() читает поток «как есть»: у ответа с Transfer-Encoding:
+      // chunked в строку попадали служебные байты размера чанков — JSON не
+      // разбирался (InvalidInput/IncompleteInput), а иногда тело было пустым.
+      // writeToStream() снимает chunked-обёртку сам.
+      StreamString ss;
+      h.writeToStream(&ss);
+      j = ss;
+      if (j.length() < 40)
+        Serial.printf("прогноз: тело %u Б (size=%d code=%d)\n",
+                      (unsigned)j.length(), (int)h.getSize(), code);
+    }
     h.end();
     tls.stop();                     // освободить mbedTLS до разбора JSON
     esp_task_wdt_reset();
@@ -5727,10 +5761,23 @@ void wdTick() {
 #define BL_CH       0
 #define BL_WAKE_MS  20000UL
 
+static bool parseIntStrict(const String& s, long& out);   // определена ниже
+
 bool     gDispOn     = true;     // подсветка включена
 uint8_t  gDispBright = 255;      // рабочая яркость 1..255
 bool     gDispTouch  = true;     // касание при погашенном экране включает свет
 unsigned long gDispWakeUntil = 0;
+
+// Энергосбережение «только данные»: экран сам гаснет после бездействия, а
+// Wi-Fi/MQTT/SD продолжают работать. Таймер и ручное выключение — РАЗНЫЕ
+// состояния: ручное (gDispUserOff) таймер не включает и не выключает.
+uint32_t gDispIdleMin = 2;       // минут без касания до гашения, 0 = не гасить
+uint32_t gDispOffAt   = 0;       // когда погасили таймером (millis), 0 — не гасили
+uint32_t gDispOffN    = 0;       // сколько раз гасили по таймеру
+bool     gDispUserOff = false;   // погашено ВРУЧНУЮ
+bool     gDispAutoOff = false;   // погашено ТАЙМЕРОМ бездействия
+unsigned long gLastTouchMs  = 0; // когда было последнее касание (для таймера)
+unsigned long gLastDarkDraw = 0; // последняя перерисовка при погашенном экране
 
 bool dispWakeActive() { return gDispWakeUntil && (long)(millis() - gDispWakeUntil) < 0; }
 bool dispIsDark()     { return !gDispOn && !dispWakeActive(); }
@@ -5749,8 +5796,10 @@ void dispLoad() {
   if (!p.begin("disp", true)) return;
   uint8_t v = p.getUChar("bright", 255);
   gDispTouch = p.getBool("touch", true);
+  gDispIdleMin = p.getUChar("idle", 2);
+  if (gDispIdleMin > 60) gDispIdleMin = 2;   // мусор в NVS — безопасный дефолт
   p.end();
-  if (v == 0) { gDispOn = false; gDispBright = 255; }
+  if (v == 0) { gDispOn = false; gDispBright = 255; gDispUserOff = true; }
   else        { gDispOn = true;  gDispBright = v;   }
 }
 void dispSave() {
@@ -5758,12 +5807,17 @@ void dispSave() {
   if (!p.begin("disp", false)) return;
   p.putUChar("bright", gDispOn ? gDispBright : 0);
   p.putBool("touch", gDispTouch);
+  p.putUChar("idle", (uint8_t)gDispIdleMin);
   p.end();
 }
 void dispSet(bool on, uint8_t bright) {
   if (bright > 0) gDispBright = bright;
   gDispOn = on;
-  if (!on) gDispWakeUntil = 0;
+  gDispUserOff = !on;            // ручное выключение: таймер бездействия его не трогает
+  gDispAutoOff = false;
+  gDispOffAt = 0;
+  gDispWakeUntil = 0;
+  gLastTouchMs = millis();
   dispApply();
   dispSave();
 }
@@ -5778,10 +5832,52 @@ void dispTick() {
     if (!gDispOn) ledcWrite(BL_CH, 0);
   }
 }
+// --- энергосбережение: автогашение по бездействию ---------------------------
+// Погасить ТАЙМЕРОМ: NVS не трогаем (bright остаётся рабочим), ручное
+// выключение не перебиваем — при gDispUserOff таймер вообще не работает.
+void dispAutoDim() {
+  if (!gDispOn) return;
+  gDispOn = false;
+  gDispAutoOff = true;
+  gDispWakeUntil = 0;
+  gDispOffAt = millis();
+  gDispOffN++;
+  dispApply();
+  Serial.println("DISP: таймер бездействия — подсветка погашена");
+}
+// Касание погашенного ТАЙМЕРОМ экрана: сразу свет + немедленная перерисовка
+// (gLastDraw=0 — иначе экран остался бы со старыми данными до 2-5 минут).
+void dispTouchOn() {
+  if (!gDispAutoOff) return;
+  gDispAutoOff = false;
+  gDispOffAt = 0;
+  gDispOn = true;
+  gDispWakeUntil = 0;
+  gLastTouchMs = millis();
+  dispApply();
+  gLastDraw = 0;
+  gLastDarkDraw = 0;
+}
+void dispIdleTick() {
+  if (tpDown()) {
+    gLastTouchMs = millis();
+    if (gDispAutoOff && gDispTouch) dispTouchOn();
+  }
+  if (gDispIdleMin == 0 || !gDispOn || gDispAutoOff || gDispUserOff) return;
+  if (millis() - gLastTouchMs >= gDispIdleMin * 60000UL) dispAutoDim();
+}
+// Сколько мс осталось до автогашения; 0 — таймер неактивен.
+uint32_t dispIdleLeftMs() {
+  if (gDispIdleMin == 0 || !gDispOn || gDispUserOff) return 0;
+  uint32_t total = gDispIdleMin * 60000UL;
+  uint32_t used = millis() - gLastTouchMs;
+  return (used >= total) ? 0UL : (total - used);
+}
 String dispState() {
-  char b[64];
-  snprintf(b, sizeof(b), "DISP: on=%d bright=%u%s",
+  char b[96];
+  snprintf(b, sizeof(b), "DISP: on=%d bright=%u idle=%lu%s",
            gDispOn ? 1 : 0, (unsigned)(gDispOn ? gDispBright : 0),
+           (unsigned long)gDispIdleMin,
            gDispTouch ? "" : " notouch");
   return String(b);
 }
@@ -5797,6 +5893,18 @@ void dispCommand(const String& up) {
   }
   else if (a == "TOUCH")   { gDispTouch = true;  dispSave(); Serial.println("DISP: OK touch=1"); }
   else if (a == "NOTOUCH") { gDispTouch = false; dispSave(); Serial.println("DISP: OK touch=0"); }
+  else if (a.startsWith("IDLE")) {          // DISP IDLE n — автогашение, 0..60 мин
+    String s = a.substring(4); s.trim();
+    if (s.length() == 0) { Serial.println(dispState()); return; }
+    long v = 0;
+    if (!parseIntStrict(s, v) || v < 0 || v > 60) { Serial.println("DISP: ERR idle 0..60"); return; }
+    gDispIdleMin = (uint32_t)v;
+    gLastTouchMs = millis();
+    dispSave();
+    char o[40];
+    snprintf(o, sizeof(o), "DISP: OK idle=%lu", (unsigned long)gDispIdleMin);
+    Serial.println(o);
+  }
   else {
     int v = a.toInt();
     if (v <= 0) { dispSet(false, 0); Serial.println("DISP: OK off"); return; }
@@ -9454,7 +9562,7 @@ static int           mqDiscIdx = 0;    // сколько конфигов уже
 static bool          mqForcePub = false;   // publish принудительно (refresh)
 static char          mqErr[28] = "";   // последняя ошибка, для /mqtt
 static char          mqLastTop[72] = "";   // последний топик
-static char          mqLastState[320] = ""; // последний опубликованный JSON
+static char          mqLastState[512] = ""; // последний опубликованный JSON
 
 // Прототипы: тела ниже, а вызываются из mqttCfgLoad()/loop().
 void mqttTick();
@@ -9515,6 +9623,7 @@ struct HaEnt {
   const char* sclass;
   const char* tpl;
   const char* comp;     // sensor | binary_sensor
+  const char* icon;     // mdi-иконка; у старых строк не задана -> nullptr
 };
 
 static const HaEnt HA_ENT[] = {
@@ -9531,6 +9640,15 @@ static const HaEnt HA_ENT[] = {
   { "up",   "Работает",          "s",     "duration",        "total_increasing", "{{ value_json.up }}",                     "sensor" },
   { "r",    "Реле",              "",      "power",           "",                 "{{ 'ON' if value_json.r else 'OFF' }}",   "binary_sensor" },
   { "net",  "Сеть",              "",      "connectivity",    "",                 "{{ 'ON' if value_json.net else 'OFF' }}", "binary_sensor" },
+  // Погода (OpenWeatherMap): те же числа, что в /data (wT/wH/wW/wPop/wPopT/
+  // wTminT/wTmaxT). Раньше они были только в /data и на экране.
+  { "wT",    "Температура на улице", "°C",  "temperature", "measurement", "{{ value_json.wT }}",     "sensor", "mdi:thermometer" },
+  { "wH",    "Влажность на улице",   "%",   "humidity",    "measurement", "{{ value_json.wH }}",     "sensor", "mdi:water-percent" },
+  { "wW",    "Ветер",                "km/h","wind_speed",  "measurement", "{{ value_json.wW }}",     "sensor", "mdi:weather-windy" },
+  { "wPop",  "Дождь сейчас",         "%",   "",            "measurement", "{{ value_json.wPop }}",   "sensor", "mdi:weather-rainy" },
+  { "wPopT", "Дождь завтра",         "%",   "",            "measurement", "{{ value_json.wPopT }}",  "sensor", "mdi:weather-pouring" },
+  { "wTminT","Завтра минимум",       "°C",  "temperature", "measurement", "{{ value_json.wTminT }}", "sensor", "mdi:thermometer-arrow-down" },
+  { "wTmaxT","Завтра максимум",      "°C",  "temperature", "measurement", "{{ value_json.wTmaxT }}", "sensor", "mdi:thermometer-arrow-down" },
 };
 #define HA_N ((int)(sizeof(HA_ENT) / sizeof(HA_ENT[0])))
 
@@ -9554,6 +9672,9 @@ int mqttHaConfig(int i, char* b, size_t n) {
   if (e.sclass && e.sclass[0])
     w += snprintf(b + w, n - w, "\"state_class\":\"%s\",", e.sclass);
   if (w < 0 || w >= (int)n) return -1;
+  if (e.icon && e.icon[0])
+    w += snprintf(b + w, n - w, "\"icon\":\"%s\",", e.icon);
+  if (w < 0 || w >= (int)n) return -1;
   w += snprintf(b + w, n - w,
     "\"availability_topic\":\"%s/status\","
     "\"device\":{\"identifiers\":[\"%s\"],\"name\":\"Дом — энергия\","
@@ -9571,13 +9692,17 @@ void mqttBuildState(char* b, size_t n) {
     "{\"v\":%.0f,\"p\":%.1f,\"amp\":%.2f,\"temp\":%.1f,\"e\":%.2f,\"r\":%s,"
     "\"tkwh\":%.3f,\"tcost\":%.2f,\"ykwh\":%.3f,\"mkwh\":%.3f,"
     "\"tariff\":%.2f,\"tday\":%.2f,\"tnight\":%.2f,"
-    "\"rssi\":%d,\"up\":%lu,\"net\":%s,\"led\":%d,\"gaps\":%d}",
+    "\"rssi\":%d,\"up\":%lu,\"net\":%s,\"led\":%d,\"gaps\":%d,"
+    // Погода: без этих полей сенсоры wT..wTmaxT в HA оставались пустыми.
+    "\"wT\":%.1f,\"wH\":%.0f,\"wW\":%.1f,\"wPop\":%.0f,\"wPopT\":%.0f,"
+    "\"wTminT\":%.1f,\"wTmaxT\":%.1f}",
     gVoltage, gPower, gCurrent, gTemp, gEnergy,
     gRelay ? "true" : "false",
     myTodayKwh, myTodayCost, yKwh, mKwh,
     measuredTariff(), TARIFF_DAY, TARIFF_NIGHT,
     gRssi, millis() / 1000UL, gNetOk ? "true" : "false",
-    gLedState, gapTodayCount());
+    gLedState, gapTodayCount(),
+    wTemp, wHum, wWind, wPopNow, wPopTom, wTminTom, wTmaxTom);
 }
 
 bool mqttPublish(const char* sub, const char* payload, bool retain) {
@@ -9596,7 +9721,7 @@ bool mqttPublish(const char* sub, const char* payload, bool retain) {
 }
 
 bool mqttPublishState(bool force) {
-  char b[320];
+  char b[512];
   mqttBuildState(b, sizeof(b));
   if (!force) {
     bool changed = (strcmp(b, mqLastState) != 0);
@@ -10908,7 +11033,11 @@ void webSetup() {
       "\"blk\":\"%s\",\"blkMs\":%lu,"
       "\"msCloud\":%lu,\"msTuya\":%lu,\"msWrite\":%lu,\"creuse\":%lu,"
       "\"p1\":%d,\"p2\":%d,\"ty\":%d,\"msDns\":%lu,\"msTls\":%lu,\"phN\":%lu,\"phR\":%lu,"
-      "\"disp\":%d,\"bright\":%d,\"wake\":%lu,\"dtouch\":%d,\"beep\":%d,\"vol\":%d,\"led\":%d,"
+      "\"disp\":%d,\"bright\":%d,\"wake\":%lu,\"dtouch\":%d,"
+      // Энергосбережение: idle — минут до гашения, idleMs — сколько осталось
+      // до гашения, dispOff — сколько раз экран гас по таймеру.
+      "\"idle\":%d,\"idleMs\":%lu,\"dispOff\":%lu,"
+      "\"beep\":%d,\"vol\":%d,\"led\":%d,"
       "\"mq\":%d,\"mqN\":%lu,\"mqFail\":%lu,"
       // Погода (OpenWeatherMap): видно с ПК, что пришло и сколько осталось heap
       "\"wOk\":%d,\"wT\":%.1f,\"wH\":%.0f,\"wW\":%.1f,\"wCode\":%d,\"wCodeT\":%d,\"wHeap\":%u,\"wDesc\":\"%s\","
@@ -10955,7 +11084,9 @@ void webSetup() {
       gProbe1 ? 1 : 0, gProbe2 ? 1 : 0, gTuyaOk ? 1 : 0, gMsDns, gMsTls, gPhaseN, gPhaseRelayN,
       gDispOn ? 1 : 0, gDispOn ? gDispBright : 0,
       dispWakeActive() ? (unsigned long)((gDispWakeUntil - millis()) / 1000UL) : 0,
-      gDispTouch ? 1 : 0, gBeepOn ? 1 : 0, gBeepVol, gLedState,
+      gDispTouch ? 1 : 0, (int)gDispIdleMin, (unsigned long)dispIdleLeftMs(),
+      (unsigned long)gDispOffN,
+      gBeepOn ? 1 : 0, gBeepVol, gLedState,
       mqUp ? 1 : 0, mqMsgN, mqFailN,
       wOk ? 1 : 0, wTemp, wHum, wWind, wCode, wCodeTom, wHeap, wDescRu.c_str(),
       wPopNow, wPopTom, wTminTom, wTmaxTom, wDescTom.c_str(), wRainTom, wfHeap,
@@ -11754,14 +11885,17 @@ void webSetup() {
     // Сначала ПРОВЕРЯЕМ всё, потом меняем. Раньше toInt() превращал мусор в 0:
     // /disp?on=abc гасил подсветку, ?bright=-5 уходил в off, ?touch=abc
     // отключал wake. Теперь любое плохое значение — 400 и ни одной записи в NVS.
-    long vBright = 0, vOn = 0, vTouch = 0;
+    long vBright = 0, vOn = 0, vTouch = 0, vIdle = 0;
     bool hasBright = gWeb.hasArg("bright");
     bool hasOn     = gWeb.hasArg("on");
     bool hasTouch  = gWeb.hasArg("touch");
+    bool hasIdle   = gWeb.hasArg("idle");
     bool bad = false;
     if (hasBright && (!parseIntStrict(gWeb.arg("bright"), vBright) || vBright < 0 || vBright > 100)) bad = true;
     if (hasOn     && (!parseIntStrict(gWeb.arg("on"), vOn)         || (vOn != 0 && vOn != 1)))             bad = true;
     if (hasTouch  && (!parseIntStrict(gWeb.arg("touch"), vTouch)   || (vTouch != 0 && vTouch != 1)))       bad = true;
+    // idle — минуты бездействия до автогашения (энергосбережение), 0..60.
+    if (hasIdle   && (!parseIntStrict(gWeb.arg("idle"), vIdle)     || vIdle < 0 || vIdle > 60))            bad = true;
     if (bad) {
       gWeb.send(400, "application/json; charset=utf-8", "{\"ok\":false,\"err\":\"bad value\"}");
       return;
@@ -11781,12 +11915,20 @@ void webSetup() {
       gDispTouch = (vTouch != 0);
       dispSave();
     }
+    if (hasIdle) {
+      gDispIdleMin = (uint32_t)vIdle;
+      gLastTouchMs = millis();          // отсчёт бездействия — заново
+      dispSave();
+    }
     if (gWeb.hasArg("wake") && gWeb.arg("wake") == "1") dispWake();
-    char b[96];
+    char b[192];
     snprintf(b, sizeof(b),
-      "{\"ok\":true,\"on\":%d,\"bright\":%d,\"touch\":%d,\"wake\":%lu}",
+      "{\"ok\":true,\"on\":%d,\"bright\":%d,\"touch\":%d,\"wake\":%lu,"
+      "\"idle\":%lu,\"idleMs\":%lu,\"dispOff\":%lu}",
       gDispOn ? 1 : 0, gDispOn ? gDispBright : 0, gDispTouch ? 1 : 0,
-      dispWakeActive() ? (unsigned long)((gDispWakeUntil - millis()) / 1000UL) : 0);
+      dispWakeActive() ? (unsigned long)((gDispWakeUntil - millis()) / 1000UL) : 0,
+      (unsigned long)gDispIdleMin, (unsigned long)dispIdleLeftMs(),
+      (unsigned long)gDispOffN);
     gWeb.send(200, "application/json", String(b));
   });
 
@@ -11930,6 +12072,7 @@ void loop() {
   //    облако и SD держали цикл десятками секунд, и тач «умирал».
   handleTouch();
   dispTick();               // подсветка: погасить после 20 с «касание — свет»
+  dispIdleTick();           // энергосбережение: автогашение по бездействию
   ledTick();                // светодиод: цвет по состоянию + мигание 1 Гц
   beepTick();               // проигрывание пиков
   beepEvents();             // тревоги: напряжение, перегрев, карта, час
@@ -12096,7 +12239,21 @@ void loop() {
   //    напряжение/мощность меняются раз в 20-40 с, и без порога каждая такая
   //    мелочь заливала все пять карточек (~139 КБ SPI) — 5 перерисовок за 3 мин.
   //    Статус-бар при этом обновляется отдельно раз в 60 с.
-  if (!gDayLoading) {
+  //
+  //    Энергосбережение: при ПОГАШЕННОМ экране полная перерисовка — не чаще
+  //    раза в 60 с (SPI-обмен и заливка кадра — заметная часть расхода).
+  //    Данные (/data, MQTT, SD) при этом идут своим темпом, как и раньше.
+  if (!gDayLoading && dispIsDark()) {
+    // В проходе, где сеть уже потратила время (TLS), кадр не заливаем:
+    // экран всё равно погашен, а loopMaxAll иначе выходит за 4 с.
+    if (millis() - gLastDarkDraw >= 60000UL && netBudgetLeft() >= 1500UL) {
+      gLastDarkDraw = millis();
+      gLastDraw = millis();
+      if (gScreen == SCR_MAIN) { refreshMain(); gLastWinFull = millis(); }
+      else { gNoClear = false; drawScreen(); }
+      gLastSig = screenSig();
+    }
+  } else if (!gDayLoading) {
   if (gScreen == SCR_MAIN) {
     uint32_t sig = screenSig();
     bool changed = (sig != gLastSig);
