@@ -841,6 +841,30 @@ $top.Controls.Add($lblCom)
 $btnPult    = New-Btn $top 'Экран платы' '#2A3240' $script:CLR.text 112 32
 $btnReboot  = New-Btn $top 'Перезагрузить' '#4A3138' $script:CLR.text 120 32
 $btnSerial  = New-Btn $top 'Подключить'   '#24405A' $script:CLR.text 100 32
+# --- яркость экрана платы: ползунок в шапке, работает по HTTP ---------------
+$script:trkBright = New-Object System.Windows.Forms.TrackBar
+$script:trkBright.Minimum = 5
+$script:trkBright.Maximum = 100
+$script:trkBright.TickFrequency = 25
+$script:trkBright.Value = 100
+$script:trkBright.Size = New-Object System.Drawing.Size(130, 28)
+$script:trkBright.Location = New-Object System.Drawing.Point(600, 17)
+$top.Controls.Add($script:trkBright)
+
+$script:lblBright = New-Lbl $top '100 %' 8.5 $script:CLR.dim2 $true 736 22
+
+$script:trkBright.Add_Scroll({
+    $v = [int]$script:trkBright.Value
+    if ($null -ne $script:lblBright) { $script:lblBright.Text = "$v %" }
+    try {
+        $null = $script:http.GetStringAsync("$($script:cfg.board)/disp?bright=$v").Result
+        Add-Log ("яркость экрана: $v %")
+    } catch { Add-Log "яркость: плата не ответила" 'warn' }
+})
+if ($null -ne $script:tipMain) {
+    $script:tipMain.SetToolTip($script:trkBright, 'яркость подсветки экрана платы (5-100 %), применяется сразу по HTTP')
+}
+
 $btnPult.Location    = New-Object System.Drawing.Point(760, 15)
 $btnReboot.Location  = New-Object System.Drawing.Point(886, 15)
 $btnSerial.Location  = New-Object System.Drawing.Point(1020, 15)
@@ -2995,8 +3019,18 @@ function Step-Day([int]$delta) {
 #  КНОПКИ И СОБЫТИЯ
 # ============================================================================
 $btnPult.Add_Click({
-    if (Send-Serial 'disp toggle') { Add-Log 'кнопка «Экран платы»: подсветка переключена (disp toggle)' }
-    else { Add-Log 'кнопка «Экран платы»: нужен открытый COM-порт' 'warn' }
+    # HTTP: работает без COM-порта. Читаем /data, чтобы знать текущее состояние.
+    try {
+        $j = $script:http.GetStringAsync("$($script:cfg.board)/data").Result | ConvertFrom-Json
+        $on = ($j.disp -eq 1)
+        $cmd = if ($on) { 'on=0' } else { 'on=1' }
+        $null = $script:http.GetStringAsync("$($script:cfg.board)/disp?$cmd").Result
+        Add-Log ("кнопка «Экран платы»: подсветка " + $(if ($on) { 'выключена' } else { 'включена' }))
+        if ($cmd -eq 'on=1' -and $null -ne $script:trkBright) {
+            $v = [int]$script:trkBright.Value
+            $null = $script:http.GetStringAsync("$($script:cfg.board)/disp?bright=$v").Result
+        }
+    } catch { Add-Log 'кнопка «Экран платы»: плата не ответила' 'warn' }
 })
 
 $btnReboot.Add_Click({

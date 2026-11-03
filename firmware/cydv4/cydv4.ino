@@ -241,6 +241,20 @@ h1{font-size:19px}
     <span class="chip" id="cRssi">__RSSI__ дБм</span>
     <span class="chip" id="cUpd">обновлено 0 с</span>
   </div>
+
+<section class="card sec" id="scrCard">
+  <div class="head">
+    <div class="ttl">Экран платы</div>
+    <div class="nav"><button class="nbtn" id="scrBtn" type="button" aria-pressed="false" onclick="scrToggle()" title="погасить или включить подсветку">Экран</button></div>
+  </div>
+  <div class="row"><span>Подсветка</span><b id="scrState">—</b></div>
+  <div class="row"><span>Яркость</span><b><input id="scrBrightRange" type="range" min="5" max="100" step="5" value="100" style="width:110px;vertical-align:middle" oninput="scrBrightSet(this.value)"> <span id="scrBright">—</span></b></div>
+  <div class="row"><span>Гасить через</span><b><input id="scrIdle" type="number" min="0" max="60" step="1" inputmode="numeric" value="2" style="width:58px;text-align:right;border:1px solid #E2E8F0;border-radius:8px;padding:2px 6px;font:inherit;color:inherit;background:#fff"> мин</b></div>
+  <div class="row"><span>Экономия</span><b id="scrEco">—</b></div>
+  <div class="cs" style="margin-top:6px">0 — не гасить. При погашенном экране данные, MQTT и запись на SD идут как обычно; экран перерисовывается раз в минуту, касание возвращает подсветку.</div>
+</section>
+
+
 </div>
 
 <div class="hero">
@@ -293,18 +307,6 @@ h1{font-size:19px}
     <div class="ct"><span>Напряжение и температура</span><span class="legend"><i class="sw v"></i>В<i class="sw t"></i>°C</span></div>
     <div class="plot" id="chVT"></div>
   </div>
-</section>
-
-<section class="card sec" id="scrCard">
-  <div class="head">
-    <div class="ttl">Экран платы</div>
-    <div class="nav"><button class="nbtn" id="scrBtn" type="button" aria-pressed="false" title="погасить или включить подсветку">Экран</button></div>
-  </div>
-  <div class="row"><span>Подсветка</span><b id="scrState">—</b></div>
-  <div class="row"><span>Яркость</span><b id="scrBright">—</b></div>
-  <div class="row"><span>Гасить через</span><b><input id="scrIdle" type="number" min="0" max="60" step="1" inputmode="numeric" value="2" style="width:58px;text-align:right;border:1px solid #E2E8F0;border-radius:8px;padding:2px 6px;font:inherit;color:inherit;background:#fff"> мин</b></div>
-  <div class="row"><span>Экономия</span><b id="scrEco">—</b></div>
-  <div class="cs" style="margin-top:6px">0 — не гасить. При погашенном экране данные, MQTT и запись на SD идут как обычно; экран перерисовывается раз в минуту, касание возвращает подсветку.</div>
 </section>
 
 <section class="card totals">
@@ -426,9 +428,9 @@ txt("mkwh",eNum(d.mkwh));txt("mcost",num(d.mcost,2));
 txt("cRssi",num(d.rssi,0)+" дБм");
 var cf=(d.v>50&&d.amp>0.001)?Math.min(1,Math.max(0,d.p/(d.v*d.amp))):null;
 txt("pcos",cf===null?"—":cf.toFixed(2));
-wxCard(d);
-forecast(d);
-scrPaint(d);
+try{scrPaint(d)}catch(e){}
+  try{wxCard(d)}catch(e){}
+  try{forecast(d)}catch(e){}
 var r=$("pRelay");
 r.innerHTML='<i class="dot '+(d.r?"ok":"bad")+'"></i>реле '+(d.r?"ВКЛ":"ВЫКЛ");
 if(d.now){
@@ -751,13 +753,27 @@ function scrIdleSet(v){
     if(j&&j.ok){var ec=$("scrEco");if(ec&&!j.on)ec.textContent="экран погашен";}
   }).catch(function(){});
 }
-function scrToggle(){
-  var on=$("scrState")&&$("scrState").textContent==="включена";
-  fetch("/disp?"+(on?"on=0":"on=1")).then(function(r){return r.json()}).then(function(j){
-    if(j&&j.ok){ var st=$("scrState"); if(st)st.textContent=on?"выключена":"включена";
-      var b=$("scrBtn"); if(b)b.setAttribute("aria-pressed",on?"false":"true"); }
-  }).catch(function(){});
-}
+var scrOn=false;
+window.scrToggle=function(){
+  /* $ определён внутри обёртки — снаружи используем document.getElementById */
+  var g=function(id){return document.getElementById(id)};
+  var st=g("scrState"), b=g("scrBtn"), br=g("scrBright"), ec=g("scrEco");
+  var on=(window.scrOn===true);
+  if(b)b.disabled=true;
+  fetch("/disp?"+(on?"on=0":"on=1"),{cache:"no-store"})
+    .then(function(r){return r.json()})
+    .then(function(j){
+      if(j&&j.ok){
+        window.scrOn=(j.on===1||j.on==="1");
+        if(st)st.textContent=window.scrOn?"включена":"выключена";
+        if(br)br.textContent=(j.bright!=null?j.bright:0)+" %";
+        if(b){b.setAttribute("aria-pressed",window.scrOn?"true":"false");b.disabled=false;}
+        if(ec)ec.textContent=window.scrOn?"ждёт бездействия":"экран погашен";
+      } else if(b) b.disabled=false;
+    })
+    .catch(function(){ if(b)b.disabled=false; });
+};
+var scrToggle=window.scrToggle;
 document.addEventListener("DOMContentLoaded",function(){
   var b=$("scrBtn"); if(b)b.addEventListener("click",scrToggle);
   var id=$("scrIdle"); if(id){
@@ -768,6 +784,44 @@ document.addEventListener("DOMContentLoaded",function(){
     });
   }
 });
+
+/* Независимое обновление карточки «Экран платы» — не зависит от основной цепи. */
+function scrSelfPaint(d){
+  if(!d)return;
+  var st=document.getElementById("scrState");
+  var br=document.getElementById("scrBright");
+  var ec=document.getElementById("scrEco");
+  var id=document.getElementById("scrIdle");
+  var b=document.getElementById("scrBtn");
+  var on=(d.disp===1||d.disp==="1");
+  window.scrOn=on;
+  if(st)st.textContent=on?"включена":"выключена";
+  if(br)br.textContent=(d.bright!=null?d.bright:0)+" %";
+  if(b)b.setAttribute("aria-pressed",on?"true":"false");
+  if(id&&document.activeElement!==id)id.value=(d.idle!=null?d.idle:0);
+  if(ec){
+    if(!on)ec.textContent="экран погашен";
+    else if(d.idleMs>0){var s=Math.round(d.idleMs/1000);ec.textContent="гаснет через "+(s>=60?Math.round(s/60)+" мин":s+" с");}
+    else ec.textContent=(d.idle>0?"ждёт бездействия":"автогашение выкл");
+  }
+}
+function scrSelfTick(){
+  fetch("/data",{cache:"no-store"}).then(function(r){return r.json()}).then(scrSelfPaint).catch(function(){});
+}
+document.addEventListener("DOMContentLoaded",function(){
+  scrSelfTick();
+  setInterval(scrSelfTick,10000);
+});
+
+window.scrBrightSet=function(v){
+  var n=parseInt(v,10); if(isNaN(n)||n<5||n>100)return;
+  var g=function(id){return document.getElementById(id)};
+  fetch("/disp?bright="+n,{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){
+    var br=g("scrBright"); if(br&&j&&j.bright!=null)br.textContent=j.bright+" %";
+    var rg=g("scrBrightRange"); if(rg&&j&&j.bright!=null)rg.value=j.bright;
+    if(window.scrOn===false){ fetch("/disp?on=1",{cache:"no-store"}); window.scrOn=true; }
+  }).catch(function(){});
+};
 </script>
 </body>
 </html>
@@ -778,7 +832,7 @@ document.addEventListener("DOMContentLoaded",function(){
 #include <mbedtls/md.h>
 
 // ---------------------------------------------------------------- настройки
-const char* FW_VER = "4.6";
+const char* FW_VER = "4.8";
 
 // ---------------------------------------------------------------- секреты
 // Пароли и ключи НЕ хранятся в репозитории. Скопируйте secrets.example.h
@@ -6114,7 +6168,7 @@ int ledWant() {
   if (gLedOverride >= 0 && (long)(millis() - gLedOverrideUntil) < 0) return gLedOverride;
   if (gLedBootUntil && (long)(millis() - gLedBootUntil) < 0) return LEDS_BOOT;
   bool wifi = (WiFi.status() == WL_CONNECTED);
-  if (!wifi || gRelayFailRun >= 2) return LEDS_RED;          // нет связи с реле
+  if (!wifi || (gRelayFailRun >= 2 && gCloudFailRun >= 3)) return LEDS_RED;  // красный: нет Wi-Fi ИЛИ (реле молчит И облако молчит)
   if (!gSdOk || gSdWriteFail >= 2) return LEDS_ORANGE;       // карта/запись
   if (!gNetOk || gCloudFailRun >= 3) return LEDS_YELLOW;     // интернета нет
   if (dispIsDark()) return LEDS_DIM;                         // экран погашен
@@ -8598,7 +8652,7 @@ static size_t csvFileSize() {
 #define PAGE_SEND_STALL   800UL   // нет прогресса 0.8 с — клиент мёртв, рвём
 #define PAGE_CHUNK       4096     // мельче — больше задержек на TCP
 #define PAGE_MAX_TAGS      22     // столько подстановок в web/page.html
-#define PAGE_CAP        36000     // предел ответа: больше — это уже ошибка
+#define PAGE_CAP        40000     // предел ответа: больше — это уже ошибка
 
 struct PgVal {
   const char* tag;      // "__FW__" и т.п.
