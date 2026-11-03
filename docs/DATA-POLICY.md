@@ -86,17 +86,19 @@ datetime,voltage,power,energy_kwh,relay,cost,temp
 интернета. Именно он даёт напряжение, счётчик, реле и температуру, когда
 внешней сети нет.
 
-## 5. Что уходит в wttr.in
+## 5. Что уходит в OpenWeatherMap
 
-Один HTTP GET:
+Два HTTPS-запроса (погода сейчас и прогноз на 48 ч):
 
 ```
-http://wttr.in/~<широта>,<долгота>?format=%t|%h|%w|%C
+https://api.openweathermap.org/data/2.5/weather?lat=<широта>&lon=<долгота>&appid=<ключ>&units=metric&lang=ru
+https://api.openweathermap.org/data/2.5/forecast?lat=<широта>&lon=<долгота>&appid=<ключ>&units=metric&lang=ru&cnt=10
 ```
 
-Уходят только координаты и User-Agent. Ни ключей, ни истории, ни Device ID.
-Координаты задаются в `secrets.h`; в репозитории их нет. Если погода не
-нужна, можно не заполнять `WEATHER_LAT/LON` — экран покажет «НЕТ ДАННЫХ».
+Уходят координаты и ключ OpenWeatherMap. Ни истории, ни Device ID, ни паролей.
+Координаты и ключ задаются в `secrets.h` (`WEATHER_LAT` / `WEATHER_LON` / `OWM_KEY`);
+в репозитории их нет. Если ключ не заполнен, плата погоду не запрашивает —
+экран покажет «НЕТ ДАННЫХ».
 
 ## 6. Что остаётся локально
 
@@ -129,16 +131,22 @@ notepad secrets.h
 ```cpp
 #define WIFI_SSID      "ваша_сеть"
 #define WIFI_PASS      "ваш_пароль"
+
 #define TUYA_DEVICE_ID "..."
 #define TUYA_LOCAL_KEY "..."
 #define TUYA_CLIENT_ID "..."
 #define TUYA_SECRET    "..."
+
 #define RELAY_IP       "192.168.1.25"
 #define PC_API_URL     "http://192.168.1.20:8090"
-#define WEATHER_LAT    "YOUR_LAT"
-#define WEATHER_LON    "YOUR_LON"
-#define WEATHER_CITY   "ВАШ ГОРОД"
+
+#define OWM_KEY        ""            // ключ OpenWeatherMap, можно пусто
+#define WEATHER_LAT    "43.43"
+#define WEATHER_LON    "39.92"
+
+#define MQTT_HOST      ""            // пусто = MQTT выключен
 ```
+
 
 `secrets.h` уже в `.gitignore`. Проверка перед коммитом:
 

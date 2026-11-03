@@ -996,6 +996,63 @@ $lcdWrap.Controls.Add($lcd)
 
 $lblLcdHint = New-Lbl $lcdWrap 'зеркало OLED-экрана платы' 7.5 $script:CLR.dim2 $false 2 260
 
+# --- настройки экрана: автогашение (4.10) -----------------------------------
+# Плата принимает /disp?idle=<минуты>, 0 — не гасить. Значение уходит в NVS
+# и переживает перезагрузку — ровно как поле «Гасить через» на веб-странице.
+$scrCard = New-Object System.Windows.Forms.Panel
+$scrCard.Size = New-Object System.Drawing.Size(330, 278)
+$scrCard.Location = New-Object System.Drawing.Point(390, 12)
+$scrCard.BackColor = C $script:CLR.card
+$pgScreen.Controls.Add($scrCard)
+
+$null = New-Lbl $scrCard 'ЭКРАН И ПОДСВЕТКА' 7.5 $script:CLR.dim2 $true 12 10
+
+$null = New-Lbl $scrCard 'Гасить бездействием, минут' 8.5 $script:CLR.dim $false 12 44
+$script:numIdle = New-Object System.Windows.Forms.NumericUpDown
+$script:numIdle.Minimum = 0
+$script:numIdle.Maximum = 60
+$script:numIdle.Value = 2
+$script:numIdle.Size = New-Object System.Drawing.Size(70, 26)
+$script:numIdle.Location = New-Object System.Drawing.Point(12, 66)
+$script:numIdle.BackColor = C $script:CLR.card
+$script:numIdle.ForeColor = C $script:CLR.text
+$scrCard.Controls.Add($script:numIdle)
+
+$btnIdle = New-Btn $scrCard 'Применить' '#2A3240' $script:CLR.text 104 30
+$btnIdle.Location = New-Object System.Drawing.Point(92, 63)
+$btnIdle.Add_Click({
+    $v = [int]$script:numIdle.Value
+    try {
+        $r = $script:http.GetStringAsync("$($script:cfg.board)/disp?idle=$v").Result | ConvertFrom-Json
+        if ($r.ok) { Add-Log ("автогашение экрана: $v мин (на плате: " + $r.idle + ')') }
+        else { Add-Log 'автогашение: плата отклонила значение' 'warn' }
+    } catch { Add-Log 'автогашение: плата не ответила' 'warn' }
+})
+
+$null = New-Lbl $scrCard '0 — не гасить. Касание возвращает подсветку.' 7.5 $script:CLR.dim2 $false 12 100
+
+$null = New-Lbl $scrCard 'Подсветка' 8.5 $script:CLR.dim $false 12 136
+$btnScrOn = New-Btn $scrCard 'Вкл / выкл экран' '#24405A' $script:CLR.text 150 30
+$btnScrOn.Location = New-Object System.Drawing.Point(12, 158)
+$btnScrOn.Add_Click({
+    try {
+        $j = $script:http.GetStringAsync("$($script:cfg.board)/data").Result | ConvertFrom-Json
+        $on = ($j.disp -eq 1)
+        $null = $script:http.GetStringAsync("$($script:cfg.board)/disp?" + $(if ($on) { 'on=0' } else { 'on=1' })).Result
+        if (-not $on -and $null -ne $script:trkBright) {
+            $b = [int]$script:trkBright.Value
+            $null = $script:http.GetStringAsync("$($script:cfg.board)/disp?bright=$b").Result
+        }
+        Add-Log ("экран: " + $(if ($on) { 'погашен' } else { 'включён' }))
+    } catch { Add-Log 'экран: плата не ответила' 'warn' }
+})
+
+if ($null -ne $script:tipMain) {
+    $script:tipMain.SetToolTip($script:numIdle, 'через сколько минут бездействия гаснет подсветка (0 — не гасить)')
+    $script:tipMain.SetToolTip($btnIdle, 'записать значение в плату (переживёт перезагрузку)')
+}
+
+
 function New-Card($parent, [string]$caption, [float]$valSize) {
     $p = New-Object System.Windows.Forms.Panel
     $p.BackColor = C $script:CLR.card

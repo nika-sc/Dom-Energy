@@ -13,7 +13,7 @@ main{max-width:880px;margin:0 auto;padding:18px 16px 44px}
 .top{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-bottom:14px}
 h1{font-size:21px;line-height:1.2;margin:0;letter-spacing:-.02em}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}
-.chip{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--ln);color:var(--mut);font-size:12px;padding:4px 9px;border-radius:999px;white-space:nowrap}
+.chip{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--ln);color:var(--mut);font-size:12px;padding:4px 9px;border-radius:999px;white-space:nowrap}
 .dot{width:7px;height:7px;border-radius:50%;background:#94A3B8;display:inline-block;flex:none}
 .dot.ok{background:var(--grn)}
 .dot.bad{background:var(--pnk)}
@@ -38,7 +38,7 @@ h1{font-size:21px;line-height:1.2;margin:0;letter-spacing:-.02em}
 .pa.bad{color:#DC2626}
 .ls{display:none}
 .pills{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px}
-.pill{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--ln);border-radius:999px;padding:5px 11px;font-size:12.5px;color:var(--mut)}
+.pill{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--ln);border-radius:999px;padding:5px 11px;font-size:12.5px;color:var(--mut)}
 .pill b{color:var(--ink);font-weight:650}
 .sec{padding:14px 16px 8px;margin-bottom:10px}
 .head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px}
@@ -55,8 +55,13 @@ h1{font-size:21px;line-height:1.2;margin:0;letter-spacing:-.02em}
 .ct .u{font-size:11px;color:var(--mut);font-weight:500}
 .cs{font-size:10.5px;color:var(--mut);margin-top:1px}
 .legend{margin-left:auto;display:flex;align-items:center;gap:5px;font-size:11px;color:var(--mut);font-weight:500}
-.nbtn{font:inherit;font-size:10px;font-weight:600;color:var(--mut);background:#fff;border:1px solid var(--ln);border-radius:999px;padding:1px 7px;line-height:1.45;cursor:pointer}
-.nbtn[aria-pressed=true]{color:var(--acc);border-color:var(--acc2);background:#EFF4FF}
+.nbtn{font:inherit;font-size:10px;font-weight:600;color:var(--mut);background:var(--card);border:1px solid var(--ln);border-radius:999px;padding:1px 7px;line-height:1.45;cursor:pointer}
+.nbtn[aria-pressed=true]{color:#fff;border-color:var(--acc);background:var(--acc);box-shadow:0 0 0 3px rgba(37,99,235,.18)}
+.nbtn:hover{border-color:var(--acc);color:var(--acc)}
+.nbtn[aria-pressed=true]:hover{color:#fff}
+.nbtn{background:#fff;transition:all .12s ease;font-size:11.5px;font-weight:700;padding:4px 12px;border-width:1.5px;cursor:pointer;letter-spacing:.02em}
+.nbtn[aria-pressed=true]{color:#fff !important;border-color:var(--acc) !important;background:var(--acc) !important;box-shadow:0 0 0 3px rgba(37,99,235,.20);font-weight:800}
+.nbtn[aria-pressed=false]{color:var(--mut);background:#fff;border-style:dashed}
 .sw{width:9px;height:9px;border-radius:3px;display:inline-block;margin-left:6px}
 .sw.b{background:var(--acc2)}
 .sw.p{background:#F59E0B;height:9px;border-radius:3px;opacity:1}
@@ -73,6 +78,7 @@ h1{font-size:21px;line-height:1.2;margin:0;letter-spacing:-.02em}
 .cap.a{fill:#3F6BC4}
 .cap.p{fill:#475569}
 .nl{font-size:8px;fill:#475569;font-weight:600;pointer-events:none}
+.nl.p{fill:#B45309}
 .bar{fill:var(--acc2)}
 .bar.cur{fill:var(--acc);fill-opacity:.55;stroke:var(--acc)}
 .bar0{fill:#E7EDF9}
@@ -150,7 +156,7 @@ h1{font-size:19px}
   </div>
   <div class="row"><span>Подсветка</span><b id="scrState">—</b></div>
   <div class="row"><span>Яркость</span><b><input id="scrBrightRange" type="range" min="5" max="100" step="5" value="100" style="width:110px;vertical-align:middle" oninput="scrBrightSet(this.value)"> <span id="scrBright">—</span></b></div>
-  <div class="row"><span>Гасить через</span><b><input id="scrIdle" type="number" min="0" max="60" step="1" inputmode="numeric" value="2" style="width:58px;text-align:right;border:1px solid #E2E8F0;border-radius:8px;padding:2px 6px;font:inherit;color:inherit;background:#fff"> мин</b></div>
+  <div class="row"><span>Гасить через</span><b><input id="scrIdle" type="number" min="0" max="60" step="1" inputmode="numeric" value="2" style="width:58px;text-align:right;border:1px solid #E2E8F0;border-radius:8px;padding:2px 6px;font:inherit;color:inherit;background:#fff" onchange="scrIdleSet(this.value)" onkeydown="if(event.key==='Enter'){this.blur()}"> мин</b></div>
   <div class="row"><span>Экономия</span><b id="scrEco">—</b></div>
   <div class="cs" style="margin-top:6px">0 — не гасить. При погашенном экране данные, MQTT и запись на SD идут как обычно; экран перерисовывается раз в минуту, касание возвращает подсветку.</div>
 </section>
@@ -185,7 +191,7 @@ h1{font-size:19px}
 </div>
 
 <section class="card block" id="wxCard" style="display:none">
-  <div class="ttl2">Погода · ВАШЕГО ГОРОДА</div>
+  <div class="ttl2">Погода · Адлер</div>
   <div class="row"><span>Сейчас</span><b id="wxNow">—</b></div>
   <div class="row"><span>Завтра</span><b id="wxTom">—</b></div>
 </section>
@@ -238,7 +244,7 @@ h1{font-size:19px}
 <script>
 (function(){
 "use strict";
-var $=function(i){return document.getElementById(i)};
+function gd(i){return document.getElementById(i)}
 var MON=["января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"];
 var S={date:"__DATE__",today:"__DATE__",hour:__HOUR__,days:[],gaps:[],hist:{},cur:null,last:Date.now(),net:true,tipT:0,busy:false,poll:0,fn:120,nums:0};
 var AT={v:0,t:0,p:0,e:0};   // epoch-секунды последнего получения показателя
@@ -267,7 +273,7 @@ return jq(u).catch(function(e){
   return new Promise(function(res){setTimeout(res,1200)}).then(function(){return retry(u,n-1)});
 });
 }
-function txt(id,t){var e=$(id);if(e)e.textContent=t}
+function txt(id,t){var e=gd(id);if(e)e.textContent=t}
 function hourRange(i){return pad2(i)+":00–"+pad2(i+1)+":00"}
 function fullN(hs){var s=0,c=0,i,a;for(i=0;i<24;i++){a=hs[i]||{};if(a.n&&!isCur(i)){s+=a.n;c++}}return c?Math.round(s/c):120}
 function izm(n){var m=n%100,d=n%10;return (m>10&&m<15)||d>4||d===0?"измерений":d===1?"измерение":"измерения"}
@@ -291,7 +297,7 @@ function ageCls(at){
  return s>3600?" bad":(s>300?" old":"");
 }
 function paintAge(id,at,base){
- var e=$(id);if(!e)return;
+ var e=gd(id);if(!e)return;
  e.className=(base||"age")+ageCls(at);
  e.textContent=stampTxt(at);
 }
@@ -300,7 +306,7 @@ function paintAges(){
  paintAge("tkwhAge",AT.e);paintAge("peAge",AT.e,"pa");
 }
 function wxCard(d){
-var c=$("wxCard");if(!c)return;
+var c=gd("wxCard");if(!c)return;
 if(!d||!d.wOk){c.style.display="none";return}
 c.style.display="";
 var t=(d.wT===null||d.wT===undefined)?"—":num(d.wT,1)+" °C";
@@ -332,7 +338,7 @@ txt("pcos",cf===null?"—":cf.toFixed(2));
 try{scrPaint(d)}catch(e){}
   try{wxCard(d)}catch(e){}
   try{forecast(d)}catch(e){}
-var r=$("pRelay");
+var r=gd("pRelay");
 r.innerHTML='<i class="dot '+(d.r?"ok":"bad")+'"></i>реле '+(d.r?"ВКЛ":"ВЫКЛ");
 if(d.now){
   var nd=d.now.slice(0,10),nh=parseInt(d.now.slice(11,13),10);
@@ -342,7 +348,7 @@ if(d.now){
 chipNet();
 }
 function chipNet(){
-var e=$("cNet");
+var e=gd("cNet");
 e.innerHTML='<i class="dot '+(S.net?"ok":"bad")+'"></i><span>'+(S.net?"сеть ok":"нет сети")+'</span>';
 }
 function forecast(d){
@@ -358,13 +364,13 @@ txt("fnote","средний расход "+avg.toFixed(2)+" кВт·ч в сут
 }
 function loadEvents(){
 retry("/events",1).then(function(d){
-  var ev=(d&&d.events)||[],ul=$("events");
+  var ev=(d&&d.events)||[],ul=gd("events");
   if(!ev.length){ul.innerHTML='<li class="muted">за последние 3 дня переключений не было</li>';return}
   ul.innerHTML=ev.map(function(e){
     var when=String(e.t||"").slice(5,16).replace("-",".");
     return '<li><span class="'+(e.r?"on":"off")+'">'+(e.r?"включено":"выключено")+'</span><span class="when">'+when+(e.v>0?" · "+Math.round(e.v)+" В":"")+'</span></li>';
   }).join("");
-}).catch(function(){$("events").innerHTML='<li class="muted">не удалось загрузить события</li>'});
+}).catch(function(){gd("events").innerHTML='<li class="muted">не удалось загрузить события</li>'});
 }
 function loadData(){
 clearTimeout(S.poll);
@@ -375,21 +381,21 @@ function loadDays(){
 return retry("/days",1).then(function(d){
   S.days=(d&&d.days)||[];
   S.gaps=(d&&d.gaps)||[];
-  if(!S.days.length){emptyAll("на карте пока нет истории");$("dateLabel").textContent="—";return}
+  if(!S.days.length){emptyAll("на карте пока нет истории");gd("dateLabel").textContent="—";return}
   var start=S.days.indexOf(S.today)>=0?S.today:S.days[0];
   return showDay(start);
 }).catch(function(){emptyAll("не удалось прочитать список дней")});
 }
 function emptyAll(msg){
 S.cur=null;
-["chE","chVT"].forEach(function(id){$(id).innerHTML='<div class="ph">'+msg+'</div>'});
+["chE","chVT"].forEach(function(id){gd(id).innerHTML='<div class="ph">'+msg+'</div>'});
 }
 function showDay(d,force){
 if(S.busy&&!force)return;
 S.date=d;updateNav();
 if(S.hist[d]&&!force){S.cur=S.hist[d];draw();return}
 S.busy=true;
-["chE","chVT"].forEach(function(id){$(id).innerHTML='<div class="ph">загрузка…</div>'});
+["chE","chVT"].forEach(function(id){gd(id).innerHTML='<div class="ph">загрузка…</div>'});
 retry("/history?date="+encodeURIComponent(d),1).then(function(h){
   S.hist[d]=h;
   if(S.date===d){S.cur=h;draw()}
@@ -399,11 +405,11 @@ retry("/history?date="+encodeURIComponent(d),1).then(function(h){
 }
 function updateNav(){
 var i=S.days.indexOf(S.date);
-$("prev").disabled=!(i>=0&&i<S.days.length-1);
-$("next").disabled=!(i>0);
+gd("prev").disabled=!(i>=0&&i<S.days.length-1);
+gd("next").disabled=!(i>0);
 var g=(i>=0&&S.gaps[i])||null;
-var mark=(g&&g[0]>0)?'<i class="gapmark">есть пропуски, '+g[1]+' мин</i>':"";
-$("dateLabel").innerHTML=fmtDate(S.date)+(S.date===S.today?"<em>сегодня</em>":"")+mark;
+var mark=(g&&g[0]>0)?'<i class="gapmark">есть пропуски, '+g[1]+' мин</i><button class="nbtn" id="gapBtn" type="button" onclick="gapFill(\''+S.date+'\')" title="подтянуть пропуски из облака Tuya">подтянуть</button>':"";
+gd("dateLabel").innerHTML=fmtDate(S.date)+(S.date===S.today?"<em>сегодня</em>":"")+mark;
 }
 function isCur(i){return S.date===S.today&&i===S.hour}
 function draw(){
@@ -412,10 +418,10 @@ var h=S.cur.hours||[];
 S.fn=fullN(h);
 var anyE=false,anyP=false,anyV=false,anyT=false;
 for(var i=0;i<24;i++){var a=h[i]||{n:0};if(a.n&&a.kwh>0)anyE=true;if(a.n&&a.p>0)anyP=true;if(a.v>50)anyV=true;if(a.t!==null&&a.t!==undefined)anyT=true}
-if(anyE||anyP)drawEnergy($("chE"),h);
-else $("chE").innerHTML='<div class="ph">за этот день нет записей</div>';
-if(anyV||anyT)drawVT($("chVT"),h);
-else $("chVT").innerHTML='<div class="ph">напряжение и температура за этот день не записаны</div>';
+if(anyE||anyP)drawEnergy(gd("chE"),h);
+else gd("chE").innerHTML='<div class="ph">за этот день нет записей</div>';
+if(anyV||anyT)drawVT(gd("chVT"),h);
+else gd("chVT").innerHTML='<div class="ph">напряжение и температура за этот день не записаны</div>';
 }
 function niceMaxP(v){
 if(!(v>0))return 1;
@@ -468,8 +474,18 @@ if(S.nums){
     q=hours[i]&&hours[i].n?(S.watt?+hours[i].p||0:+hours[i].kwh||0):0;
     if(q>0&&(W>=520||i%2===par)){
       nh=Math.min(h1,Math.max(1.5,q/amx*h1));
-      s+='<text x="'+(pl+slot*(i+.5)).toFixed(1)+'" y="'+(base1-nh-2.5).toFixed(1)+'" class="nl" text-anchor="middle">'+(S.watt?Math.round(q):num(q,2))+'</text>';
+      s+='<text x="'+(pl+slot*(i+.5)).toFixed(1)+'" y="'+Math.max(top1+9,base1-nh-2.5).toFixed(1)+'" class="nl" text-anchor="middle">'+(S.watt?Math.round(q):num(q,2))+'</text>';
     }
+  }
+  // числа на нижней панели «пик, Вт»
+  var pv=0,pg=0;
+  for(i=0;i<24;i++){
+    b=hours[i]||{};
+    pv=(b.n&&+b.pmax>0)?+b.pmax:0;
+    if(!pv)continue;
+    if(W<520&&i%2!==par)continue;
+    pg=Math.min(h2,Math.max(1.5,pv/pmx*h2));
+    s+='<text x="'+(pl+slot*(i+.5)).toFixed(1)+'" y="'+Math.max(top2+9,base2-pg-2.5).toFixed(1)+'" class="nl p" text-anchor="middle">'+Math.round(pv)+'</text>';
   }
 }
 for(i=0;i<24;i++)s+='<rect x="'+(pl+i*slot).toFixed(1)+'" y="'+top1+'" width="'+slot.toFixed(1)+'" height="'+(base2-top1)+'" fill="transparent" class="hit" data-i="'+i+'"/>';
@@ -571,7 +587,7 @@ el.querySelectorAll(".hit").forEach(function(r){
 });
 }
 function showTip(r,h,opt,ev){
-var t=$("tip");
+var t=gd("tip");
 t.innerHTML=opt.tip(h,+r.getAttribute("data-i"));
 t.hidden=false;
 var b=r.getBoundingClientRect(),tw=t.offsetWidth,th=t.offsetHeight;
@@ -589,27 +605,27 @@ if(y+th>window.innerHeight-8)y=window.innerHeight-th-8;
 t.style.left=x+"px";t.style.top=y+"px";
 clearTimeout(S.tipT);S.tipT=setTimeout(function(){t.hidden=true},4000);
 }
-$("prev").addEventListener("click",function(){
+gd("prev").addEventListener("click",function(){
 var i=S.days.indexOf(S.date);
 if(i>=0&&i<S.days.length-1)showDay(S.days[i+1]);
 });
-$("next").addEventListener("click",function(){
+gd("next").addEventListener("click",function(){
 var i=S.days.indexOf(S.date);
 if(i>0)showDay(S.days[i-1]);
 });
 try{S.nums=localStorage.getItem("cydv.nums")==="1"?1:0;S.watt=localStorage.getItem("cydv.unit")==="1"}catch(e){}
 function uiBtns(){
-var b=$("numBtn");if(b)b.setAttribute("aria-pressed",S.nums?"true":"false");
-var u=$("unitBtn");if(u){u.textContent=S.watt?"Вт":"кВт·ч";u.setAttribute("aria-pressed",S.watt?"true":"false")}
+var b=gd("numBtn");if(b)b.setAttribute("aria-pressed",S.nums?"true":"false");
+var u=gd("unitBtn");if(u){u.textContent=S.watt?"Вт":"кВт·ч";u.setAttribute("aria-pressed",S.watt?"true":"false")}
 txt("eCap",S.watt?"высота — средняя мощность за час, Вт; это те же кВт·ч × 1000":"высота — энергия за час, кВт·ч; средняя мощность за тот же час = кВт·ч × 1000, Вт");
 }
 uiBtns();
-$("numBtn").addEventListener("click",function(){S.nums=S.nums?0:1;try{localStorage.setItem("cydv.nums",S.nums?"1":"0")}catch(e){}uiBtns();if(S.cur)draw()});
-$("unitBtn").addEventListener("click",function(){S.watt=!S.watt;try{localStorage.setItem("cydv.unit",S.watt?"1":"0")}catch(e){}uiBtns();if(S.cur)draw()});
+gd("numBtn").addEventListener("click",function(){S.nums=S.nums?0:1;try{localStorage.setItem("cydv.nums",S.nums?"1":"0")}catch(e){}uiBtns();if(S.cur)draw()});
+gd("unitBtn").addEventListener("click",function(){S.watt=!S.watt;try{localStorage.setItem("cydv.unit",S.watt?"1":"0")}catch(e){}uiBtns();if(S.cur)draw()});
 document.addEventListener("pointerdown",function(e){
-if(!e.target.classList||!e.target.classList.contains("hit"))$("tip").hidden=true;
+if(!e.target.classList||!e.target.classList.contains("hit"))gd("tip").hidden=true;
 },true);
-addEventListener("scroll",function(){$("tip").hidden=true},{passive:true});
+addEventListener("scroll",function(){gd("tip").hidden=true},{passive:true});
 var rt=0;
 addEventListener("resize",function(){clearTimeout(rt);rt=setTimeout(draw,150)});
 setInterval(function(){
@@ -635,11 +651,12 @@ loadEvents();
 })();
 
 function scrPaint(d){
-  var st=$("scrState"),br=$("scrBright"),b=$("scrBtn"),id=$("scrIdle"),ec=$("scrEco");
+  var D=function(i){return document.getElementById(i)};
+  var st=D("scrState"),br=D("scrBright"),b=D("scrBtn"),id=D("scrIdle"),ec=D("scrEco");
   if(!d)return;
   var on=(d.disp===1||d.disp==="1");
   if(st)st.textContent=on?"включена":"выключена";
-  if(br)br.textContent=(d.bright!=null?d.bright:"—")+" %";
+  var bp=(d.bright!=null?Math.round(d.bright/2.55):0); if(br)br.textContent=(d.bright!=null?bp:"—")+" %"; var rg=document.getElementById("scrBrightRange"); if(rg&&document.activeElement!==rg)rg.value=Math.max(5,bp);
   if(b)b.setAttribute("aria-pressed",on?"true":"false");
   if(id&&document.activeElement!==id)id.value=(d.idle!=null?d.idle:0);
   if(ec){
@@ -650,61 +667,36 @@ function scrPaint(d){
 }
 function scrIdleSet(v){
   var n=parseInt(v,10); if(isNaN(n)||n<0||n>60)return;
-  fetch("/disp?idle="+n).then(function(r){return r.json()}).then(function(j){
-    if(j&&j.ok){var ec=$("scrEco");if(ec&&!j.on)ec.textContent="экран погашен";}
-  }).catch(function(){});
+  var el=document.getElementById("scrIdle");
+  fetch("/disp?idle="+n,{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){
+    if(j&&j.ok){
+      // подтверждаем тем, что вернула плата (значение пишется в NVS)
+      if(el&&j.idle!=null)el.value=j.idle;
+      var ec=document.getElementById("scrEco");
+      if(ec&&!j.on)ec.textContent="экран погашен";
+    }
+  }).catch(function(){ if(el)el.value=n; });
 }
+window.scrIdleSet=scrIdleSet;
 var scrOn=false;
-window.scrToggle=function(){
-  /* $ определён внутри обёртки — снаружи используем document.getElementById */
+function scrToggle(){
+  // Состояние берём из /data ПЕРЕД переключением: window.scrOn может быть ещё
+  // не заполнен, и тогда кнопка всегда посылала on=1 — «не работала».
   var g=function(id){return document.getElementById(id)};
-  var st=g("scrState"), b=g("scrBtn"), br=g("scrBright"), ec=g("scrEco");
-  var on=(window.scrOn===true);
-  if(b)b.disabled=true;
-  fetch("/disp?"+(on?"on=0":"on=1"),{cache:"no-store"})
-    .then(function(r){return r.json()})
-    .then(function(j){
-      if(j&&j.ok){
-        window.scrOn=(j.on===1||j.on==="1");
-        if(st)st.textContent=window.scrOn?"включена":"выключена";
-        if(br)br.textContent=(j.bright!=null?j.bright:0)+" %";
-        if(b){b.setAttribute("aria-pressed",window.scrOn?"true":"false");b.disabled=false;}
-        if(ec)ec.textContent=window.scrOn?"ждёт бездействия":"экран погашен";
-      } else if(b) b.disabled=false;
-    })
-    .catch(function(){ if(b)b.disabled=false; });
-};
-var scrToggle=window.scrToggle;
-document.addEventListener("DOMContentLoaded",function(){
-  var b=$("scrBtn"); if(b)b.addEventListener("click",scrToggle);
-  var id=$("scrIdle"); if(id){
-    id.addEventListener("change",function(){
-      var v=parseInt(id.value,10);
-      if(isNaN(v)||v<0||v>60){id.value=2;v=2;}
-      scrIdleSet(v);
-    });
-  }
-});
-
-/* Независимое обновление карточки «Экран платы» — не зависит от основной цепи. */
-function scrSelfPaint(d){
-  if(!d)return;
-  var st=document.getElementById("scrState");
-  var br=document.getElementById("scrBright");
-  var ec=document.getElementById("scrEco");
-  var id=document.getElementById("scrIdle");
-  var b=document.getElementById("scrBtn");
-  var on=(d.disp===1||d.disp==="1");
-  window.scrOn=on;
-  if(st)st.textContent=on?"включена":"выключена";
-  if(br)br.textContent=(d.bright!=null?d.bright:0)+" %";
-  if(b)b.setAttribute("aria-pressed",on?"true":"false");
-  if(id&&document.activeElement!==id)id.value=(d.idle!=null?d.idle:0);
-  if(ec){
-    if(!on)ec.textContent="экран погашен";
-    else if(d.idleMs>0){var s=Math.round(d.idleMs/1000);ec.textContent="гаснет через "+(s>=60?Math.round(s/60)+" мин":s+" с");}
-    else ec.textContent=(d.idle>0?"ждёт бездействия":"автогашение выкл");
-  }
+  var b=g("scrBtn"); if(b)b.disabled=true;
+  fetch("/data",{cache:"no-store"}).then(function(r){return r.json()}).then(function(d){
+    var on=(d&&(d.disp===1||d.disp==="1"));
+    return fetch("/disp?"+(on?"on=0":"on=1"),{cache:"no-store"});
+  }).then(function(r){return r.json()}).then(function(j){
+    var st=g("scrState"), br=g("scrBright"), b2=g("scrBtn"), ec=g("scrEco");
+    if(j&&j.ok){
+      window.scrOn=(j.on===1||j.on==="1");
+      if(st)st.textContent=window.scrOn?"включена":"выключена";
+      if(br)br.textContent=Math.round((j.bright!=null?j.bright:0)/2.55)+" %";
+      if(ec)ec.textContent=window.scrOn?"ждёт бездействия":"экран погашен";
+      if(b2){b2.setAttribute("aria-pressed",window.scrOn?"true":"false");b2.disabled=false;}
+    } else if(b2) b2.disabled=false;
+  }).catch(function(){ var b3=g("scrBtn"); if(b3)b3.disabled=false; });
 }
 function scrSelfTick(){
   fetch("/data",{cache:"no-store"}).then(function(r){return r.json()}).then(scrSelfPaint).catch(function(){});
@@ -714,15 +706,30 @@ document.addEventListener("DOMContentLoaded",function(){
   setInterval(scrSelfTick,10000);
 });
 
-window.scrBrightSet=function(v){
+function scrBrightSet(v){
   var n=parseInt(v,10); if(isNaN(n)||n<5||n>100)return;
   var g=function(id){return document.getElementById(id)};
   fetch("/disp?bright="+n,{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){
-    var br=g("scrBright"); if(br&&j&&j.bright!=null)br.textContent=j.bright+" %";
-    var rg=g("scrBrightRange"); if(rg&&j&&j.bright!=null)rg.value=j.bright;
+    var br=g("scrBright"); if(br&&j&&j.bright!=null)br.textContent=Math.round(j.bright/2.55)+" %";
+    var rg=g("scrBrightRange"); if(rg&&j&&j.bright!=null)rg.value=Math.max(5,Math.round(j.bright/2.55));
     if(window.scrOn===false){ fetch("/disp?on=1",{cache:"no-store"}); window.scrOn=true; }
   }).catch(function(){});
 };
+window.scrBrightSet=scrBrightSet;
+
+function gapFill(date){
+  var g=function(id){return document.getElementById(id)};
+  var b=g("gapBtn");
+  if(b){b.disabled=true;b.textContent="тяну...";}
+  var url="/gapfill?run=1&from="+date+"&to="+date;
+  fetch(url,{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){
+    if(b){b.textContent="готово";}
+    setTimeout(function(){ if(b){b.disabled=false;b.textContent="подтянуть";} location.reload(); },2500);
+  }).catch(function(){
+    if(b){b.disabled=false;b.textContent="ошибка";}
+  });
+};
+window.gapFill=gapFill;
 </script>
 </body>
 </html>
