@@ -268,6 +268,12 @@ h1{font-size:19px}
   <span class="pill">счётчик <b id="pe">__PE__</b><span class="pa" id="peAge">—</span></span>
 </div>
 
+<section class="card block" id="wxCard" style="display:none">
+  <div class="ttl2">Погода · ВАШЕГО ГОРОДА</div>
+  <div class="row"><span>Сейчас</span><b id="wxNow">—</b></div>
+  <div class="row"><span>Завтра</span><b id="wxTom">—</b></div>
+</section>
+
 <section class="card sec">
   <div class="head">
     <div class="ttl">История</div>
@@ -286,6 +292,15 @@ h1{font-size:19px}
     <div class="ct"><span>Напряжение и температура</span><span class="legend"><i class="sw v"></i>В<i class="sw t"></i>°C</span></div>
     <div class="plot" id="chVT"></div>
   </div>
+</section>
+
+<section class="card sec" id="scrCard">
+  <div class="head">
+    <div class="ttl">Экран платы</div>
+    <div class="nav"><button class="nbtn" id="scrBtn" type="button" aria-pressed="false" title="погасить или включить подсветку">Экран</button></div>
+  </div>
+  <div class="row"><span>Подсветка</span><b id="scrState">—</b></div>
+  <div class="row"><span>Яркость</span><b id="scrBright">—</b></div>
 </section>
 
 <section class="card totals">
@@ -377,6 +392,23 @@ function paintAges(){
  paintAge("mvAge",AT.v);paintAge("mpAge",AT.p);paintAge("mtAge",AT.t);
  paintAge("tkwhAge",AT.e);paintAge("peAge",AT.e,"pa");
 }
+function wxCard(d){
+var c=$("wxCard");if(!c)return;
+if(!d||!d.wOk){c.style.display="none";return}
+c.style.display="";
+var t=(d.wT===null||d.wT===undefined)?"—":num(d.wT,1)+" °C";
+if(d.wDesc)t+=" · "+String(d.wDesc).toLowerCase();
+if(d.wPop!==undefined)t+=" · дождь "+num(d.wPop,0)+" %";
+txt("wxNow",t);
+var s="—";
+if(d.wTminT!==undefined&&d.wTmaxT!==undefined){
+s=num(d.wTminT,0)+"…"+num(d.wTmaxT,0)+" °C";
+if(d.wPopT!==undefined)s+=", дождь "+num(d.wPopT,0)+" %";
+if(d.wDescT)s+=", "+String(d.wDescT).toLowerCase();
+if(d.wRainT>0.05)s+=", "+num(d.wRainT,1)+" мм";
+}
+txt("wxTom",s);
+}
 function apply(d){
 if(!d)return;
 S.last=Date.now();
@@ -390,7 +422,9 @@ txt("mkwh",eNum(d.mkwh));txt("mcost",num(d.mcost,2));
 txt("cRssi",num(d.rssi,0)+" дБм");
 var cf=(d.v>50&&d.amp>0.001)?Math.min(1,Math.max(0,d.p/(d.v*d.amp))):null;
 txt("pcos",cf===null?"—":cf.toFixed(2));
+wxCard(d);
 forecast(d);
+scrPaint(d);
 var r=$("pRelay");
 r.innerHTML='<i class="dot '+(d.r?"ok":"bad")+'"></i>реле '+(d.r?"ВКЛ":"ВЫКЛ");
 if(d.now){
@@ -692,6 +726,25 @@ loadDays();
 loadEvents();
 });
 })();
+
+function scrPaint(d){
+  var st=$("scrState"),br=$("scrBright"),b=$("scrBtn");
+  if(!d)return;
+  var on=(d.disp===1||d.disp==="1");
+  if(st)st.textContent=on?"включена":"выключена";
+  if(br)br.textContent=(d.bright!=null?d.bright:"—")+" %";
+  if(b)b.setAttribute("aria-pressed",on?"true":"false");
+}
+function scrToggle(){
+  var on=$("scrState")&&$("scrState").textContent==="включена";
+  fetch("/disp?"+(on?"on=0":"on=1")).then(function(r){return r.json()}).then(function(j){
+    if(j&&j.ok){ var st=$("scrState"); if(st)st.textContent=on?"выключена":"включена";
+      var b=$("scrBtn"); if(b)b.setAttribute("aria-pressed",on?"false":"true"); }
+  }).catch(function(){});
+}
+document.addEventListener("DOMContentLoaded",function(){
+  var b=$("scrBtn"); if(b)b.addEventListener("click",scrToggle);
+});
 </script>
 </body>
 </html>
@@ -702,29 +755,37 @@ loadEvents();
 #include <mbedtls/md.h>
 
 // ---------------------------------------------------------------- настройки
-const char* FW_VER = "4.4";
+const char* FW_VER = "4.6";
 
-const char* DEF_SSID = "YOUR_WIFI_SSID";
-const char* DEF_PASS = "YOUR_WIFI_PASSWORD";
+// ---------------------------------------------------------------- секреты
+// Пароли и ключи НЕ хранятся в репозитории. Скопируйте secrets.example.h
+// в secrets.h (он в .gitignore) и заполните своими значениями.
+// RELAY_IP и TUYA_SECRET объявлены макросами в secrets.h.
+#include "secrets.h"
 
-const char* DEVICE_ID = "YOUR_TUYA_DEVICE_ID";
-const char* LOCAL_KEY = "YOUR_TUYA_LOCAL_KEY";
-const char* RELAY_IP  = "192.168.1.25";
+const char* DEF_SSID  = WIFI_SSID;
+const char* DEF_PASS  = WIFI_PASS;
+const char* DEVICE_ID = TUYA_DEVICE_ID;
+const char* LOCAL_KEY = TUYA_LOCAL_KEY;
+const char* PC_API    = PC_API_URL;
+
 const uint16_t RELAY_PORT = 6668;
 
-const char* PC_API = "http://192.168.1.20:8090";
-
 // ---- Tuya Cloud: даёт напряжение, мощность и счётчик без компьютера ----
-const char* TUYA_CID    = "YOUR_TUYA_CLIENT_ID";
-const char* TUYA_SECRET = "YOUR_TUYA_SECRET";
-const char* TUYA_HOST   = "openapi.tuyaeu.com";
+const char* TUYA_CID  = TUYA_CLIENT_ID;
+const char* TUYA_HOST = "openapi.tuyaeu.com";
 
-// Погода — OpenWeatherMap: wttr.in в сети пользователя заблокирован,
-// open-meteo (таймаут) и met.no (403) тоже недоступны. Координаты ВАШЕГО ГОРОДА:
-// YOUR_LAT, YOUR_LON. units=metric -> °C и м/с, lang=ru -> русское описание.
+// wttr.in отдаёт компактную строку: +11°C|86%|↑5km/h|Partly Cloudy
+// Координаты города — в secrets.h (WEATHER_LAT / WEATHER_LON):
+// по названию wttr.in путает города, по координатам — точнее.
 const char* WEATHER_URL =
-  "https://api.openweathermap.org/data/2.5/weather?lat=YOUR_LAT&lon=YOUR_LON"
-  "&appid=" OWM_KEY "&units=metric&lang=ru";
+  "http://wttr.in/~" WEATHER_LAT "," WEATHER_LON "?format=%t|%h|%w|%C";
+// Прогноз на 48 ч: 16 шагов по 3 ч. Из него берём вероятность дождя сейчас
+// (list[0].pop) и «завтра» по МЕСТНОМУ времени платы: max pop, min/max temp.
+// Ответ ~7 КБ (с фильтром ArduinoJson разбираем в ~1 КБ).
+const char* FORECAST_URL =
+  "https://api.openweathermap.org/data/2.5/forecast?lat=YOUR_LAT&lon=YOUR_LON"
+  "&appid=" OWM_KEY "&units=metric&lang=ru&cnt=16";
 
 #define CMD_SESS_START   3
 #define CMD_SESS_RESP    4
@@ -1272,6 +1333,19 @@ uint32_t wHeap = 0;      // heap сразу после последнего за
 unsigned long wLast = 0;
 time_t wTime = 0;
 bool  wOk = false;
+
+// ---- прогноз OWM /forecast: вероятность дождя и завтрашний день ----------
+float    wPopNow = 0;      // вероятность дождя сейчас, % (list[0].pop * 100)
+float    wPopTom = 0;      // максимум вероятности дождя на завтра, %
+float    wTminTom = 0;     // минимум температуры завтра, °C
+float    wTmaxTom = 0;     // максимум температуры завтра, °C
+float    wRainTom = 0;     // сумма осадков за завтра, мм (rain.3h, если есть)
+String   wDescTom = "";    // описание завтра, короткое русское (5x7)
+int      wCodeTom = 0;     // код погоды завтра (самый «плохой» из шагов, 0 = нет)
+uint32_t wForecastAt = 0;  // millis() успешного прогноза
+uint32_t wfHeap = 0;       // heap после запроса прогноза — для /data
+bool     wFcOk = false;    // прогноз получен хотя бы раз
+uint16_t wFcFail = 0;      // неудач подряд (по нему ограничиваем повторы)
 
 bool gSdOk = false;
 uint16_t gSdWriteFail = 0;   // неудач записи на карту ПОДРЯД (для светодиода)
@@ -2819,7 +2893,7 @@ bool connectWifi(int waitMs = 25000) {
 // Плата живёт в ЛОКАЛЬНОЙ сети. Всё, что требует интернета (облако Tuya,
 // погода), спрашиваем только если он реально есть: иначе каждый такой запрос
 // висит по несколько секунд и тач «замирает». Локальные вещи (реле по 6668,
-// карта, сторож устройств) проверки не требуют и работают всегда.
+// карта, сторож камер) проверки не требуют и работают всегда.
 bool     gNetForceOff = false;    // принудительно «без интернета» (команда NETOFF)
 bool     gWifiOff     = false;    // радио выключено вручную (команда WIFIOFF)
 bool     gNetOk       = false;    // результат последней проверки
@@ -4917,6 +4991,156 @@ bool fetchWeather() {
   return true;
 }
 
+// ---------------------------------------------------------------- прогноз
+// «Плохость» погоды: гроза > снег > дождь > облачно > ясно. По этому числу
+// выбираем описание завтра — самое мрачное из встреченных за день.
+static int wxSeverity(int id) {
+  if (id >= 200 && id < 300) return 5;   // гроза
+  if (id >= 600 && id < 700) return 4;   // снег
+  if (id >= 300 && id < 600) return 3;   // дождь, морось, ливень
+  if (id >= 700 && id < 800) return 2;   // туман, дымка
+  if (id == 800)             return 0;   // ясно
+  if (id <= 802)             return 1;   // малооблачно / переменная облачность
+  return 2;                              // 803/804 — пасмурно
+}
+
+// Короткое русское описание по коду OWM (в шрифте 5x7 только заглавные).
+static void wxShortRus(int id, char* out, size_t n) {
+  if (id >= 200 && id < 300)      snprintf(out, n, "ГРОЗА");
+  else if (id >= 300 && id < 400) snprintf(out, n, "МОРОСЬ");
+  else if (id >= 500 && id < 505) snprintf(out, n, "ДОЖДЬ");
+  else if (id >= 505 && id < 600) snprintf(out, n, "ЛИВЕНЬ");
+  else if (id >= 600 && id < 700) snprintf(out, n, "СНЕГ");
+  else if (id >= 700 && id < 800) snprintf(out, n, "ТУМАН");
+  else if (id == 800)             snprintf(out, n, "ЯСНО");
+  else if (id <= 802)             snprintf(out, n, "МАЛООБЛАЧНО");
+  else                            snprintf(out, n, "ПАСМУРНО");
+}
+
+bool fetchForecast() {
+  // Прогноз OWM (16 шагов по 3 ч). Без фильтра ArduinoJson документ на 7-20 КБ
+  // съедает heap целиком, поэтому разбираем ТОЛЬКО нужные поля.
+  // TLS-клиент на стеке + stop(): mbedTLS возвращает память сразу.
+  if (!netOnline()) return false;
+
+  uint32_t heap0 = ESP.getFreeHeap();
+  String j;
+  {
+    WiFiClientSecure tls;
+    tls.setInsecure();              // сертификат не проверяем — как у Tuya
+    tls.setHandshakeTimeout(12);
+    HTTPClient h;
+    h.setTimeout(15000);   // 7 КБ тела: 2.5 с не хватало, getString() возвращал пусто
+    esp_task_wdt_reset();
+    if (!h.begin(tls, FORECAST_URL)) {
+      Serial.println("прогноз: begin не принял URL");
+      wFcFail++;
+      return false;
+    }
+    h.setReuse(false);
+    int code = h.GET();
+    if (code == 200) j = h.getString();
+    h.end();
+    tls.stop();                     // освободить mbedTLS до разбора JSON
+    esp_task_wdt_reset();
+    if (code != 200) {
+      Serial.printf("прогноз: HTTP %d\n", code);
+      wFcFail++;
+      return false;
+    }
+  }
+  if (j.length() < 40) { wFcFail++; Serial.println("прогноз: пустой ответ"); return false; }
+
+  // Без часов «завтра» не посчитать: границы дня берём по местному времени.
+  struct tm ti;
+  if (!getLocalTime(&ti, 10)) {
+    wFcFail++;
+    Serial.println("прогноз: нет времени (NTP)");
+    return false;
+  }
+
+  // Фильтр: массив в фильтре задаётся через [0] и применяется ко ВСЕМ
+  // элементам (проверено — ArduinoJson 7).
+  JsonDocument filter;
+  filter["list"][0]["dt"]                  = true;
+  filter["list"][0]["main"]["temp_min"]    = true;
+  filter["list"][0]["main"]["temp_max"]    = true;
+  filter["list"][0]["weather"][0]["id"]    = true;
+  filter["list"][0]["pop"]                 = true;
+  filter["list"][0]["rain"]["3h"]          = true;
+
+  JsonDocument doc;
+  DeserializationError err =
+      deserializeJson(doc, j, DeserializationOption::Filter(filter));
+  j = String();                    // строка ответа больше не нужна
+  if (err) {
+    wFcFail++;
+    Serial.printf("прогноз: JSON %s\n", err.c_str());
+    return false;
+  }
+
+  JsonArray list = doc["list"].as<JsonArray>();
+  if (list.isNull() || list.size() == 0) {
+    wFcFail++;
+    Serial.println("прогноз: в JSON нет list");
+    return false;
+  }
+
+  // Границы «завтра» по местному времени: сегодня 00:00 + 1 сутки.
+  struct tm t0 = ti;
+  t0.tm_hour = 0; t0.tm_min = 0; t0.tm_sec = 0; t0.tm_isdst = 0;
+  time_t dayStart = mktime(&t0);
+  time_t tomStart = dayStart + 86400;
+  time_t tomEnd   = tomStart + 86400;
+
+  float pop  = 0;          // максимум вероятности осадков за завтра
+  float tmin = 999, tmax = -999;
+  float rain = 0;          // сумма rain.3h за завтра, мм
+  int   worst = -1;        // самый «плохой» код погоды за завтра
+  int   n = 0;             // сколько шагов попало в завтра
+
+  for (JsonObject it : list) {
+    time_t dt = (time_t)(long)(it["dt"] | 0L);
+    if (dt < tomStart || dt >= tomEnd) continue;   // не завтра — пропускаем
+    n++;
+    float mn = it["main"]["temp_min"] | 0.0f;
+    float mx = it["main"]["temp_max"] | 0.0f;
+    float pp = it["pop"] | 0.0f;
+    if (mn < tmin) tmin = mn;
+    if (mx > tmax) tmax = mx;
+    if (pp > pop)  pop  = pp;
+    rain += it["rain"]["3h"] | 0.0f;
+    int id = it["weather"][0]["id"] | 0;            // 0 — поля нет
+    if (id && (worst < 0 || wxSeverity(id) > wxSeverity(worst))) worst = id;
+  }
+
+  if (n == 0) {                    // прогноз короче суток — такое почти невозможно
+    wFcFail++;
+    Serial.println("прогноз: завтра не попало в 16 шагов");
+    return false;
+  }
+
+  wPopNow  = (list[0]["pop"] | 0.0f) * 100.0f;
+  wPopTom  = pop * 100.0f;
+  wTminTom = tmin;
+  wTmaxTom = tmax;
+  wRainTom = rain;
+  wCodeTom = (worst > 0) ? worst : 0;   // для иконки «завтра» на главном экране
+  char d[20];
+  if (worst > 0) wxShortRus(worst, d, sizeof(d));
+  else           snprintf(d, sizeof(d), "НЕТ ДАННЫХ");
+  wDescTom = d;
+
+  wFcOk   = true;
+  wFcFail = 0;
+  wForecastAt = millis();
+  wfHeap  = ESP.getFreeHeap();
+  Serial.printf("прогноз: дождь %.0f%%, завтра %.1f..%.1f C, осадки %.0f%%, %s, %.1f мм, шагов %d (heap %u -> %u)\n",
+                wPopNow, wTminTom, wTmaxTom, wPopTom, wDescTom.c_str(), wRainTom, n,
+                heap0, wfHeap);
+  return true;
+}
+
 // ---------------------------------------------------------------- SD
 bool initSD() {
   sdSPI.begin(18, 19, 23, 5);
@@ -5385,7 +5609,7 @@ void drawStatusBar() {
 }
 
 // ---------------------------------------------------------------- сторож сети
-// Пример списка устройств домашней сети — адреса замените на свои.
+// Адреса взяты из программы-сторожа (watchdog\cctv-watchdog.ps1).
 // Проверяем TCP-подключением (порт открыт = устройство живо): это дешевле
 // ICMP и не требует raw-сокетов.
 // ПОЛНЫЙ КРУГ — КАЖДЫЕ 10 СЕКУНД (было 30). Один адрес за проход, чтобы тач
@@ -5400,10 +5624,10 @@ struct WdHost { const char* name; uint8_t ip[4]; uint16_t port; };
 #define WD_CONN_MS  250        // таймаут одного TCP-подключения, мс
 
 const WdHost WD_HOSTS[] = {
-  { "РОУТЕР",  { 192, 168, 1, 1  }, 80 },   // роутер, веб-интерфейс
-  { "NAS",     { 192, 168, 1, 10 }, 80 },   // накопитель, веб
-  { "КАМЕРА",  { 192, 168, 1, 11 }, 80 },   // камера, веб
-  { "ПРИНТЕР", { 192, 168, 1, 12 }, 80 },   // принтер, веб
+  { "РЕГИСТРАТОР", { 192, 168, 0, 17  }, 34567 },   // Dahua NVR (порт DVRIP)
+  { "NVR 1 ЭТАЖ",  { 192, 168, 0, 186 }, 80    },   // Dahua NVR 1 этаж, веб
+  { "NAS",         { 192, 168, 0, 222 }, 80    },   // накопитель, веб
+  { "КАМЕРА",      { 192, 168, 0, 44  }, 80    },   // камера, веб
 };
 const int WD_N = sizeof(WD_HOSTS) / sizeof(WD_HOSTS[0]);
 
@@ -5438,7 +5662,7 @@ bool wdProbe(int i, uint16_t* ms) {
 void ledUpdate();               // определена ниже, в разделе светодиода
 
 // Кто не отвечает — пересчитываем СРАЗУ после каждого адреса, не дожидаясь
-// конца круга. Тревога — после ДВУХ неудач подряд (10 с): устройства сети
+// конца круга. Тревога — после ДВУХ неудач подряд (10 с): камера/регистратор
 // иногда не принимают TCP в момент переподключения Wi-Fi, и одиночный промах
 // не должен поднимать плашку. Изменилось — тут же экран и светодиод.
 static void wdSummary() {
@@ -5838,7 +6062,125 @@ void ledCommand(const String& up) {
   }
 }
 
-// ---------------------------------------------------------------- иконка погоды
+// ---------------------------------------------------------------- иконки погоды по коду OWM
+// Рисуем примитивами TFT: картинок во flash нет, код дешевле и надёжнее.
+// Тема СВЕТЛАЯ (карточка белая), поэтому чистые TFT_YELLOW и TFT_WHITE на ней
+// не видны: солнце — жёлтое с янтарным контуром, снег — голубой.
+static void wxPuffs(int cx, int cy, int r, int g, uint16_t col) {
+  uiCircle(cx - r * 40 / 100, cy + r * 5 / 100,  r * 30 / 100 + g, col);
+  uiCircle(cx + r * 38 / 100, cy - r * 2 / 100,  r * 35 / 100 + g, col);
+  uiCircle(cx - r * 2 / 100,  cy - r * 30 / 100, r * 45 / 100 + g, col);
+  uiFill(cx - r * 70 / 100 - g, cy - g,
+         r * 143 / 100 + 2 * g, r * 35 / 100 + 2 * g, col);
+}
+
+// Облако: тёмный контур + светлая заливка (g=1 — контур, g=0 — заливка).
+static void wxCloud(int cx, int cy, int r, uint16_t fill, uint16_t edge) {
+  wxPuffs(cx, cy, r, 1, edge);
+  wxPuffs(cx, cy, r, 0, fill);
+}
+
+static void wxSun(int cx, int cy, int r, uint16_t fill, uint16_t ray) {
+  for (int i = 0; i < 8; i++) {
+    float a = i * PI / 4.0f;
+    float sa = sin(a), ca = cos(a);
+    int x1 = cx + (int)(ca * r * 0.70f);
+    int y1 = cy + (int)(sa * r * 0.70f);
+    int x2 = cx + (int)(ca * r);
+    int y2 = cy + (int)(sa * r);
+    uiLine(x1, y1, x2, y2, ray);
+    // второй штрих перпендикулярно — лучи толщиной 2 px, иначе теряются
+    uiLine(x1 - (int)(sa * 1.2f), y1 + (int)(ca * 1.2f),
+           x2 - (int)(sa * 1.2f), y2 + (int)(ca * 1.2f), ray);
+  }
+  uiCircle(cx, cy, r * 46 / 100 + 1, ray);    // контур
+  uiCircle(cx, cy, r * 46 / 100, fill);
+}
+
+static void wxFlake(int cx, int cy, int r, uint16_t col) {
+  uiLine(cx - r, cy, cx + r, cy, col);
+  uiLine(cx, cy - r, cx, cy + r, col);
+  int d = r * 7 / 10;
+  uiLine(cx - d, cy - d, cx + d, cy + d, col);
+  uiLine(cx - d, cy + d, cx + d, cy - d, col);
+}
+
+// Код OWM -> иконка. x,y — левый верхний угол, size — сторона квадрата (28..34).
+void drawWxIcon(int x, int y, int size, int code) {
+  if (size < 16) size = 16;
+  if (code <= 0) return;          // нет данных: «НЕТ ДАННЫХ» рисует вызывающий
+
+  const uint16_t cSunBody = tft.color565(253, 224, 71);   // солнце (TFT_YELLOW)
+  const uint16_t cSunRay  = tft.color565(217, 119, 6);    // лучи (TFT_ORANGE)
+  const uint16_t cCloudF  = tft.color565(203, 213, 225);  // облако (TFT_LIGHTGREY)
+  const uint16_t cCloudE  = tft.color565(100, 116, 139);  // контур (TFT_DARKGREY)
+  const uint16_t cDrop    = tft.color565(2, 132, 199);    // дождь (TFT_BLUE)
+  const uint16_t cFlake   = tft.color565(96, 165, 250);   // снег (TFT_WHITE не виден)
+  const uint16_t cFog     = tft.color565(100, 116, 139);  // туман (TFT_LIGHTGREY не виден)
+
+  const int s  = size;
+  const int cx = x + s / 2;
+  const int cy = y + s / 2;
+
+  const bool thunder = (code >= 200 && code < 300);
+  const bool drizzle = (code >= 300 && code < 400);
+  const bool rain    = (code >= 500 && code < 600);
+  const bool snow    = (code >= 600 && code < 700);
+  const bool fog     = (code >= 700 && code < 800);
+  const bool clear   = (code == 800);
+  const bool few     = (code > 800 && code <= 802);
+
+  if (clear) { wxSun(cx, cy, s * 38 / 100, cSunBody, cSunRay); return; }
+
+  if (few) {     // 801/802: солнце + облако
+    wxSun(x + s * 30 / 100, y + s * 30 / 100, s * 26 / 100, cSunBody, cSunRay);
+    wxCloud(x + s * 58 / 100, y + s * 60 / 100, s * 38 / 100, cCloudF, cCloudE);
+    return;
+  }
+
+  if (fog) {     // 7xx: полосы тумана, без облака — чтобы не путать с пасмурно
+    const int w0 = s * 62 / 100;
+    for (int i = 0; i < 4; i++) {
+      int yy = y + s * (28 + i * 18) / 100;
+      int ww = w0 - ((i & 1) ? s * 12 / 100 : 0);
+      int xx = x + (s - ww) / 2 + ((i & 1) ? -s * 3 / 100 : 0);
+      uiHLine(xx, yy, ww, cFog);
+      uiHLine(xx, yy + 1, ww, cFog);          // 2 px
+    }
+    return;
+  }
+
+  // 803/804 и все осадки: облако сверху, под ним — знак осадков.
+  wxCloud(cx, y + s * 40 / 100, s * 46 / 100, cCloudF, cCloudE);
+
+  if (thunder) {
+    int zx = cx;
+    int p1x = zx + s * 9 / 100,  p1y = y + s * 60 / 100;
+    int p2x = zx - s * 9 / 100,  p2y = y + s * 72 / 100;
+    int p3x = zx + s * 6 / 100,  p3y = y + s * 72 / 100;
+    int p4x = zx - s * 12 / 100, p4y = y + s * 94 / 100;
+    uiLine(p1x, p1y, p2x, p2y, cSunRay);
+    uiLine(p2x, p2y, p3x, p3y, cSunRay);
+    uiLine(p3x, p3y, p4x, p4y, cSunRay);
+    uiLine(p1x + 1, p1y, p2x + 1, p2y, cSunRay);
+    uiLine(p2x + 1, p2y, p3x + 1, p3y, cSunRay);
+    uiLine(p3x + 1, p3y, p4x + 1, p4y, cSunRay);
+  } else if (rain || drizzle) {
+    int n = rain ? 3 : 2;
+    for (int i = 0; i < n; i++) {
+      int xx = cx + (i * 2 - (n - 1)) * s * 10 / 100;
+      int xa = xx + s * 6 / 100, xb = xx - s * 6 / 100;
+      uiLine(xa, y + s * 62 / 100, xb, y + s * 88 / 100, cDrop);
+      uiLine(xa + 1, y + s * 62 / 100, xb + 1, y + s * 88 / 100, cDrop);
+    }
+  } else if (snow) {
+    int fx[3] = { cx - s * 22 / 100, cx + s * 2 / 100,  cx + s * 24 / 100 };
+    int fy[3] = { y + s * 70 / 100,  y + s * 85 / 100,  y + s * 68 / 100 };
+    for (int i = 0; i < 3; i++) wxFlake(fx[i], fy[i], s * 10 / 100, cFlake);
+  }
+}
+
+// ---------------------------------------------------------------- иконка погоды (описание)
 void drawWeatherIcon(int cx, int cy, int r, bool hasData) {
   if (!hasData) { uiRing(cx, cy, r, cMuted); return; }
 
@@ -6117,7 +6459,7 @@ void drawHourBars(int x, int y, int w, int h, const float* vals, uint8_t bit,
 }
 
 // ---------------------------------------------------------------- плашка тревоги
-// v4.3: с экрана убрана совсем — сторож устройств отключён, чтобы не тратить
+// v4.3: с экрана убрана совсем — сторож камер отключён, чтобы не тратить
 // время на TCP. Код оставлен под #if 0: чтобы вернуть, снять 0 и вернуть
 // вызов drawAlertBadge() в drawMain().
 #if 0
@@ -6209,37 +6551,50 @@ void drawMain() {
   snprintf(b, sizeof(b), "МЕСЯЦ %.1f", mKwh);
   drawTxtR(db.x + db.w - 8, db.y + 52, b, cMuted, cSurf, 1);
 
-  // ---- погода
+  // ---- погода: две колонки «СЕГОДНЯ | ЗАВТРА» (v4.6)
+  // Ветер и влажность с главного убраны — они есть на экране ПОГОДА.
+  // В колонке 120 px: иконка 32x32, температура, короткое описание, дождь.
   const Block& wb = BLOCKS[4];
   drawBlockFrame(wb.x, wb.y, wb.w, wb.h);
+  drawTxtC(wb.x + 60,  wb.y + 6, "СЕГОДНЯ", cMuted, cSurf, 1);
+  drawTxtC(wb.x + 180, wb.y + 6, "ЗАВТРА",  cMuted, cSurf, 1);
+  uiVLine(wb.x + 120, wb.y + 5, wb.h - 10, cLine);
+
+  char dsc[24];
+  // ---- сегодня
   if (!wOk) {
-    drawTxt(wb.x + 8, wb.y + 8, "ПОГОДА", cMuted, cSurf, 1);
-    drawTxt(wb.x + 8, wb.y + 30, "НЕТ ДАННЫХ", cMuted, cSurf, 2);
+    drawTxt(wb.x + 10, wb.y + 30, "НЕТ", cMuted, cSurf, 1);
+    drawTxt(wb.x + 10, wb.y + 42, "ДАННЫХ", cMuted, cSurf, 1);
   } else {
-    drawWeatherIcon(wb.x + 24, wb.y + 34, 15, true);
-    snprintf(b, sizeof(b), "%.0f", wTemp);
-    seg7Str(wb.x + 46, wb.y + 12, 22, b, cSky, 5);
-    drawTxt(wb.x + 46 + seg7W(b, 22, 5) + 4, wb.y + 20, "C", cMuted, cSurf, 1);
+    drawWxIcon(wb.x + 5, wb.y + 20, 32, wCode);
+    snprintf(b, sizeof(b), "%.1f", wTemp);
+    drawTxt(wb.x + 42, wb.y + 19, b, cSky, cSurf, 2);
+    drawTxt(wb.x + 42 + txtW(b, 2) + 2, wb.y + 26, "C", cMuted, cSurf, 1);
+    wxShortRus(wCode, dsc, sizeof(dsc));
+    drawTxt(wb.x + 42, wb.y + 38, dsc, cText, cSurf, 1);
+    if (wFcOk) snprintf(b, sizeof(b), "ДОЖДЬ %.0f%%", wPopNow);
+    else       strcpy(b, "ДОЖДЬ --");
+    drawTxt(wb.x + 42, wb.y + 49, b,
+            (wFcOk && wPopNow >= 50.0f) ? cAccent : cMuted, cSurf, 1);
+  }
 
-    char d[64];
-    weatherDesc(d, sizeof(d), 22);   // 22 символа = 131 px до края блока
-    drawTxt(wb.x + 100, wb.y + 10, d, cText, cSurf, 1);
-    snprintf(b, sizeof(b), "ВЕТЕР %.1f М/С", wWind / 3.6f);
-    drawTxt(wb.x + 100, wb.y + 24, b, cMuted, cSurf, 1);
-    snprintf(b, sizeof(b), "ВЛАЖН %.0f%%", wHum);
-    drawTxt(wb.x + 100, wb.y + 36, b, cMuted, cSurf, 1);
-
-    drawTxt(wb.x + 8, wb.y + 52, "ВАШ ГОРОД", cMuted, cSurf, 1);
-    if (wTime) {
-      struct tm wt;
-      localtime_r(&wTime, &wt);
-      snprintf(b, sizeof(b), "%02d:%02d", wt.tm_hour, wt.tm_min);
-    } else strcpy(b, "--:--");
-    drawTxtR(wb.x + wb.w - 8, wb.y + 52, b, cMuted, cSurf, 1);
+  // ---- завтра
+  if (!wFcOk) {
+    drawTxt(wb.x + 130, wb.y + 30, "НЕТ", cMuted, cSurf, 1);
+    drawTxt(wb.x + 130, wb.y + 42, "ДАННЫХ", cMuted, cSurf, 1);
+  } else {
+    drawWxIcon(wb.x + 125, wb.y + 20, 32, wCodeTom);
+    snprintf(b, sizeof(b), "%.0f-%.0f", wTminTom, wTmaxTom);
+    drawTxt(wb.x + 162, wb.y + 19, b, cSky, cSurf, 2);
+    drawTxt(wb.x + 162 + txtW(b, 2) + 2, wb.y + 26, "C", cMuted, cSurf, 1);
+    drawTxt(wb.x + 162, wb.y + 38, wDescTom.c_str(), cText, cSurf, 1);
+    snprintf(b, sizeof(b), "ДОЖДЬ %.0f%%", wPopTom);
+    drawTxt(wb.x + 162, wb.y + 49, b,
+            (wPopTom >= 50.0f) ? cAccent : cMuted, cSurf, 1);
   }
 
   drawStatusBar();
-  // Плашка тревоги убрана (v4.3): сторож устройств отключён.
+  // Плашка тревоги убрана (v4.3): сторож камер отключён.
 }
 
 // ---------------------------------------------------------------- окно напряжения
@@ -6592,32 +6947,57 @@ void drawWeatherScreen() {
 
   char d[64];
   weatherDesc(d, sizeof(d), 34);
-  drawTxt(12, 124, d, cText, cBg, fitScale(d, 216, 2));
+  drawTxt(12, 122, d, cText, cBg, fitScale(d, 216, 2));
 
-  uiHLine(12, 150, 216, cLine);
+  uiHLine(12, 145, 216, cLine);
 
-  drawTxt(12, 160, "ВЕТЕР", cMuted, cBg, 1);
+  drawTxt(12, 152, "ВЕТЕР", cMuted, cBg, 1);
   snprintf(b, sizeof(b), "%.1f М/С", wWind / 3.6f);
-  drawTxtR(228, 158, b, cText, cBg, 2);
+  drawTxtR(228, 150, b, cText, cBg, 2);
 
-  drawTxt(12, 186, "ВЛАЖНОСТЬ", cMuted, cBg, 1);
+  drawTxt(12, 174, "ВЛАЖНОСТЬ", cMuted, cBg, 1);
   snprintf(b, sizeof(b), "%.0f%%", wHum);
-  drawTxtR(228, 184, b, cText, cBg, 2);
+  drawTxtR(228, 172, b, cText, cBg, 2);
 
-  drawTxt(12, 212, "ОБНОВЛЕНО", cMuted, cBg, 1);
+  // Вероятность дождя сейчас: list[0].pop из прогноза OWM (0..100 %).
+  drawTxt(12, 196, "ДОЖДЬ", cMuted, cBg, 1);
+  if (wFcOk) {
+    snprintf(b, sizeof(b), "%.0f%%", wPopNow);
+    drawTxtR(228, 194, b, (wPopNow >= 50.0f) ? cAccent : cText, cBg, 2);
+  } else {
+    drawTxtR(228, 194, "--", cMuted, cBg, 2);
+  }
+
+  drawTxt(12, 218, "ОБНОВЛЕНО", cMuted, cBg, 1);
   if (wTime) {
     struct tm wt;
     localtime_r(&wTime, &wt);
     snprintf(b, sizeof(b), "%02d:%02d", wt.tm_hour, wt.tm_min);
   } else strcpy(b, "--:--");
-  drawTxtR(228, 210, b, cText, cBg, 2);
+  drawTxtR(228, 216, b, cText, cBg, 2);
 
-  drawTxt(12, 238, "ИСТОЧНИК", cMuted, cBg, 1);
-  drawTxtR(228, 238, "OPENWEATHERMAP", cText, cBg, 1);
+  uiHLine(12, 240, 216, cLine);
 
-  uiHLine(12, 262, 216, cLine);
-  drawTxt(12, 270, "ТЕМПЕРАТУРА ВОЗДУХА", cMuted, cBg, 1);
-  drawTxt(12, 284, "ВЕТЕР В М/С, ВЛАЖНОСТЬ В %", cMuted, cBg, 1);
+  // ---- завтра: диапазон температур, описание и вероятность дождя
+  drawTxt(12, 248, "ЗАВТРА", cMuted, cBg, 1);
+  if (wFcOk) {
+    snprintf(b, sizeof(b), "%.0f-%.0f C", wTminTom, wTmaxTom);
+    drawTxtR(228, 246, b, cSky, cBg, 2);
+
+    drawTxt(12, 268, wDescTom.c_str(), cText, cBg, 1);
+    snprintf(b, sizeof(b), "ДОЖДЬ %.0f%%", wPopTom);
+    drawTxtR(228, 268, b, (wPopTom >= 50.0f) ? cAccent : cText, cBg, 1);
+
+    if (wRainTom > 0.05f) {
+      snprintf(b, sizeof(b), "ОСАДКИ %.1f ММ", wRainTom);
+      drawTxt(12, 282, b, cMuted, cBg, 1);
+    }
+  } else {
+    drawTxtR(228, 246, "--", cMuted, cBg, 2);
+    drawTxt(12, 268, "ПРОГНОЗА ПОКА НЕТ", cMuted, cBg, 1);
+  }
+
+  drawTxt(12, 298, "ИСТОЧНИК OPENWEATHERMAP", cMuted, cBg, 1);
 }
 
 
@@ -6710,7 +7090,7 @@ uint32_t screenSig() {
   // gLastSig. Теперь отпечаток честно учитывает, ЧТО нарисовано.
   h ^= (uint32_t)(gDayOffset * 2654435761u); h *= 16777619u;
   h ^= (uint32_t)(gChartHour + 1);           h *= 16777619u;
-  uint32_t v[20];
+  uint32_t v[24];
   int n = 0;
   switch (gScreen) {
     case SCR_VOLT:
@@ -6794,6 +7174,13 @@ uint32_t screenSig() {
       v[n++] = (uint32_t)(int32_t)lroundf(wHum);
       v[n++] = (uint32_t)(int32_t)lroundf(wWind);
       v[n++] = wOk ? 1u : 0u;
+      // Карточка «СЕГОДНЯ | ЗАВТРА»: код виден иконкой, завтрашние поля — текстом.
+      v[n++] = (uint32_t)wCode;
+      v[n++] = (uint32_t)wCodeTom;
+      v[n++] = (uint32_t)(int32_t)lroundf(wTminTom * 10.0f);
+      v[n++] = (uint32_t)(int32_t)lroundf(wTmaxTom * 10.0f);
+      v[n++] = (uint32_t)(int32_t)lroundf(wPopTom);
+      v[n++] = wFcOk ? 1u : 0u;
       // rssi и число строк карты сюда НЕ входят: они меняются каждые
       // 15-60 с и вызывали полную перерисовку пяти карточек (~139 КБ SPI).
       // Статус-бар обновляется отдельным таймером раз в 60 с (loop).
@@ -6805,6 +7192,10 @@ uint32_t screenSig() {
     for (int i = 0; i < (int)wDescRu.length(); i++) { h ^= (uint8_t)wDescRu[i]; h *= 16777619u; }
     // wDescEn меняет иконку (Clouds/Rain/Snow), даже если русский текст тот же
     for (int i = 0; i < (int)wDescEn.length(); i++) { h ^= (uint8_t)wDescEn[i]; h *= 16777619u; }
+    // на главной видно ещё и описание «завтра»
+    if (gScreen == SCR_MAIN) {
+      for (int i = 0; i < (int)wDescTom.length(); i++) { h ^= (uint8_t)wDescTom[i]; h *= 16777619u; }
+    }
   }
   return h;
 }
@@ -7091,6 +7482,7 @@ void printRaw() {
 // и цикл не начнёт дёргать интернет каждый проход.
 void clearWeather() {
   wOk = false; wTemp = 0; wHum = 0; wWind = 0; wCode = -1; wDescEn = ""; wDescRu = "";
+  wCodeTom = 0; wDescTom = ""; wFcOk = false; wPopNow = 0; wPopTom = 0;
   gLastDraw = 0;
   Serial.println("погода сброшена (НЕТ ДАННЫХ)");
 }
@@ -8098,7 +8490,7 @@ static size_t csvFileSize() {
 #define PAGE_SEND_STALL   800UL   // нет прогресса 0.8 с — клиент мёртв, рвём
 #define PAGE_CHUNK       4096     // мельче — больше задержек на TCP
 #define PAGE_MAX_TAGS      22     // столько подстановок в web/page.html
-#define PAGE_CAP        32000     // предел ответа: больше — это уже ошибка
+#define PAGE_CAP        36000     // предел ответа: больше — это уже ошибка
 
 struct PgVal {
   const char* tag;      // "__FW__" и т.п.
@@ -10519,7 +10911,11 @@ void webSetup() {
       "\"disp\":%d,\"bright\":%d,\"wake\":%lu,\"dtouch\":%d,\"beep\":%d,\"vol\":%d,\"led\":%d,"
       "\"mq\":%d,\"mqN\":%lu,\"mqFail\":%lu,"
       // Погода (OpenWeatherMap): видно с ПК, что пришло и сколько осталось heap
-      "\"wOk\":%d,\"wT\":%.1f,\"wH\":%.0f,\"wW\":%.1f,\"wCode\":%d,\"wHeap\":%u,\"wDesc\":\"%s\","
+      "\"wOk\":%d,\"wT\":%.1f,\"wH\":%.0f,\"wW\":%.1f,\"wCode\":%d,\"wCodeT\":%d,\"wHeap\":%u,\"wDesc\":\"%s\","
+      // Прогноз OWM: вероятность дождя сейчас и завтра, диапазон температур
+      // завтра, короткое описание, осадки за завтра и heap после запроса.
+      "\"wPop\":%.0f,\"wPopT\":%.0f,\"wTminT\":%.1f,\"wTmaxT\":%.1f,"
+      "\"wDescT\":\"%s\",\"wRainT\":%.1f,\"wfHeap\":%u,"
       "\"now\":\"%s\"}",
       gVoltage, gTemp, gPower, gCurrent, gEnergy,
       gRelay ? "true" : "false", myTodayKwh, myTodayCost, yKwh, yCost,
@@ -10561,7 +10957,8 @@ void webSetup() {
       dispWakeActive() ? (unsigned long)((gDispWakeUntil - millis()) / 1000UL) : 0,
       gDispTouch ? 1 : 0, gBeepOn ? 1 : 0, gBeepVol, gLedState,
       mqUp ? 1 : 0, mqMsgN, mqFailN,
-      wOk ? 1 : 0, wTemp, wHum, wWind, wCode, wHeap, wDescRu.c_str(),
+      wOk ? 1 : 0, wTemp, wHum, wWind, wCode, wCodeTom, wHeap, wDescRu.c_str(),
+      wPopNow, wPopTom, wTminTom, wTmaxTom, wDescTom.c_str(), wRainTom, wfHeap,
       nows);
     gWeb.send(200, "application/json", String(b));
   });
@@ -11522,6 +11919,7 @@ void loop() {
   netBudgetReset();                      // сетевые TLS-запросы делят 2.6 с на проход
   static unsigned long lastPoll = 0;
   static unsigned long lastWeather = 0;
+  static unsigned long lastForecast = 0;
   static unsigned long lastToday = 0;
   static unsigned long lastPeriods = 0;
   static unsigned long lastSeed = 0;
@@ -11566,7 +11964,7 @@ void loop() {
   { unsigned long b0 = millis(); histTick(); blkNote("hist", millis() - b0); }
   { unsigned long w0 = millis(); writeSd(); unsigned long dw = millis() - w0;
     if (dw > gMsWrite) gMsWrite = dw; blkNote("sdwrite", dw); }
-  // v4.3: сторож устройств отключён — wdTick() не вызываем, чтобы не
+  // v4.3: сторож камер отключён — wdTick() не вызываем, чтобы не
   // тратить время на TCP. Функция осталась ниже для большого экрана.
   // wdTick();
   { unsigned long b0 = millis(); netOnline(); blkNote("net", millis() - b0); }
@@ -11663,8 +12061,33 @@ void loop() {
       lastWeather = millis();
       if (netOnline()) {
         handleTouch();
-        unsigned long b0 = millis(); fetchWeather(); blkNote("weather", millis() - b0);
-        gLastDraw = 0;                // показать новые данные
+        unsigned long b0 = millis();
+        bool wxk = fetchWeather();
+        blkNote("weather", millis() - b0);
+        // Перерисовка — ТОЛЬКО по факту обновления, а не каждый проход loop.
+        if (wxk) gLastDraw = 0;       // показать новые данные
+      }
+    }
+  }
+
+  // 4b. Прогноз (дождь сейчас + завтра). 16 шагов по 3 ч = 48 ч, чаще не
+  //     нужно: раз в 30 минут. Неудача — повтор через 5 минут, но после трёх
+  //     подряд возвращаемся к 30 минутам, иначе мёртвый API будет держать TLS
+  //     каждую минуту. В проходе, где сетевой бюджет уже съеден (облако,
+  //     страница), запрос не начинаем — иначе проход выходит за 4 с.
+  {
+    unsigned long period = wFcOk ? 1800000UL : 300000UL;
+    if (wFcFail >= 3) period = 1800000UL;
+    bool due = (lastForecast == 0) ? (millis() > 12000UL)
+                                   : (millis() - lastForecast > period);
+    if (due && netBudgetLeft() >= 1500UL) {
+      lastForecast = millis();
+      if (netOnline()) {
+        handleTouch();
+        unsigned long b0 = millis();
+        bool fck = fetchForecast();
+        blkNote("forecast", millis() - b0);
+        if (fck) gLastDraw = 0;       // карточка «ЗАВТРА» обновилась
       }
     }
   }
@@ -11758,6 +12181,15 @@ void loop() {
       bool wxok = fetchWeather();
       Serial.printf("WX: %s, heap %u -> %u, wCode=%d\n",
                     wxok ? "ok" : "fail", h0, ESP.getFreeHeap(), wCode);
+      gLastDraw = 0;
+    } else if (up == "WXF") {
+      // Принудительный запрос ПРОГНОЗА (дождь/завтра) — для проверки без
+      // ожидания 30-минутного периода.
+      uint32_t h0 = ESP.getFreeHeap();
+      bool fok = fetchForecast();
+      Serial.printf("WXF: %s, heap %u -> %u, pop=%.0f%% tom=%.0f%% %.1f..%.1f C %s\n",
+                    fok ? "ok" : "fail", h0, ESP.getFreeHeap(),
+                    wPopNow, wPopTom, wTminTom, wTmaxTom, wDescTom.c_str());
       gLastDraw = 0;
     } else if (up == "RAW") {
       printRaw();
