@@ -10942,7 +10942,9 @@ void webSetup() {
       String a = gWeb.arg("file");
       // Раньше неизвестное имя молча отдавало 264 КБ дефолта. Теперь — 404,
       // никакого fallback: клиент должен знать, что файла нет.
-      if (a == "energy.csv" ||
+      // energy.peak / energy.bak / boots.log — чтобы полный архив снимался по HTTP
+      if (a == "energy.csv" || a == "energy.peak" || a == "energy.bak" ||
+          a == "boots.log" ||
           (a.startsWith("energy-") && a.endsWith(".csv") && a.length() == 18)) {
         fname = "/" + a;
         explicitFile = true;
