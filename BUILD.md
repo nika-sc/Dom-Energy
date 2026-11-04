@@ -275,3 +275,19 @@ python build_page.py          # перезапишет ../page_html.h
 1. `copy firmware\cydv4\secrets.example.h firmware\cydv4\secrets.h` и заполнить.
 2. `firmware\hw\User_Setup.h` скопировать в библиотеку `TFT_eSPI`
    (иначе экран будет белым: не тот драйвер и не та распиновка).
+
+## ВАЖНО: TFT_eSPI — какой экран активен
+
+Библиотека `TFT_eSPI` одна на всю машину и переключается файлом
+`libraries/TFT_eSPI/User_Setup_Select.h`. Если там активен чужой Setup
+(например, `User_Setup_C3_ST7735.h` от ESP32-C3), прошивка **соберётся, но
+зависнет на `tft.init()`**: плата печатает баннер и уходит в перезагрузку по
+сторожу (`INT_WDT`), Wi-Fi не поднимается.
+
+Проверка (должна быть активна строка с `User_Setup.h`, а чужие — закомментированы):
+
+```powershell
+Select-String -Path "$env:USERPROFILE\Documents\Arduino\libraries\TFT_eSPI\User_Setup_Select.h" -Pattern '^#include <User_Setup'
+```
+
+Симптом в serial: `dbg: loadWifi ok` и дальше тишина — значит завис `tft.init()`.

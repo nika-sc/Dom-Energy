@@ -27,6 +27,14 @@ PLACEHOLDERS = [
 
 def main():
     html = SRC.read_text(encoding='utf-8').replace('\r\n', '\n')
+    # Шаблон пишем в отдельный .h: Arduino-препроцессор ломает генерацию
+    # прототипов, когда видит HTML внутри raw-строки в .ino.
+    hdr = HERE.parent / 'page_html.h'
+    hdr.write_text('#pragma once\n#include <Arduino.h>\n\n'
+                   '// Сгенерировано из web/page.html - НЕ ПРАВИТЬ ВРУЧНУЮ.\n'
+                   'static const char PAGE_TMPL[] PROGMEM = R"HTML(\n'
+                   + html + ')HTML";\n', encoding='utf-8')
+    print('  page_html.h обновлён')
     if ')HTML"' in html:
         sys.exit('page.html содержит )HTML" — сломает raw-строку')
     found = set(re.findall(r'__[A-Z_]+__', html))
