@@ -1,4 +1,4 @@
-# ============================================================================
+﻿# ============================================================================
 #  tg-relay.ps1 — отправка в Telegram через реле GitHub Actions
 # ----------------------------------------------------------------------------
 #  Telegram API из этой сети недоступен, поэтому сообщение уходит так:
@@ -58,7 +58,9 @@ $body = @{
 
 $url = "https://api.github.com/repos/$Repo/dispatches"
 try {
-    $r = Invoke-WebRequest -Uri $url -Method Post -Body $body -TimeoutSec $TimeoutSec `
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)   # иначе русский текст уходит в ????
+    $r = Invoke-WebRequest -Uri $url -Method Post -Body $bytes -TimeoutSec $TimeoutSec `
+        -ContentType 'application/json; charset=utf-8' `
         -Headers @{
             "Authorization"        = "Bearer $Token"
             "Accept"               = "application/vnd.github+json"
