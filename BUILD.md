@@ -308,3 +308,40 @@ powershell -ExecutionPolicy Bypass -File flash-http.ps1 -Ip 192.168.0.51
 на вкладке «Прошивка».
 
 Эндпоинты: `POST /update` (тело — .bin) и `GET /reboot`.
+
+## Уведомления и Telegram через реле GitHub
+
+Пороги задаются в `%APPDATA%\DomMonitor\settings.json`:
+
+| поле | по умолчанию | смысл |
+|---|---|---|
+| `alertOn` | `true` | уведомления включены |
+| `alertVMin` / `alertVMax` | `200` / `250` | порог по напряжению, В |
+| `alertTMax` | `55` | перегрев реле, °C |
+| `alertOffMin` | `3` | «плата молчит», минуты |
+| `alertSpikeW` / `alertSpikeX` | `500` / `2.0` | скачок мощности: Вт и во сколько раз выше среднего |
+| `tgRelay` | `false` | слать ли в Telegram |
+| `githubToken` | — | **личный** PAT, только локально, в репозиторий не попадает |
+| `tgRepo` | `nika-sc/Dom-Energy` | куда отправлять `repository_dispatch` |
+
+Куда приходят уведомления: тост в трее Windows, строка в журнале приложения
+(`app.log`), и — если включено — Telegram через реле.
+
+### Как устроено реле
+
+Telegram API из домашней сети недоступен, поэтому сообщение идёт так:
+
+```
+DomMonitor -> tg-relay.ps1 -> GitHub API (repository_dispatch)
+           -> .github/workflows/telegram-relay.yml -> api.telegram.org
+```
+
+В репозитории должны быть **секреты** (Settings -> Secrets and variables -> Actions):
+
+- `TELEGRAM_BOT_TOKEN` — токен бота от @BotFather
+- `TELEGRAM_CHAT_ID` — id чата
+
+Токен бота и chat_id в коде и в репозитории не хранятся.
+Токен GitHub (PAT) вводится только локально в `settings.json`.
+
+Проверка реле вручную: Actions -> **telegram-relay** -> Run workflow.

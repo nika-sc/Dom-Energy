@@ -2174,6 +2174,7 @@ bool calTick(int x, int y) {
   drawCalDone();
   delay(1600);
   gScreen = SCR_MAIN;
+
   drawScreen();
   gLastDraw = millis(); gLastSig = screenSig(); gLastWinFull = millis();
   return true;
@@ -11346,6 +11347,7 @@ void setup() {
   drawTxtC(120, 120, "ДОМ", 0x05FF, 0x0000, 6);
   drawTxtC(120, 180, "ЭНЕРГИЯ", 0xFFFF, 0x0000, 3);
   drawTxtC(120, 215, "ПОДКЛЮЧЕНИЕ...", 0x5AEB, 0x0000, 1);
+  const unsigned long splashAt = millis();   // заставка держится минимум 2.5 с
 
   if (!connectWifi()) {
     uiFill(0, 200, 240, 60, TFT_BLACK);
@@ -11392,6 +11394,9 @@ void setup() {
   fetchFromApi();
   pushHistory();
   fetchWeather();
+
+  // если плата стартовала быстро, заставку всё равно держим 2.5 с
+  while (millis() - splashAt < 2500) { esp_task_wdt_reset(); delay(50); }
 
   drawScreen();
   gLastDraw = millis();

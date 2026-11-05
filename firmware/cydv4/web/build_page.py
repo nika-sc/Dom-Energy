@@ -17,7 +17,7 @@ END = '// <<< PAGE_TMPL'
 
 PLACEHOLDERS = [
     '__FW__', '__NETCLS__', '__NETTXT__', '__RSSI__',
-    '__TKWH__', '__TCOST__', '__MV__', '__MP__', '__MA__', '__MT__',
+    '__TKWH__', '__TCOST__', '__MP__',
     '__RELCLS__', '__RELTXT__', '__TAR__', '__PE__',
     '__YKWH__', '__YKOST__', '__MKWH__', '__MCOST__',
     '__TARDAY__', '__TARNIGHT__',
