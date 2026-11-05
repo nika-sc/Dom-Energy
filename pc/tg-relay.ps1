@@ -74,3 +74,5 @@ try {
     Log ("ошибка реле: HTTP " + $code + " · " + $_.Exception.Message + " · " + $Text)
     exit 3
 }
+
+exit 0
