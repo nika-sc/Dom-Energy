@@ -34,7 +34,7 @@ border-radius:999px;padding:4px 10px;font-size:12px;color:var(--mut)}
 .iconbtn{background:var(--card);border:1px solid var(--ln);color:var(--ink);border-radius:999px;
 padding:5px 11px;font:inherit;font-size:12px;cursor:pointer}
 .iconbtn:hover{border-color:var(--c1)}
-.hero{display:grid;grid-template-columns:290px 1fr;gap:14px;align-items:stretch}
+.hero{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:stretch}
 @media(max-width:780px){.hero{grid-template-columns:1fr}}
 .card{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid var(--ln);border-radius:18px;padding:14px 16px}
 .gauge{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px}
@@ -46,7 +46,7 @@ pointer-events:none;text-align:center}
 .ringnum span{font-size:12px;color:var(--mut);margin-top:2px}
 .cap{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--mut);font-weight:700}
 .gscale{font-size:10.5px;color:var(--dim)}
-.tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tiles{display:grid;grid-template-columns:1fr;gap:10px;align-content:stretch}
 @media(max-width:520px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .t{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid var(--ln);border-radius:14px;padding:11px 12px}
 .t .k{font-size:9.5px;text-transform:uppercase;letter-spacing:.09em;color:var(--mut);font-weight:700}
@@ -90,7 +90,7 @@ svg.chart rect.bar.sel{stroke:var(--ink);stroke-width:2.5}
 svg.chart rect.bar2.sel{stroke:var(--c1);stroke-width:2}
 svg.chart{cursor:default}
 
-.detail{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px}
+.detail{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:12px}
 @media(max-width:900px){.detail{grid-template-columns:1fr}}
 .d .bigv{font-size:30px;font-weight:800;letter-spacing:-.03em;line-height:1.1}
 .d .bigv small{font-size:12px;color:var(--mut);font-weight:600;margin-left:4px}
@@ -100,6 +100,7 @@ svg.chart{cursor:default}
 .d .dstats b{display:block;color:var(--ink);font-size:13px;font-weight:700}
 .d .dstats i{font-style:normal;font-size:9.5px;color:var(--dim)}
 .d svg.dchart{display:block;width:100%;height:64px;margin-top:8px}
+.build{font-size:10px;color:var(--dim);text-align:center;margin-top:14px;opacity:.7}
 </style>
 </head>
 <body>
@@ -111,6 +112,42 @@ svg.chart{cursor:default}
     <span class="chip" id="cRssi">__RSSI__ дБм</span><span class="chip" id="cUpd">обновлено 0 с</span>
     <button class="iconbtn" id="themeBtn" type="button">☀ Светлая</button>
   </span>
+</div>
+
+<div class="detail">
+  <div class="card d">
+    <div class="head"><span class="ttl">Напряжение</span><span class="dnow" id="dVnow">получено —</span></div>
+    <div class="bigv c1"><span id="dVbig">—</span><small>В</small></div>
+    <div class="dsub">норма 207–253 В · ГОСТ 32144-2013</div>
+    <div class="dstats">
+      <div><span>мин</span><b id="dVmin">—</b><i id="dVminT">—</i></div>
+      <div><span>сред</span><b id="dVavg">—</b><i>за сутки</i></div>
+      <div><span>макс</span><b id="dVmax">—</b><i id="dVmaxT">—</i></div>
+    </div>
+    <svg class="dchart" id="dChartV" viewBox="0 0 300 64" preserveAspectRatio="none"></svg>
+  </div>
+  <div class="card d">
+    <div class="head"><span class="ttl">Ток</span><span class="dnow" id="dAnow">получено —</span></div>
+    <div class="bigv c3"><span id="dAbig">—</span><small>А</small></div>
+    <div class="dsub"><span id="pcos">cos φ —</span> · по мощности и напряжению</div>
+    <div class="dstats">
+      <div><span>мин</span><b id="dAmin">—</b><i id="dAminT">—</i></div>
+      <div><span>сред</span><b id="dAavg">—</b><i>за сутки</i></div>
+      <div><span>макс</span><b id="dAmax">—</b><i id="dAmaxT">—</i></div>
+    </div>
+    <svg class="dchart" id="dChartA" viewBox="0 0 300 64" preserveAspectRatio="none"></svg>
+  </div>
+  <div class="card d">
+    <div class="head"><span class="ttl">Темп. реле</span><span class="dnow" id="dTnow">получено —</span></div>
+    <div class="bigv c4"><span id="dTbig">—</span><small>°C</small></div>
+    <div class="dsub">корпус реле · перегрев выше 60 °C</div>
+    <div class="dstats">
+      <div><span>мин</span><b id="dTmin">—</b><i id="dTminT">—</i></div>
+      <div><span>сред</span><b id="dTavg">—</b><i>за сутки</i></div>
+      <div><span>макс</span><b id="dTmax">—</b><i id="dTmaxT">—</i></div>
+    </div>
+    <svg class="dchart" id="dChartT" viewBox="0 0 300 64" preserveAspectRatio="none"></svg>
+  </div>
 </div>
 
 <div class="hero">
@@ -127,9 +164,6 @@ svg.chart{cursor:default}
     <div class="gscale" id="gcap">шкала: 600 Вт</div>
   </div>
   <div class="tiles">
-    <div class="t"><div class="k">Напряжение</div><div class="v c1"><span id="mv">__MV__</span><small>В</small></div><div class="s" id="mvAge">—</div></div>
-    <div class="t"><div class="k">Ток</div><div class="v c3"><span id="ma">__MA__</span><small>А</small></div><div class="s" id="pcos">—</div></div>
-    <div class="t"><div class="k">Темп. реле</div><div class="v c4"><span id="mt">__MT__</span><small>°C</small></div><div class="s" id="mtAge">—</div></div>
     <div class="t"><div class="k">Реле</div><div class="v" id="rel"><i class="dot __RELCLS__"></i>__RELTXT__</div><div class="s">&nbsp;</div></div>
     <div class="t"><div class="k">Тариф</div><div class="v c5"><span id="ptar">__TAR__</span><small>₽</small></div><div class="s">&nbsp;</div></div>
     <div class="t"><div class="k">Счётчик</div><div class="v c2"><span id="pe">__PE__</span><small>кВт·ч</small></div><div class="s" id="peAge">—</div></div>
@@ -159,42 +193,6 @@ svg.chart{cursor:default}
   <div class="gapbox" id="gapBox" style="display:none"><span id="gapTxt"></span><button class="iconbtn" id="gapBtn" type="button">подтянуть</button></div>
 </div>
 
-<div class="detail">
-  <div class="card d">
-    <div class="head"><span class="ttl">Напряжение</span><span class="dnow" id="dVnow">получено —</span></div>
-    <div class="bigv c1"><span id="dVbig">—</span><small>В</small></div>
-    <div class="dsub">норма 207–253 В · ГОСТ 32144-2013</div>
-    <div class="dstats">
-      <div><span>мин</span><b id="dVmin">—</b><i id="dVminT">—</i></div>
-      <div><span>сред</span><b id="dVavg">—</b><i>за сутки</i></div>
-      <div><span>макс</span><b id="dVmax">—</b><i id="dVmaxT">—</i></div>
-    </div>
-    <svg class="dchart" id="dChartV" viewBox="0 0 300 64" preserveAspectRatio="none"></svg>
-  </div>
-  <div class="card d">
-    <div class="head"><span class="ttl">Ток</span><span class="dnow" id="dAnow">получено —</span></div>
-    <div class="bigv c3"><span id="dAbig">—</span><small>А</small></div>
-    <div class="dsub">по мощности и напряжению · cos φ на главной</div>
-    <div class="dstats">
-      <div><span>мин</span><b id="dAmin">—</b><i id="dAminT">—</i></div>
-      <div><span>сред</span><b id="dAavg">—</b><i>за сутки</i></div>
-      <div><span>макс</span><b id="dAmax">—</b><i id="dAmaxT">—</i></div>
-    </div>
-    <svg class="dchart" id="dChartA" viewBox="0 0 300 64" preserveAspectRatio="none"></svg>
-  </div>
-  <div class="card d">
-    <div class="head"><span class="ttl">Темп. реле</span><span class="dnow" id="dTnow">получено —</span></div>
-    <div class="bigv c4"><span id="dTbig">—</span><small>°C</small></div>
-    <div class="dsub">корпус реле · перегрев выше 60 °C</div>
-    <div class="dstats">
-      <div><span>мин</span><b id="dTmin">—</b><i id="dTminT">—</i></div>
-      <div><span>сред</span><b id="dTavg">—</b><i>за сутки</i></div>
-      <div><span>макс</span><b id="dTmax">—</b><i id="dTmaxT">—</i></div>
-    </div>
-    <svg class="dchart" id="dChartT" viewBox="0 0 300 64" preserveAspectRatio="none"></svg>
-  </div>
-</div>
-
 <div class="two">
   <div class="card"><div class="head"><span class="ttl">Погода · Адлер</span></div>
     <div class="kv"><span>Сейчас</span><b id="wxNow">—</b></div>
@@ -212,6 +210,7 @@ svg.chart{cursor:default}
   <div class="kv"><span>Гасить через</span><b><input id="scrIdle" type="number" min="0" max="60" step="1" value="2"> мин</b></div>
   <div class="kv"><span>Экономия</span><b id="scrEco">—</b></div>
 </div>
+<div class="build">сборка 05.11.2026 11:56 · CYD-4.10.1 · файл 100% с платы</div>
 </div>
 <div id="tip" class="tip"></div>
 <script>
@@ -246,6 +245,8 @@ function apply(d){
   txt("ykwh",num(d.ykwh,2)); txt("ykost",num(d.ykost,2));
   txt("mkwh",num(d.mkwh,2)); txt("mcost",num(d.mcost,2));
   txt("cRssi",num(d.rssi)+" дБм");
+  txt("dVbig",num(d.v)); txt("dAbig",num(d.amp,2)); txt("dTbig",num(d.temp,1));
+  txt("dVnow","получено "+hhmm(d.vAt)); txt("dAnow","получено "+hhmm(d.pAt)); txt("dTnow","получено "+hhmm(d.tAt));
   txt("mvAge","получено "+hhmm(d.vAt)); txt("mtAge","получено "+hhmm(d.tAt));
   txt("peAge","получено "+hhmm(d.eAt)); txt("tkwhAge","получено "+hhmm(d.eAt));
   var rel=G("rel");
