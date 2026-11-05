@@ -39,18 +39,17 @@ border-radius:999px;padding:4px 10px;font-size:12px;color:var(--mut)}
 .iconbtn{background:var(--card);border:1px solid var(--ln);color:var(--ink);border-radius:999px;
 padding:5px 11px;font:inherit;font-size:12px;cursor:pointer}
 .iconbtn:hover{border-color:var(--c1)}
-.hero{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:stretch}
-@media(max-width:780px){.hero{grid-template-columns:1fr}}
+.hero{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;align-items:stretch}
+@media(max-width:780px){.hero{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .card{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid var(--ln);border-radius:18px;padding:14px 16px}
-.gauge{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px}
-.ringwrap{position:relative;width:220px;height:220px}
-.ringwrap svg{position:absolute;inset:0;width:100%;height:100%}
-.ringnum{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
-pointer-events:none;text-align:center}
-.ringnum b{font-size:40px;font-weight:800;letter-spacing:-.04em;line-height:1}
-.ringnum span{font-size:12px;color:var(--mut);margin-top:2px}
+
+
+
+
+
+
 .cap{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--mut);font-weight:700}
-.gscale{font-size:10.5px;color:var(--dim)}
+.pbar{height:9px;border-radius:99px;background:var(--grid);overflow:hidden;margin-top:10px}.pbar i{display:block;height:100%;width:0;background:var(--c1);border-radius:99px;transition:width .25s ease}
 .tiles{display:grid;grid-template-columns:1fr;gap:10px;align-content:stretch}
 @media(max-width:520px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .t{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid var(--ln);border-radius:14px;padding:11px 12px}
@@ -156,19 +155,8 @@ svg.chart{cursor:default}
 </div>
 
 <div class="hero">
-  <div class="card gauge">
-    <div class="cap">Сейчас</div>
-    <div class="ringwrap">
-      <svg viewBox="0 0 200 200">
-        <circle cx="100" cy="100" r="84" fill="none" stroke="var(--grid)" stroke-width="13"/>
-        <circle id="ring" cx="100" cy="100" r="84" fill="none" stroke="var(--c1)" stroke-width="13"
-          stroke-linecap="round" transform="rotate(-90 100 100)" stroke-dasharray="528" stroke-dashoffset="528"/>
-      </svg>
-      <div class="ringnum"><b id="mp">__MP__</b><span>Вт</span></div>
-    </div>
-    <div class="gscale" id="gcap">шкала: 600 Вт</div>
-  </div>
-  <div class="tiles">
+  <div class="card d"><div class="head"><span class="ttl">Мощность</span><span class="dnow" id="gcap">шкала 300 Вт</span></div><div class="bigv c1"><span id="mp">__MP__</span><small>Вт</small></div><div class="pbar"><i id="pfill"></i></div><div class="dsub">шкала — по пику за сутки</div></div>
+  <div class="tiles" style="display:contents">
     <div class="t"><div class="k">Реле</div><div class="v" id="rel"><i class="dot __RELCLS__"></i>__RELTXT__</div><div class="s">&nbsp;</div></div>
     <div class="t"><div class="k">Тариф</div><div class="v c5"><span id="ptar">__TAR__</span><small>₽</small></div><div class="s">&nbsp;</div></div>
     <div class="t"><div class="k">Счётчик</div><div class="v c2"><span id="pe">__PE__</span><small>кВт·ч</small></div><div class="s" id="peAge">—</div></div>
@@ -215,7 +203,7 @@ svg.chart{cursor:default}
   <div class="kv"><span>Гасить через</span><b><input id="scrIdle" type="number" min="0" max="60" step="1" value="2"> мин</b></div>
   <div class="kv"><span>Экономия</span><b id="scrEco">—</b></div>
 </div>
-<div class="build">сборка 05.11.2026 11:56 · CYD-4.10.1 · файл 100% с платы</div>
+<div class="build">сборка 05.11.2026 12:21 · CYD-4.10.1 · файл 100% с платы</div>
 </div>
 <div id="tip" class="tip"></div>
 <script>
@@ -274,11 +262,13 @@ function ring(d){
   var pw=+d.p||0;
   var mx=Math.max(S.dayMax*1.15, pw*1.3, 300);
   mx=niceMax(mx);
-  var f=Math.max(0.015,Math.min(1,pw/mx));
-  var r=G("ring");
-  if(r){r.setAttribute("stroke-dashoffset",(528*(1-f)).toFixed(1));
-    r.setAttribute("stroke",pw>=mx*0.85?"var(--red)":(pw>=mx*0.5?"var(--c4)":"var(--c1)"))}
-  txt("gcap","шкала: "+Math.round(mx)+" Вт — по пику за сутки");
+  var f=Math.max(0.01,Math.min(1,pw/mx));
+  var el=G("pfill");
+  if(el){
+    el.style.width=(f*100).toFixed(1)+"%";
+    el.style.background = pw>=mx*0.85 ? "var(--red)" : (pw>=mx*0.5 ? "var(--c4)" : "var(--c1)");
+  }
+  txt("gcap","шкала "+Math.round(mx)+" Вт");
 }
 function poll(){fetch("/data",{cache:"no-store"}).then(function(r){return r.json()}).then(apply).catch(function(){txt("cNet","нет связи")})}
 setInterval(function(){var s=Math.round((Date.now()-S.last)/1000);txt("cUpd",(s>20?"нет связи ":"обновлено ")+s+" с")},1000);
