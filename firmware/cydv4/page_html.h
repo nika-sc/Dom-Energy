@@ -84,6 +84,16 @@ input[type=number]{width:56px;background:var(--card);border:1px solid var(--ln);
 border-radius:8px;padding:2px 6px;font:inherit;text-align:right}
 .tip{position:fixed;z-index:50;background:var(--bg);color:var(--ink);border:1px solid var(--ln);border-radius:10px;
 padding:8px 10px;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.35);pointer-events:none;max-width:250px;display:none}
+
+.readout{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:baseline;font-size:12.5px;color:var(--mut);
+background:var(--card);border:1px solid var(--ln);border-radius:12px;padding:7px 11px;margin:0 0 8px;min-height:34px}
+.readout b{color:var(--ink);font-weight:700}
+.readout .h{color:var(--c1);font-weight:800}
+.readout .empty{opacity:.6}
+svg.chart rect.bar,svg.chart rect.bar2{cursor:pointer}svg.chart rect.hit{cursor:pointer}
+svg.chart rect.bar.sel{stroke:var(--ink);stroke-width:2.5}
+svg.chart rect.bar2.sel{stroke:var(--c1);stroke-width:2}
+svg.chart{cursor:crosshair}
 </style>
 </head>
 <body>
@@ -135,7 +145,8 @@ padding:8px 10px;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.35);pointer-ev
     <span class="ctrl"><button id="unitBtn" type="button">кВт·ч</button><button id="numBtn" type="button" class="on">числа</button><button id="refBtn" type="button">обновить</button></span>
   </div>
   <div class="head" style="margin:-4px 0 4px"><span class="legend" style="margin-left:0"><span><i class="sw" style="background:var(--bar1)"></i>средняя</span><span><i class="sw" style="background:var(--bar2)"></i>пик, Вт</span></span></div>
-  <svg class="chart" id="chE" viewBox="0 0 900 190" preserveAspectRatio="none"></svg>
+  <div class="readout" id="readout"><span class="empty">нажми на столбик — покажу час, расход и пик</span></div>
+<svg class="chart" id="chE" viewBox="0 0 900 190" preserveAspectRatio="none"></svg>
   <div class="head" style="margin-top:12px"><span class="ttl">Напряжение и температура</span>
     <span class="legend"><span><i class="sw" style="background:#60a5fa"></i>В</span><span><i class="sw" style="background:#f472b6"></i>°C</span></span>
   </div>
@@ -165,7 +176,7 @@ padding:8px 10px;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.35);pointer-ev
 <script>
 "use strict";
 var BOOT_DATE="__DATE__",BOOT_HOUR=__HOUR__;
-var S={date:"",days:[],hist:null,today:"",watt:false,nums:true,last:0,dayMax:0};
+var S={date:"",days:[],hist:null,today:"",watt:false,nums:true,last:0,dayMax:0,sel:null};
 function G(i){return document.getElementById(i)}
 function txt(i,t){var e=G(i);if(e)e.textContent=t}
 function num(v,n){return (v==null||isNaN(v))?"—":(+v).toFixed(n==null?0:n)}
@@ -236,7 +247,7 @@ function loadDays(cb){
 function loadHist(cb){
   if(!S.date){if(cb)cb();return}
   fetch("/history?date="+S.date,{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){
-    S.hist=j;
+    S.hist=j; S.sel=(j&&j.hours&&j.hours.length)?S.sel:null;
     var mx=0,k;for(k=0;k<24;k++){var a=(j.hours||[])[k]||{};if(+a.pmax>mx)mx=+a.pmax}
     S.dayMax=mx;
     drawNav(); drawE(j); drawVT(j); if(cb)cb();
@@ -265,6 +276,7 @@ function drawE(j){
     if(b.n&&+b.pmax>0){var ph=Math.max(2,(+b.pmax)/(pm||1)*hh*0.22);
       s+='<rect class="bar2" data-i="'+i+'" x="'+x.toFixed(1)+'" y="'+(base-ph).toFixed(1)+'" width="'+w.toFixed(1)+'" height="'+ph.toFixed(1)+'" rx="2" fill="var(--bar2)" opacity=".9"/>'}
   }
+  for(i=0;i<24;i++){var hx=pl+i*slot;s+='<rect class="hit" data-i="'+i+'" x="'+hx.toFixed(1)+'" y="'+pt+'" width="'+slot.toFixed(1)+'" height="'+(base-pt)+'" fill="transparent"/>'}
   s+='<text class="ax" x="'+pl+'" y="'+(pt-4)+'">'+(S.watt?"средняя мощность, Вт":"энергия за час, кВт·ч")+'</text>';
   for(i=0;i<=3;i++){var xx=pl+(W-pl-pr)*i/3;s+='<text class="ax" x="'+xx.toFixed(1)+'" y="'+(H-3)+'" text-anchor="middle">'+(i*8)+'</text>'}
   G("chE").innerHTML=s;
@@ -272,10 +284,36 @@ function drawE(j){
 }
 function hit(){
   var svg=G("chE");
-  svg.querySelectorAll("rect.bar").forEach(function(r){
-    r.addEventListener("pointerdown",function(ev){tipShow(this.getAttribute("data-i"),ev)});
-    r.addEventListener("pointerleave",function(){G("tip").style.display="none"});
+  function select(i,ev){
+    S.sel=+i;
+    svg.querySelectorAll("rect.bar,rect.bar2").forEach(function(r){
+      r.classList.toggle("sel", r.getAttribute("data-i")===i && r.classList.contains("bar"));
+      r.classList.toggle("sel2", false);
+    });
+    readout(i);
+    G("tip").style.display="none";
+  }
+  svg.querySelectorAll("rect.hit").forEach(function(r){
+    r.addEventListener("pointerdown",function(ev){ev.preventDefault();select(this.getAttribute("data-i"),ev)});
   });
+  if(S.sel!=null) select(S.sel);
+}
+
+function readout(i){
+  var h=(S.hist&&S.hist.hours)||[],x=h[+i]||{},box=G("readout");
+  if(!box)return;
+  var from=("0"+(+i)).slice(-2)+":00",to=("0"+(+i+1)).slice(-2)+":00";
+  if(!x.n){box.innerHTML='<span class="h">'+from+"–"+to+'</span><span class="empty">нет данных за этот час</span>';return}
+  var s='<span class="h">'+from+"–"+to+"</span>";
+  s+='<span>энергия <b>'+num(x.kwh,2)+' кВт·ч</b></span>';
+  s+='<span>средняя <b>'+num(x.p,0)+' Вт</b></span>';
+  if(x.pmax>0){
+    s+='<span>пик <b>'+num(x.pmax,0)+' Вт</b>'+(x.pmaxT?' в '+x.pmaxT:'')+
+       (x.pmaxDur>0?', <b>'+Math.max(1,Math.round(x.pmaxDur/60))+' мин</b>':'')+'</span>';
+  }
+  if(x.v>50)s+='<span>напряжение <b>'+num(x.v,0)+' В</b></span>';
+  if(x.t!=null)s+='<span>темп. <b>'+num(x.t,1)+' °C</b></span>';
+  box.innerHTML=s;
 }
 function tipShow(i,ev){
   var h=(S.hist&&S.hist.hours)||[],x=h[+i]||{},t=G("tip");
@@ -287,8 +325,11 @@ function tipShow(i,ev){
   else html+="<br>нет данных";
   t.innerHTML=html; t.style.display="block";
   var w=250,px=(ev.clientX||100),py=(ev.clientY||100);
-  t.style.left=Math.min(window.innerWidth-w-8,Math.max(8,px-100))+"px";
-  t.style.top=Math.min(window.innerHeight-90,py+14)+"px";
+  var left=Math.min(window.innerWidth-w-8,Math.max(8,px-w/2));
+  var top=py-t.offsetHeight-16;                 // всегда ВЫШЕ курсора
+  if(top<8) top=Math.min(window.innerHeight-t.offsetHeight-8,py+18);  // у верха — под курсором
+  t.style.left=left+"px";
+  t.style.top=top+"px";
 }
 function drawVT(j){
   var h=j.hours||[],W=900,H=140,pl=12,pr=10,pt=8,pb=14,slot=(W-pl-pr)/24,i;
