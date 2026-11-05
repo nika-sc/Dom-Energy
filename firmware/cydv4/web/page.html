@@ -88,7 +88,18 @@ background:var(--card);border:1px solid var(--ln);border-radius:12px;padding:7px
 svg.chart rect.bar,svg.chart rect.bar2{cursor:pointer}svg.chart rect.hit,svg.chart rect.hit2{cursor:pointer}
 svg.chart rect.bar.sel{stroke:var(--ink);stroke-width:2.5}
 svg.chart rect.bar2.sel{stroke:var(--c1);stroke-width:2}
-svg.chart{cursor:crosshair}
+svg.chart{cursor:default}
+
+.detail{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px}
+@media(max-width:900px){.detail{grid-template-columns:1fr}}
+.d .bigv{font-size:30px;font-weight:800;letter-spacing:-.03em;line-height:1.1}
+.d .bigv small{font-size:12px;color:var(--mut);font-weight:600;margin-left:4px}
+.d .dsub{font-size:10.5px;color:var(--dim);margin-top:2px}
+.d .dnow{font-size:10.5px;color:var(--mut);margin-left:auto}
+.d .dstats{display:flex;gap:14px;margin-top:8px;font-size:11px;color:var(--mut)}
+.d .dstats b{display:block;color:var(--ink);font-size:13px;font-weight:700}
+.d .dstats i{font-style:normal;font-size:9.5px;color:var(--dim)}
+.d svg.dchart{display:block;width:100%;height:64px;margin-top:8px}
 </style>
 </head>
 <body>
@@ -148,6 +159,42 @@ svg.chart{cursor:crosshair}
   <div class="gapbox" id="gapBox" style="display:none"><span id="gapTxt"></span><button class="iconbtn" id="gapBtn" type="button">подтянуть</button></div>
 </div>
 
+<div class="detail">
+  <div class="card d">
+    <div class="head"><span class="ttl">Напряжение</span><span class="dnow" id="dVnow">получено —</span></div>
+    <div class="bigv c1"><span id="dVbig">—</span><small>В</small></div>
+    <div class="dsub">норма 207–253 В · ГОСТ 32144-2013</div>
+    <div class="dstats">
+      <div><span>мин</span><b id="dVmin">—</b><i id="dVminT">—</i></div>
+      <div><span>сред</span><b id="dVavg">—</b><i>за сутки</i></div>
+      <div><span>макс</span><b id="dVmax">—</b><i id="dVmaxT">—</i></div>
+    </div>
+    <svg class="dchart" id="dChartV" viewBox="0 0 300 64" preserveAspectRatio="none"></svg>
+  </div>
+  <div class="card d">
+    <div class="head"><span class="ttl">Ток</span><span class="dnow" id="dAnow">получено —</span></div>
+    <div class="bigv c3"><span id="dAbig">—</span><small>А</small></div>
+    <div class="dsub">по мощности и напряжению · cos φ на главной</div>
+    <div class="dstats">
+      <div><span>мин</span><b id="dAmin">—</b><i id="dAminT">—</i></div>
+      <div><span>сред</span><b id="dAavg">—</b><i>за сутки</i></div>
+      <div><span>макс</span><b id="dAmax">—</b><i id="dAmaxT">—</i></div>
+    </div>
+    <svg class="dchart" id="dChartA" viewBox="0 0 300 64" preserveAspectRatio="none"></svg>
+  </div>
+  <div class="card d">
+    <div class="head"><span class="ttl">Темп. реле</span><span class="dnow" id="dTnow">получено —</span></div>
+    <div class="bigv c4"><span id="dTbig">—</span><small>°C</small></div>
+    <div class="dsub">корпус реле · перегрев выше 60 °C</div>
+    <div class="dstats">
+      <div><span>мин</span><b id="dTmin">—</b><i id="dTminT">—</i></div>
+      <div><span>сред</span><b id="dTavg">—</b><i>за сутки</i></div>
+      <div><span>макс</span><b id="dTmax">—</b><i id="dTmaxT">—</i></div>
+    </div>
+    <svg class="dchart" id="dChartT" viewBox="0 0 300 64" preserveAspectRatio="none"></svg>
+  </div>
+</div>
+
 <div class="two">
   <div class="card"><div class="head"><span class="ttl">Погода · Адлер</span></div>
     <div class="kv"><span>Сейчас</span><b id="wxNow">—</b></div>
@@ -192,7 +239,7 @@ try{var th=localStorage.getItem("dom.theme"); if(th) setTheme(th); else setTheme
 /* ---------- живое состояние ---------- */
 function apply(d){
   if(!d)return;
-  S.last=Date.now();
+  S.data=d; S.last=Date.now();
   txt("mv",num(d.v)); txt("mp",num(d.p)); txt("ma",num(d.amp,2)); txt("mt",num(d.temp,1));
   txt("ptar",num(d.tariff,2)); txt("pe",num(d.e,2));
   txt("tkwh",num(d.tkwh,2)); txt("tcost",num(d.tcost,2));
@@ -244,9 +291,60 @@ function loadHist(cb){
     S.hist=j;
     var mx=0,k;for(k=0;k<24;k++){var a=(j.hours||[])[k]||{};if(+a.pmax>mx)mx=+a.pmax}
     S.dayMax=mx;
-    drawNav(); drawE(j); drawVT(j); if(cb)cb();
+    drawNav(); drawE(j); drawVT(j); renderDetails(j); if(cb)cb();
   }).catch(function(){if(cb)cb()});
 }
+
+function renderDetails(j){
+  var h=(j&&j.hours)||[],i;
+  var V=[],A=[],T=[];
+  for(i=0;i<24;i++){
+    var a=h[i]||{};
+    V.push(a.v>50?a.v:null);
+    A.push((a.v>50&&a.p>0)?(a.p/a.v):null);
+    T.push(a.t==null?null:a.t);
+  }
+  stat24("dV",V,"",function(x){return Math.round(x)});
+  stat24("dA",A,"",function(x){return x.toFixed(2)});
+  stat24("dT",T,"",function(x){return x.toFixed(1)});
+  var d=S.data||{};
+  txt("dVnow","получено "+hhmm(d.vAt));
+  txt("dAnow","получено "+hhmm(d.pAt));
+  txt("dTnow","получено "+hhmm(d.tAt));
+  txt("dVbig",num(d.v));txt("dAbig",num(d.amp,2));txt("dTbig",num(d.temp,1));
+  mini("dChartV",V);
+  mini("dChartA",A);
+  mini("dChartT",T);
+}
+function stat24(prefix,arr,u,fmt){
+  var mn=null,mx=null,sum=0,n=0,mnI=-1,mxI=-1,i;
+  for(i=0;i<24;i++){var v=arr[i];if(v==null)continue;
+    if(mn===null||v<mn){mn=v;mnI=i}
+    if(mx===null||v>mx){mx=v;mxI=i}
+    sum+=v;n++}
+  txt(prefix+"min",mn===null?"—":fmt(mn));
+  txt(prefix+"avg",n?fmt(sum/n):"—");
+  txt(prefix+"max",mx===null?"—":fmt(mx));
+  txt(prefix+"minT",mnI<0?"—":("0"+mnI).slice(-2)+":00");
+  txt(prefix+"maxT",mxI<0?"—":("0"+mxI).slice(-2)+":00");
+}
+function mini(id,arr){
+  var el=G(id); if(!el)return;
+  var W=300,H=64,pl=2,pr=2,pt=6,pb=6,slot=(W-pl-pr)/24,i;
+  var mn=null,mx=null;
+  for(i=0;i<24;i++){var v=arr[i];if(v==null)continue;if(mn===null||v<mn)mn=v;if(mx===null||v>mx)mx=v}
+  if(mn===null){el.innerHTML="";return}
+  if(mx-mn<0.5){mx=mn+0.5}
+  function y(v){return pt+(1-(v-mn)/(mx-mn))*(H-pt-pb)}
+  var d="",pen=false;
+  for(i=0;i<24;i++){var v=arr[i];if(v==null)continue;
+    d+=(pen?"L":"M")+(pl+slot*(i+0.5)).toFixed(1)+" "+y(v).toFixed(1)+" ";pen=true}
+  var s='<path d="'+d+'" fill="none" stroke="var(--c1)" stroke-width="1.8" stroke-linejoin="round"/>';
+  s+='<text class="ax" x="'+(W-pr)+'" y="'+(pt+6)+'" text-anchor="end">'+num(mx,1)+'</text>';
+  s+='<text class="ax" x="'+(W-pr)+'" y="'+(H-1)+'" text-anchor="end">'+num(mn,1)+'</text>';
+  el.innerHTML=s;
+}
+
 function drawNav(){
   var i=S.days.indexOf(S.date);
   G("prev").disabled=!(i>=0&&i<S.days.length-1); G("next").disabled=!(i>0);
@@ -406,6 +504,13 @@ G("gapBtn").addEventListener("click",function(){
   }).catch(function(){b.disabled=false;b.textContent="ошибка"});
 });
 
+document.addEventListener("pointerdown",function(ev){
+  var el=ev.target;
+  if(el&&el.closest&&(el.closest("#chE")||el.closest("#chVT")))return;
+  G("tip").style.display="none";
+},true);
+window.addEventListener("scroll",function(){G("tip").style.display="none"},{passive:true});
+window.addEventListener("resize",function(){G("tip").style.display="none"});
 loadDays(); poll(); setInterval(poll,5000);
 </script>
 </body>
