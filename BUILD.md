@@ -291,3 +291,20 @@ Select-String -Path "$env:USERPROFILE\Documents\Arduino\libraries\TFT_eSPI\User_
 ```
 
 Симптом в serial: `dbg: loadWifi ok` и дальше тишина — значит завис `tft.init()`.
+
+## Обновление прошивки по Wi-Fi (OTA)
+
+Плата умеет принимать прошивку по воздуху — USB-кабель нужен только для
+первой прошивки.
+
+```bash
+# из папки tools
+powershell -ExecutionPolicy Bypass -File flash-http.ps1 -Ip 192.168.0.51
+```
+
+Скрипт берёт самую свежую сборку из `%TEMP%\dommon-build-*` (или собирает
+заново с ключом `-Build`), отправляет `POST /update` и ждёт перезагрузку.
+В приложении DomMonitor то же самое делает кнопка **«Прошить по Wi-Fi»**
+на вкладке «Прошивка».
+
+Эндпоинты: `POST /update` (тело — .bin) и `GET /reboot`.

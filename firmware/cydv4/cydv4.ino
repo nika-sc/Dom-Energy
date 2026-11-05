@@ -20,6 +20,7 @@
 #include <HTTPClient.h>
 #include <StreamString.h>   // тело ответа с chunked -> String (прогноз OWM)
 #include <ESPmDNS.h>
+#include <Update.h>
 #include <SPI.h>
 #include <SD.h>
 #include <time.h>
@@ -11266,6 +11267,33 @@ void webSetup() {
       (unsigned long)gDispIdleMin, (unsigned long)dispIdleLeftMs(),
       (unsigned long)gDispOffN);
     gWeb.send(200, "application/json", String(b));
+  });
+
+  // ---------------------------------------------------------------- OTA по Wi-Fi
+  // POST /update с телом = .bin. После успешной записи — перезагрузка.
+  gWeb.on("/update", HTTP_POST,
+    []() {
+      bool ok = !Update.hasError();
+      gWeb.send(200, "text/plain", ok ? "OK" : "FAIL");
+      if (ok) { delay(500); ESP.restart(); }
+    },
+    []() {
+      HTTPUpload &up = gWeb.upload();
+      if (up.status == UPLOAD_FILE_START) {
+        Serial.printf("OTA: старт, ожидается %u байт\n", (unsigned)up.totalSize);
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { Update.printError(Serial); }
+      } else if (up.status == UPLOAD_FILE_WRITE) {
+        if (Update.write(up.buf, up.currentSize) != up.currentSize) { Update.printError(Serial); }
+      } else if (up.status == UPLOAD_FILE_END) {
+        if (Update.end(true)) { Serial.printf("OTA: принято %u байт\n", (unsigned)up.totalSize); }
+        else { Update.printError(Serial); }
+      }
+    });
+
+  gWeb.on("/reboot", []() {
+    gWeb.send(200, "text/plain", "rebooting");
+    delay(300);
+    ESP.restart();
   });
 
   gWeb.begin();
