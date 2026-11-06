@@ -1821,7 +1821,7 @@ bool tpPoint(int* sx, int* sy) {
 // работала болгарка на 1300 Вт). Поэтому график мощности за прошедшие часы
 // восстанавливаем из облака: там phase_a с шагом 16 секунд.
 // Один час за проход loop(), чтобы не держать цикл.
-bool cloudCall(const String& method, const String& path, String& body, int maxRaw = 3500);  // объявлена ниже
+bool cloudCall(const String& method, const String& path, String& body, int maxRaw = 3500, const String& reqBody = "");  // объявлена ниже
 extern unsigned long gCloudFailRun;   // неудач облака подряд (см. cloudTick)
 unsigned long netBudgetLeft();        // остаток сетевого бюджета прохода (см. cloudCall)
 int b64decode(const char* in, uint8_t* out, int maxOut);
@@ -3062,7 +3062,63 @@ unsigned long netBudgetLeft() {
 }
 // (connect идёт по IP с SNI-хостом, поэтому таймаут задаётся setTimeout.)
 
-bool cloudCall(const String& method, const String& path, String& body, int maxRaw) {
+
+// ---------------------------------------------------------------- запись настроек в автомат Tuya
+static String b64enc(const uint8_t* d, int n) {
+  static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  String o = "";
+  int i = 0;
+  while (i < n) {
+    uint32_t v = (uint32_t)d[i] << 16;
+    int rem = n - i;
+    if (rem > 1) v |= (uint32_t)d[i + 1] << 8;
+    if (rem > 2) v |= (uint32_t)d[i + 2];
+    o += T[(v >> 18) & 63];
+    o += T[(v >> 12) & 63];
+    o += (rem > 1) ? T[(v >> 6) & 63] : '=';
+    o += (rem > 2) ? T[v & 63] : '=';
+    i += 3;
+  }
+  return o;
+}
+
+// правка одной записи (код, вкл, значение) в base64-наборе alarm_set_*
+static String alarmPatch(const String& curB64, uint8_t code, bool en, uint16_t value) {
+  uint8_t raw[32];
+  int n = b64decode(curB64.c_str(), raw, sizeof(raw));
+  if (n < 0) n = 0;
+  bool found = false;
+  for (int i = 0; i + 3 < n; i += 4) {
+    if (raw[i] == code) {
+      raw[i + 1] = en ? 1 : 0;
+      raw[i + 2] = (uint8_t)(value >> 8);
+      raw[i + 3] = (uint8_t)(value & 0xFF);
+      found = true;
+    }
+  }
+  if (!found && n + 4 <= (int)sizeof(raw)) {
+    raw[n] = code; raw[n + 1] = en ? 1 : 0;
+    raw[n + 2] = (uint8_t)(value >> 8); raw[n + 3] = (uint8_t)(value & 0xFF);
+    n += 4;
+  }
+  return b64enc(raw, n);
+}
+
+// отправить оба alarm_set одним запросом (второй POST не влезает в бюджет прохода)
+static bool tuyaWriteAlarms(const String& a1, const String& a2) {
+  String body = "{\"commands\":[";
+  bool first = true;
+  if (a2.length()) { body += "{\"code\":\"alarm_set_2\",\"value\":\"" + a2 + "\"}"; first = false; }
+  if (a1.length()) { if (!first) body += ','; body += "{\"code\":\"alarm_set_1\",\"value\":\"" + a1 + "\"}"; }
+  body += "]}";
+  String resp;
+  bool ok = cloudCall("POST", String("/v1.0/devices/") + DEVICE_ID + "/commands", resp, 1200, body);
+  bool good = ok && resp.indexOf("\"success\":true") >= 0;
+  Serial.printf("автомат: запись -> %s (%s)\n", good ? "ok" : "fail", resp.substring(0, 120).c_str());
+  return good;
+}
+
+bool cloudCall(const String& method, const String& path, String& body, int maxRaw, const String& reqBody) {
   gCliStage = 0; gCliHttp = 0; gCliLen = 0; gCliWant = -1;
   time_t now = time(nullptr);
   if (now < 1600000000) { gCliStage = 1; return false; }   // часы не выставлены
@@ -3074,7 +3130,7 @@ bool cloudCall(const String& method, const String& path, String& body, int maxRa
   if (!sTuyaIpOk) { gCliStage = 9; return false; }
 
   String t = String((unsigned long)(now * 1000ULL % 10000000000ULL));
-  String sha = sha256hex("");
+  String sha = sha256hex(reqBody);
   String sts = method + "\n" + sha + "\n\n" + path;
 
   // Подпись по документации Tuya v1.0:
@@ -3097,7 +3153,9 @@ bool cloudCall(const String& method, const String& path, String& body, int maxRa
   req += "sign_method: HMAC-SHA256\r\n";
   if (gTuyaToken.length()) req += "access_token: " + gTuyaToken + "\r\n";
   req += "Content-Type: application/json\r\n";
+  if (reqBody.length()) req += "Content-Length: " + String(reqBody.length()) + "\r\n";
   req += "Connection: close\r\n\r\n";
+  if (reqBody.length()) req += reqBody;
 
   // IP облака НЕ кэшируем надолго: адрес короткоживущий — фоновый резолв
   // обновляет его раз в 10 минут, connect идёт по актуальному IP с SNI.
@@ -11660,6 +11718,29 @@ void webSetup() {
     if (gWeb.hasArg("pmax"))  { gProtPMax = constrain(gWeb.arg("pmax").toFloat(), 100.0f, 10000.0f); changed = true; }
     if (changed) { protSave(); Serial.println("защита: уставки сохранены"); }
 
+    // ---- запись уставок в сам автомат Tuya (работает даже если плата выключена)
+    bool applied1 = false, applied2 = false;
+    bool tried = false;
+    if (gWeb.hasArg("apply")) {
+      tried = true;
+      float vm = constrain(gWeb.arg("vmax").toFloat(), 210.0f, 300.0f);
+      float vn = constrain(gWeb.arg("vmin").toFloat(), 120.0f, 220.0f);
+      float tm = constrain(gWeb.arg("tmax").toFloat(), 40.0f, 90.0f);
+      float im = constrain(gWeb.arg("imax").toFloat(), 1.0f, 63.0f);
+      String na1 = gAlarm1, na2 = gAlarm2;
+      if (na2.length()) {
+        na2 = alarmPatch(na2, 3, true, (uint16_t)vm);
+        na2 = alarmPatch(na2, 4, true, (uint16_t)vn);
+        na2 = alarmPatch(na2, 1, true, (uint16_t)im);
+      }
+      if (na1.length()) na1 = alarmPatch(na1, 5, true, (uint16_t)tm);
+      bool sent = tuyaWriteAlarms(na1, na2);
+      if (sent) { applied1 = true; applied2 = true; gAlarm1 = na1; gAlarm2 = na2; }
+      // и в нашу локальную защиту — вторым слоем
+      gProtVMax = vm; gProtVMin = vn; gProtTMax = tm; gProtPMax = im * 230.0f;
+      protSave();
+    }
+
     String out = "{";
     out += "\"on\":" + String(gProtOn ? 1 : 0);
     out += ",\"cut\":" + String(gProtCut ? 1 : 0);
@@ -11669,6 +11750,9 @@ void webSetup() {
     out += ",\"pmax\":" + String(gProtPMax, 0);
     out += ",\"trig\":" + String((unsigned)gProtTrigN);
     out += ",\"why\":\"" + String(gProtWhy) + "\"";
+    if (tried) out += ",\"apply\":{\"a1\":" + String(applied1 ? 1 : 0) +
+                         ",\"a2\":" + String(applied2 ? 1 : 0) + "}";
+    out += ",\"a1\":\"" + gAlarm1 + "\",\"a2\":\"" + gAlarm2 + "\"";
     out += ",\"v\":" + String(gVoltage, 1);
     out += ",\"t\":" + String(gTemp, 1);
     out += ",\"p\":" + String(gPower, 0);

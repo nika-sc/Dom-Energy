@@ -197,15 +197,15 @@ svg.chart{cursor:default}
     <div class="qrow"><span>норма <b id="gostRange">207–253 В</b></span><span>замеров <b id="gostN">—</b></span></div>
   </div>
   <div class="card">
-    <div class="head"><span class="ttl">Защита реле</span><button class="qbtn" id="protOnBtn" type="button">выкл</button></div>
-    <div class="qrow"><span>перенапряжение</span><b>&gt; <input class="qin" id="pvmax" value="255"> В</b>
-      <span>просадка</span><b>&lt; <input class="qin" id="pvmin" value="190"> В</b></div>
-    <div class="qrow"><span>перегрев</span><b>&gt; <input class="qin" id="ptmax" value="60"> °C</b>
-      <span>перегруз</span><b>&gt; <input class="qin" id="ppmax" value="3500"> Вт</b></div>
-    <div class="qrow"><button class="qbtn" id="protSave" type="button">сохранить</button>
-      <button class="qbtn danger" id="protCut" type="button">отключение реле: выкл</button>
+    <div class="head"><span class="ttl">Защита реле</span><span class="legend">настройки автомата Tuya</span></div>
+    <div class="qrow"><span>перенапряжение &gt;</span><b><input class="qin" id="pvmax" value="250"> В</b>
+      <span>просадка &lt;</span><b><input class="qin" id="pvmin" value="200"> В</b></div>
+    <div class="qrow"><span>перегрев &gt;</span><b><input class="qin" id="ptmax" value="60"> °C</b>
+      <span>перегруз &gt;</span><b><input class="qin" id="pimax" value="25"> А</b></div>
+    <div class="qrow"><button class="qbtn" id="protApply" type="button">записать в автомат</button>
+      <button class="qbtn" id="protLocal" type="button">только в плату</button>
       <span>срабатываний <b id="protTrig">0</b></span></div>
-    <div class="qrow"><span>в автомате Tuya:</span><b id="tuyaS">—</b></div>
+    <div class="qrow"><span>в автомате:</span><b id="tuyaS">—</b></div>
     <div class="qrow"><span>проверка:</span><input class="qin" id="ptestv" value="270"> <span>В</span>
       <button class="qbtn" id="protTest" type="button">проверить</button><b id="ptestres">—</b></div>
   </div>
@@ -598,7 +598,10 @@ function protRender(p){
   var b=G("protOnBtn"); if(b){ b.textContent = Q.on ? "вкл" : "выкл"; b.className = "qbtn"+(Q.on?" on":""); }
   var c=G("protCut"); if(c){ c.textContent = "отключение реле: "+(Q.cut?"вкл":"выкл"); c.className="qbtn danger"+(Q.cut?" on":""); }
   txt("protTrig", p.trig||0);
-  G("pvmax").value=p.vmax; G("pvmin").value=p.vmin; G("ptmax").value=p.tmax; G("ppmax").value=p.pmax;
+  if(p.vmax) G("pvmax").value=p.vmax;
+  if(p.vmin) G("pvmin").value=p.vmin;
+  if(p.tmax) G("ptmax").value=p.tmax;
+  if(p.pmax) G("pimax").value=Math.round(p.pmax/230);
 }
 
 function protUpdate(){
@@ -617,9 +620,21 @@ function initQuality(){
     if(!Q.cut && !confirm("Разрешить плате физически отключать реле при аварии?")) return;
     protSet("cut="+(Q.cut?0:1));
   });
-  var s=G("protSave");
-  if(s) s.addEventListener("click", function(){
-    protSet("vmax="+G("pvmax").value+"&vmin="+G("pvmin").value+"&tmax="+G("ptmax").value+"&pmax="+G("ppmax").value);
+  function vals(){ return "vmax="+G("pvmax").value+"&vmin="+G("pvmin").value+
+                          "&tmax="+G("ptmax").value+"&imax="+G("pimax").value; }
+  var ap=G("protApply");
+  if(ap) ap.addEventListener("click", function(){
+    if(!confirm("Записать эти пороги в автомат Tuya? Они будут работать даже при выключенной плате.")) return;
+    var b=this; b.disabled=true; b.textContent="пишу…";
+    fetch("/protect?apply=1&"+vals(), {cache:"no-store"}).then(function(r){return r.json()}).then(function(p){
+      protRender(p);
+      b.textContent = (p.apply && (p.apply.a1||p.apply.a2)) ? "записано" : "ошибка";
+      setTimeout(function(){ b.textContent="записать в автомат"; b.disabled=false; }, 2500);
+    }).catch(function(){ b.textContent="ошибка"; b.disabled=false; });
+  });
+  var lo=G("protLocal");
+  if(lo) lo.addEventListener("click", function(){
+    fetch("/protect?"+vals(), {cache:"no-store"}).then(function(r){return r.json()}).then(protRender).catch(function(){});
   });
   var tt=G("protTest");
   if(tt) tt.addEventListener("click", function(){
@@ -748,12 +763,13 @@ function tuyaUpdate(){
       }catch(e){ return []; }
     }
     var a1=dec(j.a1||""), a2=dec(j.a2||"");
-    function name(c){
-      return ({1:"ток, А",3:"напряжение, В",4:"напряжение, В",5:"темп., °C",8:"утечка, мА"})[c] || ("код "+c);
-    }
+    // набор 2 — электрика, набор 1 — температура
+    var n2={1:"ток",3:"U макс",4:"U мин",8:"утечка"};
+    var u2={1:" А",3:" В",4:" В",8:" мА"};
+    var n1={3:"t мин",4:"t ср",5:"t макс"};
     var parts=[];
-    a2.forEach(function(x){ if(x.e) parts.push(name(x.c)+" "+x.v); });
-    a1.forEach(function(x){ if(x.e) parts.push(name(x.c)+" "+x.v); });
+    a2.forEach(function(x){ if(x.e) parts.push((n2[x.c]||("код "+x.c))+" "+x.v+(u2[x.c]||"")); });
+    a1.forEach(function(x){ if(x.e) parts.push((n1[x.c]||("код "+x.c))+" "+x.v+" °C"); });
     txt("tuyaS", parts.length ? parts.join(" · ") : "нет данных");
   }).catch(function(){});
 }
