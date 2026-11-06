@@ -4608,6 +4608,8 @@ unsigned long gPrevUp = 0;  // сколько проработала ПРОШЛ�
 RTC_DATA_ATTR static uint32_t gBootDayRtc = 0;   // 20261101 — переживает сброс
 RTC_DATA_ATTR static uint16_t gBootCntRtc = 0;   // стартов за этот день
 RTC_DATA_ATTR static uint32_t gPrevUpRtc  = 0;   // uptime прошлой загрузки, с
+RTC_NOINIT_ATTR static uint8_t gOtaMark;        // 1 = перезагрузка после OTA/reboot (не обнуляется при старте)
+static unsigned long gRestartAt = 0;   // отложенный рестарт: не из обработчика HTTP
 
 const char* rrName(int c) {
   switch (c) {
@@ -4621,6 +4623,7 @@ const char* rrName(int c) {
     case 8:  return "DEEPSLEEP";
     case 9:  return "BROWNOUT";
     case 10: return "SDIO";
+    case 11: return "OTA";
     default: return "UNKNOWN";
   }
 }
@@ -4633,8 +4636,25 @@ static void bootSavePrevUp(unsigned long v) {
   if (p.begin("boots", false)) { p.putUInt("prevUp", (uint32_t)v); p.end(); }
 }
 
+// перезагрузка по /update или /reboot: помечаем в NVS, чтобы в boots.log
+// было rr=OTA, а не PANIC
+static void bootMarkOta() {
+  gOtaMark = 1;                      // RTC_NOINIT — переживает программный сброс
+  Preferences p;
+  if (p.begin("boots", false)) { p.putUChar("otaMark", 1); p.end(); }
+}
+
 void bootReasonBegin() {
   gRRcode = (int)esp_reset_reason();
+  {
+    Preferences p;
+    if (p.begin("boots", false)) {
+      if (p.getUChar("otaMark", 0)) { p.putUChar("otaMark", 0); gRRcode = 11; }
+      else if (gOtaMark == 1) gRRcode = 11;
+      gOtaMark = 0;
+      p.end();
+    }
+  }
   gRRraw  = (int)esp_rom_get_reset_reason(0);   // «сырой» код RTC
   gPrevUp = gPrevUpRtc;
   if (gPrevUp == 0) {                            // RTC не пережил сброс питания
@@ -11276,7 +11296,7 @@ void webSetup() {
     []() {
       bool ok = !Update.hasError();
       gWeb.send(200, "text/plain", ok ? "OK" : "FAIL");
-      if (ok) { delay(500); ESP.restart(); }
+      if (ok) { gRestartAt = millis() + 300; }
     },
     []() {
       HTTPUpload &up = gWeb.upload();
@@ -11293,8 +11313,7 @@ void webSetup() {
 
   gWeb.on("/reboot", []() {
     gWeb.send(200, "text/plain", "rebooting");
-    delay(300);
-    ESP.restart();
+    gRestartAt = millis() + 200;
   });
 
   gWeb.begin();
@@ -11378,7 +11397,9 @@ void setup() {
   pickTheme();
 
   gSdOk = initSD();
-  if (gSdOk) { initHistoryMonth(); writeBootLog(); }   // /boots.log: по строке на старт
+  if (gSdOk) {
+    initHistoryMonth(); writeBootLog();   // /boots.log: по строке на старт
+  }
   Serial.printf("SD: %s, строк %d\n", gSdOk ? "ok" : "нет", gSdRows);
 
   loadToday();
@@ -11880,6 +11901,15 @@ void loop() {
         { unsigned long b0 = millis(); bootSavePrevUp(gPrevUpRtc); blkNote("nvs", millis() - b0); }
       }
     }
+  }
+
+  // отложенная перезагрузка (после /update или /reboot): не из обработчика HTTP —
+  // иначе Reset reason пишется как PANIC
+  if (gRestartAt && millis() >= gRestartAt) {
+    gRestartAt = 0;
+    bootMarkOta();
+    delay(150);
+    ESP.restart();
   }
 
   delay(5);          // 30 мс → 5 мс: цикл чаще, тач и сеть отзывчивее
