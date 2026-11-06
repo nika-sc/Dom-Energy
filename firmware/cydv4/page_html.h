@@ -195,7 +195,6 @@ svg.chart{cursor:default}
     <div class="pbar2"><i id="gostBar"></i></div>
     <div class="qrow"><span>мин <b id="gostMin">—</b></span><span>макс <b id="gostMax">—</b></span><span>вне нормы <b id="gostBad">—</b></span></div>
     <div class="qrow"><span>норма <b id="gostRange">207–253 В</b></span><span>замеров <b id="gostN">—</b></span></div>
-    <div class="qrow"><span>частота сети:</span><b id="gostFreq">нет датчика</b></div>
   </div>
   <div class="card">
     <div class="head"><span class="ttl">Защита реле</span><button class="qbtn" id="protOnBtn" type="button">выкл</button></div>
@@ -206,6 +205,7 @@ svg.chart{cursor:default}
     <div class="qrow"><button class="qbtn" id="protSave" type="button">сохранить</button>
       <button class="qbtn danger" id="protCut" type="button">отключение реле: выкл</button>
       <span>срабатываний <b id="protTrig">0</b></span></div>
+    <div class="qrow"><span>в автомате Tuya:</span><b id="tuyaS">—</b></div>
     <div class="qrow"><span>проверка:</span><input class="qin" id="ptestv" value="270"> <span>В</span>
       <button class="qbtn" id="protTest" type="button">проверить</button><b id="ptestres">—</b></div>
   </div>
@@ -568,7 +568,6 @@ function gostUpdate(){
     txt("gostBad", num(g.badPct,2)+" %");
     txt("gostN", g.n);
     txt("gostRange", num(g.lo,0)+"–"+num(g.hi,0)+" В");
-    txt("gostFreq", g.freq ? (num(g.freq,1)+" Гц") : "нет датчика");
     var bar=G("gostBar");
     if(bar){ bar.style.width = Math.min(100, Math.max(0, 100 - Math.min(100, g.badPct*10)))+"%";
              bar.style.background = g.badPct>5 ? "var(--c4)" : "var(--c2)"; }
@@ -735,7 +734,31 @@ function initSched(){
   schLoad();
 }
 
-loadDays(); poll(); setInterval(poll,5000); initQuality(); initSched();
+
+function tuyaUpdate(){
+  fetch("/tuya", {cache:"no-store"}).then(function(r){return r.json()}).then(function(j){
+    function dec(b64){
+      try{
+        var s = atob(b64), out=[];
+        for(var i=0;i+3<s.length;i+=4){
+          out.push({c:s.charCodeAt(i), e:s.charCodeAt(i+1),
+                    v:(s.charCodeAt(i+2)<<8)|s.charCodeAt(i+3)});
+        }
+        return out;
+      }catch(e){ return []; }
+    }
+    var a1=dec(j.a1||""), a2=dec(j.a2||"");
+    function name(c){
+      return ({1:"ток, А",3:"напряжение, В",4:"напряжение, В",5:"темп., °C",8:"утечка, мА"})[c] || ("код "+c);
+    }
+    var parts=[];
+    a2.forEach(function(x){ if(x.e) parts.push(name(x.c)+" "+x.v); });
+    a1.forEach(function(x){ if(x.e) parts.push(name(x.c)+" "+x.v); });
+    txt("tuyaS", parts.length ? parts.join(" · ") : "нет данных");
+  }).catch(function(){});
+}
+
+loadDays(); poll(); setInterval(poll,5000); initQuality(); initSched(); tuyaUpdate(); setInterval(tuyaUpdate, 60000);
 </script>
 </body>
 </html>

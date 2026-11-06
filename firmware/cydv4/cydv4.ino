@@ -2525,6 +2525,7 @@ static bool  gProtCut   = false;   // разрешено физически от
 static unsigned long gProtCool = 0;      // пауза после срабатывания
 static unsigned long gProtCheckAt = 0;
 static uint16_t gProtTrigN = 0;
+static String gAlarm1, gAlarm2;   // alarm_set_1/2 из автомата Tuya (base64)
 static char gProtWhy[40] = "";
 
 static bool sInSag = false, sInSwell = false;
@@ -3285,6 +3286,9 @@ bool cloudStatus() {
   }
 
   // напряжение и мощность в одной строке base64
+  if (cloudValue(body, "alarm_set_1", v)) gAlarm1 = v;
+  if (cloudValue(body, "alarm_set_2", v)) gAlarm2 = v;
+
   if (cloudValue(body, "phase_a", v)) {
     uint8_t raw[16];
     int n = b64decode(v.c_str(), raw, sizeof(raw));
@@ -11607,8 +11611,17 @@ void webSetup() {
     out += ",\"bad\":" + String((unsigned long)sVbad);
     out += ",\"badPct\":" + String(bad, 2);
     out += ",\"events\":" + String((unsigned)sVevCnt);
-    out += ",\"freq\":null,\"freqNote\":\"нет датчика частоты\"";
+    out += ",\"tuya\":\"см. /tuya\"";
     out += "}";
+    gWeb.send(200, "application/json; charset=utf-8", out);
+  });
+
+  gWeb.on("/tuya", []() {
+    String out = "{\"a1\":\"" + gAlarm1 + "\",\"a2\":\"" + gAlarm2 + "\"";
+    out += ",\"temp\":" + String(gTemp, 1);
+    out += ",\"relay\":" + String(gRelay ? 1 : 0);
+    out += ",\"e\":" + String(gEnergy, 2);
+    out += ",\"note\":\"настройки автомата Tuya (alarm_set_1/2)\"}";
     gWeb.send(200, "application/json; charset=utf-8", out);
   });
 
