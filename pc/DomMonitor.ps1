@@ -1971,6 +1971,8 @@ function Show-Page($key) {
 
     if ($key -eq 'log')    { Layout-Log }
 
+    if ($key -eq 'prot')   { Layout-Prot; Load-Prot }
+
 }
 
 
@@ -4174,6 +4176,131 @@ function Layout-Flash {
 }
 
 
+
+
+# ============================================================================
+#  ВКЛАДКА «ЗАЩИТА» — те же уставки, что в веб-морде (автомат Tuya + плата)
+# ============================================================================
+$pgProt = New-TabPage
+Add-Page 'prot' $pgProt
+
+$script:protFields = @{}
+$protDefs = @(
+    @{ k = 'vmax'; t = 'Перенапряжение, В'; d = '250' },
+    @{ k = 'vmin'; t = 'Просадка, В';       d = '200' },
+    @{ k = 'tmax'; t = 'Перегрев, °C';      d = '60'  },
+    @{ k = 'imax'; t = 'Перегруз, А';       d = '25'  }
+)
+foreach ($d in $protDefs) {
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = $d.t
+    $lbl.AutoSize = $true
+    $lbl.ForeColor = C $script:CLR.dim
+    $lbl.Tag = $d.k
+    $pgProt.Controls.Add($lbl)
+    $tb = New-Object System.Windows.Forms.TextBox
+    $tb.Text = $d.d
+    $tb.Width = 80
+    $tb.BackColor = C '#0F1218'
+    $tb.ForeColor = C '#D6E2F5'
+    $pgProt.Controls.Add($tb)
+    $script:protFields[$d.k + '_lbl'] = $lbl
+    $script:protFields[$d.k] = $tb
+}
+
+$script:lblProtInfo = New-Object System.Windows.Forms.Label
+$script:lblProtInfo.AutoSize = $false
+$script:lblProtInfo.ForeColor = C '#9FB2CC'
+$pgProt.Controls.Add($script:lblProtInfo)
+
+$btnProtRead  = New-Btn $pgProt 'Прочитать'          '#2E4A6B' '#FFFFFF' 150 32
+$btnProtApply = New-Btn $pgProt 'Записать в автомат' '#1F7A46' '#FFFFFF' 200 32
+$btnProtLocal = New-Btn $pgProt 'Только в плату'     '#2A3240' $script:CLR.text 170 32
+
+function Layout-Prot {
+    if (-not $script:uiReady) { return }
+    $w = $pgProt.ClientSize.Width
+    $x = 24; $y = 24
+    foreach ($k in @('vmax', 'vmin', 'tmax', 'imax')) {
+        $lbl = $script:protFields[$k + '_lbl']
+        $tb  = $script:protFields[$k]
+        $lbl.Location = New-Object System.Drawing.Point($x, ($y + 4))
+        $tb.Location  = New-Object System.Drawing.Point(($x + 170), $y)
+        $y += 38
+    }
+    $btnProtRead.Location  = New-Object System.Drawing.Point($x, ($y + 10))
+    $btnProtApply.Location = New-Object System.Drawing.Point(($x + 165), ($y + 10))
+    $btnProtLocal.Location = New-Object System.Drawing.Point(($x + 380), ($y + 10))
+    $script:lblProtInfo.Location = New-Object System.Drawing.Point($x, ($y + 56))
+    $script:lblProtInfo.Size = New-Object System.Drawing.Size(([Math]::Max(400, $w - 2 * $x)), 120)
+}
+
+function Decode-Prot($b64) {
+    try {
+        $bytes = [Convert]::FromBase64String($b64)
+    } catch { return @() }
+    $out = @()
+    for ($i = 0; $i + 3 -lt $bytes.Length; $i += 4) {
+        $out += [pscustomobject]@{ code = $bytes[$i]; en = $bytes[$i+1]; val = (($bytes[$i+2] -shl 8) -bor $bytes[$i+3]) }
+    }
+    return $out
+}
+
+function Load-Prot {
+    $ip = [string]$script:cfg.boardIp
+    try {
+        $p = Invoke-RestMethod ("http://" + $ip + "/protect") -TimeoutSec 10
+        if ($p.vmax) { $script:protFields['vmax'].Text = [string][int]$p.vmax }
+        if ($p.vmin) { $script:protFields['vmin'].Text = [string][int]$p.vmin }
+        if ($p.tmax) { $script:protFields['tmax'].Text = [string][int]$p.tmax }
+        if ($p.pmax) { $script:protFields['imax'].Text = [string][math]::Round([double]$p.pmax / 230) }
+        $lines = @()
+        $lines += ('состояние: ' + $(if ($p.on -eq 1) { 'включена' } else { 'выключена' }) +
+                   ' · отключение реле: ' + $(if ($p.cut -eq 1) { 'разрешено' } else { 'запрещено' }) +
+                   ' · срабатываний: ' + $p.trig)
+        $a2 = Decode-Prot $p.a2
+        $a1 = Decode-Prot $p.a1
+        $map2 = @{ 1 = 'ток, А'; 3 = 'U макс, В'; 4 = 'U мин, В'; 8 = 'утечка, мА' }
+        $map1 = @{ 3 = 't мин, °C'; 4 = 't ср, °C'; 5 = 't макс, °C' }
+        $txt2 = @(); foreach ($r in $a2) { if ($r.en) { $txt2 += (($map2[[int]$r.code]) + ' ' + $r.val) } }
+        $txt1 = @(); foreach ($r in $a1) { if ($r.en) { $txt1 += (($map1[[int]$r.code]) + ' ' + $r.val) } }
+        $lines += ('в автомате: ' + (($txt2 + $txt1) -join ' · '))
+        $script:lblProtInfo.Text = ($lines -join "`r`n")
+        Add-Log 'защита: настройки прочитаны с платы' 'ok'
+    } catch {
+        Add-Log ('защита: не удалось прочитать — ' + $_.Exception.Message) 'err'
+    }
+}
+
+function Send-Prot([bool]$apply) {
+    $ip = [string]$script:cfg.boardIp
+    $q = '/protect?' + $(if ($apply) { 'apply=1&' } else { '' }) +
+         'vmax=' + $script:protFields['vmax'].Text.Trim() +
+         '&vmin=' + $script:protFields['vmin'].Text.Trim() +
+         '&tmax=' + $script:protFields['tmax'].Text.Trim() +
+         '&imax=' + $script:protFields['imax'].Text.Trim()
+    try {
+        $r = Invoke-RestMethod ("http://" + $ip + $q) -TimeoutSec 90
+        if ($apply) {
+            $ok = ($r.apply -and ($r.apply.a1 -eq 1 -or $r.apply.a2 -eq 1))
+            Add-Log ('защита: записано в автомат — ' + $(if ($ok) { 'успешно' } else { 'не подтверждено' })) $(if ($ok) { 'ok' } else { 'err' })
+        } else {
+            Add-Log 'защита: записано только в плату' 'ok'
+        }
+        Load-Prot
+    } catch {
+        Add-Log ('защита: ошибка записи — ' + $_.Exception.Message) 'err'
+    }
+}
+
+$btnProtRead.Add_Click({ Load-Prot })
+$btnProtApply.Add_Click({
+    $res = [System.Windows.Forms.MessageBox]::Show(
+        "Записать пороги в автомат Tuya?`r`n`r`nОни будут срабатывать даже при выключенной плате.",
+        'Защита', 'YesNo', 'Warning')
+    if ($res -eq 'Yes') { Send-Prot $true }
+})
+$btnProtLocal.Add_Click({ Send-Prot $false })
 
 # ============================================================================
 
@@ -6596,6 +6723,8 @@ $null = New-NavButton 'flash'  'Прошивка'   418
 
 $null = New-NavButton 'log'    'Журнал'     554
 
+$null = New-NavButton 'prot'   'Защита'     690
+
 
 
 $script:navBtn['screen'].Add_Click({ Show-Page 'screen'; Add-Log 'вкладка: Экран' })
@@ -6607,6 +6736,8 @@ $script:navBtn['hist'].Add_Click({ Show-Page 'hist'; Request-Day $script:histSel
 $script:navBtn['flash'].Add_Click({ Show-Page 'flash'; Add-Log 'вкладка: Прошивка' })
 
 $script:navBtn['log'].Add_Click({ Show-Page 'log'; Add-Log 'вкладка: Журнал' })
+
+$script:navBtn['prot'].Add_Click({ Show-Page 'prot'; Add-Log 'вкладка: Защита' })
 
 
 
