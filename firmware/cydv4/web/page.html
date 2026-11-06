@@ -102,7 +102,7 @@ svg.chart{cursor:default}
 .build{font-size:10px;color:var(--dim);text-align:center;margin-top:14px;opacity:.7}
 
 .qgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}@media(max-width:820px){.qgrid{grid-template-columns:1fr}}.qrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--mut);padding:6px 0}.qrow b{color:var(--ink)}.qbig{font-size:26px;font-weight:800;letter-spacing:-.03em;line-height:1.1}.qbig small{font-size:12px;color:var(--mut);font-weight:600;margin-left:3px}.pbar2{height:8px;border-radius:99px;background:var(--grid);overflow:hidden;margin-top:6px}.pbar2 i{display:block;height:100%;width:0;background:var(--c1);border-radius:99px}.qbtn{background:var(--card);border:1px solid var(--ln);color:var(--ink);border-radius:9px;padding:4px 10px;cursor:pointer;font:inherit;font-size:12px}.qbtn.on{border-color:var(--c2);color:var(--c2);font-weight:700}.qbtn.danger.on{border-color:var(--red);color:var(--red)}.qin{width:64px;background:var(--card);border:1px solid var(--ln);color:var(--ink);border-radius:8px;padding:3px 7px;font:inherit;font-size:12px;text-align:right}.evlist{max-height:190px;overflow:auto;font-size:12px;color:var(--mut)}.ev{border-bottom:1px solid var(--ln);padding:5px 0;display:flex;gap:8px}.ev:last-child{border-bottom:0}.ev .t{color:var(--ink);font-variant-numeric:tabular-nums}.ev .sag{color:var(--c4)} .ev .swl{color:var(--red)}
-</style>
+.sch{font-size:12.5px;color:var(--mut)}.sch .r{display:flex;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid var(--ln)}.sch .r:last-child{border-bottom:0}.sch .t{color:var(--ink);font-weight:700;font-variant-numeric:tabular-nums}.sch .days{font-size:11px}</style>
 </head>
 <body>
 <div class="wrap">
@@ -213,6 +213,20 @@ svg.chart{cursor:default}
   </div>
   <svg class="chart" id="chW" viewBox="0 0 900 150" preserveAspectRatio="none" style="display:none"></svg>
   <div class="evlist" id="evList"><div class="ev"><span>пока событий нет</span></div></div>
+</div>
+
+<div class="card" style="margin-top:12px">
+  <div class="head"><span class="ttl">Планировщик реле</span>
+    <span class="legend"><span class="qbtn danger" id="allowBtn" type="button">выключение: запрещено</span></span>
+  </div>
+  <div class="sch" id="schList"><div class="r"><span>правил пока нет</span></div></div>
+  <div class="qrow" style="margin-top:8px">
+    <input class="qin" id="schTime" value="07:30" style="width:76px">
+    <select class="qbtn" id="schAct"><option value="on">включить</option><option value="off">выключить</option></select>
+    <input class="qin" id="schDays" value="127" style="width:56px" title="маска дней: 127 = все, 31 = пн-пт">
+    <button class="qbtn" id="schAdd" type="button">добавить</button>
+    <span class="small">маска дней: 127 — все, 31 — пн–пт, 96 — сб+вс</span>
+  </div>
 </div>
 
 <div class="two">
@@ -651,7 +665,72 @@ function renderWeek(days, sums){
   G("chW").innerHTML=s;
 }
 
-loadDays(); poll(); setInterval(poll,5000); initQuality();
+
+var SCH = {cnt:0, rules:[], allowOff:0};
+
+function schRender(j){
+  if(!j) return;
+  SCH = j;
+  var box=G("schList"); if(!box) return;
+  var b=G("allowBtn");
+  if(b){ b.textContent = "выключение: " + (j.allowOff?"разрешено":"запрещено");
+         b.className = "qbtn danger" + (j.allowOff?" on":""); }
+  if(!j.rules || !j.rules.length){ box.innerHTML='<div class="r"><span>правил пока нет</span></div>'; return; }
+  var html="";
+  for(var i=0;i<j.rules.length;i++){
+    var r=j.rules[i];
+    var hh=("0"+r.h).slice(-2)+":"+("0"+r.m).slice(-2);
+    html += '<div class="r"><span class="t">'+hh+'</span><span>'+((r.on)?"включить":"выключить")+'</span>'+
+            '<span class="days">дни '+r.days+'</span><span class="days">'+(r.en?"вкл":"выкл")+'</span>'+
+            '<span style="margin-left:auto"><button class="qbtn" data-del="'+i+'">удалить</button></span></div>';
+  }
+  box.innerHTML=html;
+  box.querySelectorAll("button[data-del]").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var rule=SCH.rules[+this.getAttribute("data-del")];
+      SCH.rules.splice(+this.getAttribute("data-del"),1);
+      schSave();
+    });
+  });
+}
+
+function schSave(){
+  var parts=[];
+  for(var i=0;i<SCH.rules.length;i++){
+    var r=SCH.rules[i];
+    parts.push(("0"+r.h).slice(-2)+":"+("0"+r.m).slice(-2)+","+(r.on?"on":"off")+","+r.days+","+(r.en?1:0));
+  }
+  fetch("/sched?set="+encodeURIComponent(parts.join(";")), {cache:"no-store"})
+    .then(function(r){return r.json()}).then(schRender).catch(function(){});
+}
+
+function schLoad(){
+  fetch("/sched", {cache:"no-store"}).then(function(r){return r.json()}).then(schRender).catch(function(){});
+}
+
+function initSched(){
+  var b=G("allowBtn");
+  if(b) b.addEventListener("click", function(){
+    if(!SCH.allowOff && !confirm("Разрешить плате выключать реле по расписанию и по команде из Home Assistant?")) return;
+    fetch("/sched?allow="+(SCH.allowOff?0:1), {cache:"no-store"}).then(function(r){return r.json()}).then(schRender).catch(function(){});
+  });
+  var a=G("schAdd");
+  if(a) a.addEventListener("click", function(){
+    var tv=(G("schTime").value||"").trim();
+    var m=/^(\d{1,2}):(\d{2})$/.exec(tv);
+    if(!m){ alert("время в формате ЧЧ:ММ"); return; }
+    var h=+m[1], mi=+m[2];
+    if(h>23||mi>59){ alert("неверное время"); return; }
+    var act = G("schAct").value === "on";
+    if(!act && !SCH.allowOff){ if(!confirm("Выключение запрещено. Разрешить?")) return;
+      fetch("/sched?allow=1",{cache:"no-store"}).then(function(){ SCH.allowOff=1; }); }
+    SCH.rules.push({h:h,m:mi,on:act?1:0,days:(+G("schDays").value||127),en:1});
+    schSave();
+  });
+  schLoad();
+}
+
+loadDays(); poll(); setInterval(poll,5000); initQuality(); initSched();
 </script>
 </body>
 </html>

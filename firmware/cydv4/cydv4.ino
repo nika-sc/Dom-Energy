@@ -2614,6 +2614,115 @@ static void protCheck() {
   }
 }
 
+
+// ============================================================================
+//  ПЛАНИРОВЩИК РЕЛЕ
+// ----------------------------------------------------------------------------
+//  До 8 правил: время ЧЧ:ММ, действие (вкл/выкл), маска дней, включено ли правило.
+//  Правило «выкл» сработает только если разрешено отключение (allowOff).
+// ============================================================================
+#define SCH_N 8
+struct SchRule { uint8_t h, m, on, days, en; };
+static SchRule sSch[SCH_N];
+static uint8_t  sSchCnt = 0;
+static bool     gAllowOff = false;   // разрешено ли выключать реле (в т.ч. MQTT relay_off)
+static uint32_t sSchFired = 0;       // ключ последней минуты, чтобы не сработать дважды
+
+static String schDump() {
+  String s = "";
+  for (uint8_t i = 0; i < sSchCnt; i++) {
+    if (i) s += ';';
+    char b[40];
+    snprintf(b, sizeof(b), "%02u:%02u,%s,%u,%u", (unsigned)sSch[i].h, (unsigned)sSch[i].m,
+             sSch[i].on ? "on" : "off", (unsigned)sSch[i].days, (unsigned)sSch[i].en);
+    s += b;
+  }
+  return s;
+}
+
+static bool schParse(const String& src) {
+  sSchCnt = 0;
+  int start = 0;
+  while (start < (int)src.length() && sSchCnt < SCH_N) {
+    int semi = src.indexOf(';', start);
+    if (semi < 0) semi = src.length();
+    String one = src.substring(start, semi);
+    start = semi + 1;
+    one.trim();
+    if (!one.length()) continue;
+    int c1 = one.indexOf(',');
+    int c2 = one.indexOf(',', c1 + 1);
+    int c3 = one.indexOf(',', c2 + 1);
+    if (c1 < 0 || c2 < 0 || c3 < 0) continue;
+    String hhmm = one.substring(0, c1); hhmm.trim();
+    String act  = one.substring(c1 + 1, c2); act.trim();
+    int days = one.substring(c2 + 1, c3).toInt();
+    int en   = one.substring(c3 + 1).toInt();
+    int colon = hhmm.indexOf(':');
+    if (colon < 0) continue;
+    int h = hhmm.substring(0, colon).toInt();
+    int m = hhmm.substring(colon + 1).toInt();
+    if (h < 0 || h > 23 || m < 0 || m > 59) continue;
+    sSch[sSchCnt].h = (uint8_t)h;
+    sSch[sSchCnt].m = (uint8_t)m;
+    sSch[sSchCnt].on = act.equalsIgnoreCase("on") ? 1 : 0;
+    sSch[sSchCnt].days = (uint8_t)constrain(days, 0, 127);
+    sSch[sSchCnt].en = en ? 1 : 0;
+    sSchCnt++;
+  }
+  return true;
+}
+
+static void schSave() {
+  Preferences p;
+  if (!p.begin("prot", false)) return;
+  p.putString("sched", schDump());
+  p.putBool("allowOff", gAllowOff);
+  p.end();
+}
+
+static void schLoad() {
+  Preferences p;
+  if (!p.begin("prot", true)) return;
+  String s = p.getString("sched", "");
+  gAllowOff = p.getBool("allowOff", false);
+  p.end();
+  if (s.length()) schParse(s);
+}
+
+// раз в 20 с проверяем минуту; срабатываем один раз на минуту
+static void schTick() {
+  static unsigned long last = 0;
+  unsigned long now = millis();
+  if (now - last < 20000UL) return;
+  last = now;
+  if (!sSchCnt) return;
+  struct tm ti;
+  if (!getLocalTime(&ti, 5)) return;
+  uint32_t key = (uint32_t)(ti.tm_yday * 1440 + ti.tm_hour * 60 + ti.tm_min);
+  if (key == sSchFired) return;
+  int wd = (ti.tm_wday + 6) % 7;              // 0 = понедельник
+  uint8_t mask = (uint8_t)(1 << wd);
+  for (uint8_t i = 0; i < sSchCnt; i++) {
+    SchRule& r = sSch[i];
+    if (!r.en) continue;
+    if (r.h != ti.tm_hour || r.m != ti.tm_min) continue;
+    if (r.days && !(r.days & mask)) continue;
+    if (!r.on && !gAllowOff) {
+      Serial.println("расписание: выключение запрещено (allowOff=0)");
+      mqttPublish("result", "schedule_off_blocked", false);
+      continue;
+    }
+    bool ok = tuyaRelaySet(r.on ? true : false);
+    sSchFired = key;
+    Serial.printf("расписание: %02u:%02u -> %s (%s)\n", (unsigned)r.h, (unsigned)r.m,
+                  r.on ? "on" : "off", ok ? "ok" : "fail");
+    mqttPublish("result", ok ? (r.on ? "schedule_on" : "schedule_off") : "schedule_fail", false);
+    mqttPublishState(true);
+    break;
+  }
+}
+
 static void protSave() {
   Preferences p;
   if (!p.begin("prot", false)) return;
@@ -9295,10 +9404,17 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   cmd[k] = 0;
   Serial.printf("MQTT: команда \"%s\" из %s\n", cmd, topic);
 
-  // Выключение реле заблокировано НАМЕРЕННО: удалённый «off» обесточил бы дом.
+  // Выключение реле разрешено ТОЛЬКО если владелец включил allowOff в настройках.
   if (strcmp(cmd, "relay_off") == 0) {
-    mqttPublish("result", "off_blocked", false);
-    Serial.println("MQTT: relay_off заблокирован (off_blocked)");
+    if (!gAllowOff) {
+      mqttPublish("result", "off_blocked", false);
+      Serial.println("MQTT: relay_off заблокирован (allowOff=0)");
+      return;
+    }
+    bool ok = tuyaRelaySet(false);
+    mqttPublish("result", ok ? "relay_off" : "relay_off_fail", false);
+    Serial.printf("MQTT: relay_off -> %s\n", ok ? "ok" : "fail");
+    mqttPublishState(true);
     return;
   }
   if (strcmp(cmd, "relay_on") == 0) {
@@ -9324,6 +9440,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   if (strncmp(cmd, "pmax=", 5) == 0) { gProtPMax = constrain((float)atof(cmd + 5), 100.0f, 10000.0f); protSave(); mqttPublish("result", "pmax_ok", false); return; }
   if (strcmp(cmd, "protect_on") == 0)  { gProtOn = true;  protSave(); mqttPublish("result", "protect_on", false);  return; }
   if (strcmp(cmd, "protect_off") == 0) { gProtOn = false; protSave(); mqttPublish("result", "protect_off", false); return; }
+  if (strcmp(cmd, "allow_off_on") == 0)  { gAllowOff = true;  schSave(); mqttPublish("result", "allow_off_on", false);  return; }
+  if (strcmp(cmd, "allow_off_off") == 0) { gAllowOff = false; schSave(); mqttPublish("result", "allow_off_off", false); return; }
+  if (strncmp(cmd, "sched=", 6) == 0)    { schParse(String(cmd + 6)); schSave(); mqttPublish("result", "sched_ok", false); return; }
 
   mqttPublish("result", "unknown", false);
 }
@@ -11493,6 +11612,31 @@ void webSetup() {
     gWeb.send(200, "application/json; charset=utf-8", out);
   });
 
+  gWeb.on("/sched", []() {
+    if (gWeb.hasArg("set")) {
+      schParse(gWeb.arg("set"));
+      schSave();
+      Serial.printf("расписание: сохранено, правил %u\n", (unsigned)sSchCnt);
+    }
+    if (gWeb.hasArg("allow")) {
+      gAllowOff = gWeb.arg("allow").toInt() != 0;
+      schSave();
+    }
+    String out = "{\"cnt\":" + String((unsigned)sSchCnt);
+    out += ",\"allowOff\":" + String(gAllowOff ? 1 : 0);
+    out += ",\"rules\":[";
+    for (uint8_t i = 0; i < sSchCnt; i++) {
+      if (i) out += ',';
+      char b[64];
+      snprintf(b, sizeof(b), "{\"h\":%u,\"m\":%u,\"on\":%u,\"days\":%u,\"en\":%u}",
+               (unsigned)sSch[i].h, (unsigned)sSch[i].m, (unsigned)sSch[i].on,
+               (unsigned)sSch[i].days, (unsigned)sSch[i].en);
+      out += b;
+    }
+    out += "]}";
+    gWeb.send(200, "application/json; charset=utf-8", out);
+  });
+
   gWeb.on("/protect", []() {
     bool changed = false;
     if (gWeb.hasArg("on"))    { gProtOn   = gWeb.arg("on").toInt() != 0; changed = true; }
@@ -11560,6 +11704,7 @@ void setup() {
 
   dispLoad();          // яркость/вкл из NVS — до экрана, чтобы ночью не вспыхнуть
   protLoad();          // уставки защиты из NVS
+  schLoad();           // правила планировщика
   dispPwmBegin();      // ШИМ подсветки до tft.init()
   ledInit();           // синий на время загрузки
   gLedBootUntil = millis() + 3000;
@@ -12115,7 +12260,18 @@ void loop() {
     }
   }
 
+  // раз в секунду снимаем текущее напряжение в статистику и в события
+  // (напряжение приходит и от реле, и из облака — считаем по факту значения)
+  {
+    static unsigned long sLastV = 0;
+    if (millis() - sLastV > 1000UL) {
+      sLastV = millis();
+      if (gVoltage > 80 && gVoltage < 400) volQuality(gVoltage);
+    }
+  }
+
   protCheck();      // защита по напряжению/температуре/мощности
+  schTick();        // планировщик реле
 
   // отложенная перезагрузка (после /update или /reboot): не из обработчика HTTP —
   // иначе Reset reason пишется как PANIC
