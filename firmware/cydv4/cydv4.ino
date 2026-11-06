@@ -9318,10 +9318,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
     return;
   }
   // уставки защиты из Home Assistant: vmax=255, tmax=60, protect_on ...
-  if (strncmp(cmd, "vmax=", 5) == 0) { gProtVMax = atof(cmd + 5); protSave(); mqttPublish("result", "vmax_ok", false); return; }
-  if (strncmp(cmd, "vmin=", 5) == 0) { gProtVMin = atof(cmd + 5); protSave(); mqttPublish("result", "vmin_ok", false); return; }
-  if (strncmp(cmd, "tmax=", 5) == 0) { gProtTMax = atof(cmd + 5); protSave(); mqttPublish("result", "tmax_ok", false); return; }
-  if (strncmp(cmd, "pmax=", 5) == 0) { gProtPMax = atof(cmd + 5); protSave(); mqttPublish("result", "pmax_ok", false); return; }
+  if (strncmp(cmd, "vmax=", 5) == 0) { gProtVMax = constrain((float)atof(cmd + 5), 210.0f, 300.0f); protSave(); mqttPublish("result", "vmax_ok", false); return; }
+  if (strncmp(cmd, "vmin=", 5) == 0) { gProtVMin = constrain((float)atof(cmd + 5), 120.0f, 220.0f); protSave(); mqttPublish("result", "vmin_ok", false); return; }
+  if (strncmp(cmd, "tmax=", 5) == 0) { gProtTMax = constrain((float)atof(cmd + 5), 40.0f, 90.0f);   protSave(); mqttPublish("result", "tmax_ok", false); return; }
+  if (strncmp(cmd, "pmax=", 5) == 0) { gProtPMax = constrain((float)atof(cmd + 5), 100.0f, 10000.0f); protSave(); mqttPublish("result", "pmax_ok", false); return; }
   if (strcmp(cmd, "protect_on") == 0)  { gProtOn = true;  protSave(); mqttPublish("result", "protect_on", false);  return; }
   if (strcmp(cmd, "protect_off") == 0) { gProtOn = false; protSave(); mqttPublish("result", "protect_off", false); return; }
 
@@ -11497,10 +11497,10 @@ void webSetup() {
     bool changed = false;
     if (gWeb.hasArg("on"))    { gProtOn   = gWeb.arg("on").toInt() != 0; changed = true; }
     if (gWeb.hasArg("cut"))   { gProtCut  = gWeb.arg("cut").toInt() != 0; changed = true; }
-    if (gWeb.hasArg("vmax"))  { gProtVMax = gWeb.arg("vmax").toFloat(); changed = true; }
-    if (gWeb.hasArg("vmin"))  { gProtVMin = gWeb.arg("vmin").toFloat(); changed = true; }
-    if (gWeb.hasArg("tmax"))  { gProtTMax = gWeb.arg("tmax").toFloat(); changed = true; }
-    if (gWeb.hasArg("pmax"))  { gProtPMax = gWeb.arg("pmax").toFloat(); changed = true; }
+    if (gWeb.hasArg("vmax"))  { gProtVMax = constrain(gWeb.arg("vmax").toFloat(), 210.0f, 300.0f); changed = true; }
+    if (gWeb.hasArg("vmin"))  { gProtVMin = constrain(gWeb.arg("vmin").toFloat(), 120.0f, 220.0f); changed = true; }
+    if (gWeb.hasArg("tmax"))  { gProtTMax = constrain(gWeb.arg("tmax").toFloat(), 40.0f, 90.0f);    changed = true; }
+    if (gWeb.hasArg("pmax"))  { gProtPMax = constrain(gWeb.arg("pmax").toFloat(), 100.0f, 10000.0f); changed = true; }
     if (changed) { protSave(); Serial.println("защита: уставки сохранены"); }
 
     String out = "{";
