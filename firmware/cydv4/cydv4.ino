@@ -2504,6 +2504,140 @@ int b64decode(const char* in, uint8_t* out, int maxOut) {
 }
 
 // Разбирает DP 6: возвращает true, если получилось
+
+// ============================================================================
+//  КАЧЕСТВО НАПРЯЖЕНИЯ: провалы/всплески + защита
+// ----------------------------------------------------------------------------
+//  Напряжение приходит от реле примерно раз в секунду, поэтому события
+//  фиксируются с точностью до этого шага (не микросекунды — датчика на плате нет).
+// ============================================================================
+#define VEV_N 64
+struct VEv { uint32_t t; uint16_t v; uint16_t sec; uint8_t kind; };  // kind 0 провал, 1 всплеск
+static VEv sVev[VEV_N];
+static uint8_t sVevHead = 0, sVevCnt = 0;
+
+static bool  gProtOn    = false;   // защита включена (по умолчанию выключена)
+static float gProtVMax  = 255.0f;
+static float gProtVMin  = 190.0f;
+static float gProtTMax  = 60.0f;
+static float gProtPMax  = 3500.0f;
+static bool  gProtCut   = false;   // разрешено физически отключать реле
+static unsigned long gProtCool = 0;      // пауза после срабатывания
+static unsigned long gProtCheckAt = 0;
+static uint16_t gProtTrigN = 0;
+static char gProtWhy[40] = "";
+
+static bool sInSag = false, sInSwell = false;
+static unsigned long sSagAt = 0, sSwellAt = 0;
+static uint16_t sSagMin = 0, sSwellMax = 0;
+
+static void vevPush(uint8_t kind, uint16_t v, uint16_t sec, uint32_t t) {
+  sVev[sVevHead].t = t;
+  sVev[sVevHead].v = v;
+  sVev[sVevHead].sec = sec;
+  sVev[sVevHead].kind = kind;
+  sVevHead = (uint8_t)((sVevHead + 1) % VEV_N);
+  if (sVevCnt < VEV_N) sVevCnt++;
+  // строка в /voltage.log на карте, чтобы события пережили перезагрузку
+  if (gSdOk) {
+    File f = SD.open("/voltage.log", FILE_APPEND);
+    if (f) {
+      struct tm ti;
+      char when[24] = "-";
+      if (getLocalTime(&ti, 20)) snprintf(when, sizeof(when), "%04d-%02d-%02d %02d:%02d:%02d",
+                                          ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday,
+                                          ti.tm_hour, ti.tm_min, ti.tm_sec);
+      f.printf("%s %s %u В %u с\n", when, kind ? "ВСПЛЕСК" : "ПРОВАЛ", (unsigned)v, (unsigned)sec);
+      f.close();
+    }
+  }
+  Serial.printf("качество: %s %u В, %u с\n", kind ? "всплеск" : "провал", (unsigned)v, (unsigned)sec);
+}
+
+static double sVSum = 0;
+static uint32_t sVn = 0, sVbad = 0;
+static float sVmin = 999, sVmax = 0;
+#define GOST_LO 207.0f
+#define GOST_HI 253.0f
+
+static void volQuality(float v) {
+  unsigned long now = millis();
+  // статистика для отчёта по ГОСТ 32144 (п. 4.2.2: 207–253 В)
+  sVSum += v; sVn++;
+  if (v < sVmin) sVmin = v;
+  if (v > sVmax) sVmax = v;
+  if (v < GOST_LO || v > GOST_HI) sVbad++;
+  if (v < gProtVMin) {
+    if (!sInSag) { sInSag = true; sSagAt = now; sSagMin = (uint16_t)v; }
+    else if (v < sSagMin) sSagMin = (uint16_t)v;
+  } else if (sInSag) {
+    sInSag = false;
+    uint16_t dur = (uint16_t)((now - sSagAt) / 1000UL);
+    if (dur < 1) dur = 1;
+    if (dur <= 600) vevPush(0, sSagMin, dur, (uint32_t)(sSagAt / 1000UL));
+  }
+  if (v > gProtVMax) {
+    if (!sInSwell) { sInSwell = true; sSwellAt = now; sSwellMax = (uint16_t)v; }
+    else if (v > sSwellMax) sSwellMax = (uint16_t)v;
+  } else if (sInSwell) {
+    sInSwell = false;
+    uint16_t dur = (uint16_t)((now - sSwellAt) / 1000UL);
+    if (dur < 1) dur = 1;
+    if (dur <= 600) vevPush(1, sSwellMax, dur, (uint32_t)(sSwellAt / 1000UL));
+  }
+}
+
+// защита: раз в секунду проверяем уставки
+static void protCheck() {
+  unsigned long now = millis();
+  if (now - gProtCheckAt < 1000UL) return;
+  gProtCheckAt = now;
+  if (!gProtOn) return;
+  if (gProtCool && now - gProtCool < 60000UL) return;
+
+  const char* why = "";
+  if (gVoltage > 80 && gVoltage > gProtVMax) why = "перенапряжение";
+  else if (gVoltage > 80 && gVoltage < gProtVMin) why = "просадка";
+  else if (gTempValid && gTemp > gProtTMax) why = "перегрев";
+  else if (gPower > gProtPMax) why = "перегруз";
+  if (!why[0]) return;
+
+  snprintf(gProtWhy, sizeof(gProtWhy), "%s %.0f", why,
+           (strcmp(why, "перегрев") == 0) ? gTemp : (strcmp(why, "перегруз") == 0 ? gPower : gVoltage));
+  gProtTrigN++;
+  gProtCool = now;
+  Serial.printf("ЗАЩИТА: %s (реле %s)\n", gProtWhy, gProtCut ? "выключаю" : "только уведомление");
+  mqttPublish("protect", gProtWhy, false);
+  if (gProtCut) {
+    bool ok = tuyaRelaySet(false);
+    mqttPublish("protect_act", ok ? "relay_off" : "relay_off_fail", false);
+  }
+}
+
+static void protSave() {
+  Preferences p;
+  if (!p.begin("prot", false)) return;
+  p.putBool("on", gProtOn);
+  p.putFloat("vmax", gProtVMax);
+  p.putFloat("vmin", gProtVMin);
+  p.putFloat("tmax", gProtTMax);
+  p.putFloat("pmax", gProtPMax);
+  p.putBool("cut", gProtCut);
+  p.end();
+}
+
+static void protLoad() {
+  Preferences p;
+  if (!p.begin("prot", true)) return;
+  gProtOn   = p.getBool("on", false);
+  gProtVMax = p.getFloat("vmax", 255.0f);
+  gProtVMin = p.getFloat("vmin", 190.0f);
+  gProtTMax = p.getFloat("tmax", 60.0f);
+  gProtPMax = p.getFloat("pmax", 3500.0f);
+  gProtCut  = p.getBool("cut", false);
+  p.end();
+}
+
 bool parsePhase(const char* js) {
   const char* p = strstr(js, "\"6\":\"");
   if (!p) return false;
@@ -2532,6 +2666,7 @@ bool parsePhase(const char* js) {
   // отсекаем мусор
   bool got = false;
   if (v > 80 && v < 400) { gVoltage = v; got = true; }
+  if (v > 80 && v < 400) volQuality(v);
   if (pwr >= 0 && pwr < 20000) { gPower = pwr; gPowerMs = millis(); got = true; }
   if (a >= 0 && a < 100) gCurrent = a;      // реальный ток, а не P/V
   if (got) gPhaseMs = millis();
@@ -7954,7 +8089,7 @@ static size_t csvFileSize() {
 #define PAGE_SEND_STALL   800UL   // нет прогресса 0.8 с — клиент мёртв, рвём
 #define PAGE_CHUNK       4096     // мельче — больше задержек на TCP
 #define PAGE_MAX_TAGS      22     // столько подстановок в web/page.html
-#define PAGE_CAP        40000     // предел ответа: больше — это уже ошибка
+#define PAGE_CAP        56000     // предел ответа: страница выросла (качество, защита)
 
 struct PgVal {
   const char* tag;      // "__FW__" и т.п.
@@ -9096,7 +9231,7 @@ bool mqttPublishState(bool force) {
 // Здесь тот же кадр, но с командой управления DP 16 = true.
 #define CMD_DP_CONTROL 7
 
-bool tuyaRelayOn() {
+bool tuyaRelaySet(bool on) {
   esp_task_wdt_reset();
   if (WiFi.status() != WL_CONNECTED) { mqSetErr("relay:нет wifi"); return false; }
   if (!sock.connected()) {
@@ -9108,7 +9243,7 @@ bool tuyaRelayOn() {
   if (!sessionReady && !negotiate()) { sock.stop(); sessionReady = false; mqSetErr("relay:sess"); return false; }
 
   char req[48];
-  snprintf(req, sizeof(req), "{\"dps\":{\"16\":true}}");
+  snprintf(req, sizeof(req), on ? "{\"dps\":{\"16\":true}}" : "{\"dps\":{\"16\":false}}");
   uint8_t buf[512], payload[256];
   seqNo++;
   size_t n = buildFrame(CMD_DP_CONTROL, (const uint8_t*)req, strlen(req), sessionKey, buf);
@@ -9135,6 +9270,9 @@ bool tuyaRelayOn() {
   mqSetErr("relay:без ack");
   return false;
 }
+
+// включаем реле (старое имя, чтобы не править вызовы)
+bool tuyaRelayOn() { return tuyaRelaySet(true); }
 
 // ---- команды из MQTT -------------------------------------------------------
 void mqttCallback(char* topic, byte* payload, unsigned int len) {
@@ -9179,6 +9317,14 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
     mqttPublish("result", "refresh", false);
     return;
   }
+  // уставки защиты из Home Assistant: vmax=255, tmax=60, protect_on ...
+  if (strncmp(cmd, "vmax=", 5) == 0) { gProtVMax = atof(cmd + 5); protSave(); mqttPublish("result", "vmax_ok", false); return; }
+  if (strncmp(cmd, "vmin=", 5) == 0) { gProtVMin = atof(cmd + 5); protSave(); mqttPublish("result", "vmin_ok", false); return; }
+  if (strncmp(cmd, "tmax=", 5) == 0) { gProtTMax = atof(cmd + 5); protSave(); mqttPublish("result", "tmax_ok", false); return; }
+  if (strncmp(cmd, "pmax=", 5) == 0) { gProtPMax = atof(cmd + 5); protSave(); mqttPublish("result", "pmax_ok", false); return; }
+  if (strcmp(cmd, "protect_on") == 0)  { gProtOn = true;  protSave(); mqttPublish("result", "protect_on", false);  return; }
+  if (strcmp(cmd, "protect_off") == 0) { gProtOn = false; protSave(); mqttPublish("result", "protect_off", false); return; }
+
   mqttPublish("result", "unknown", false);
 }
 
@@ -11316,6 +11462,71 @@ void webSetup() {
     gRestartAt = millis() + 200;
   });
 
+
+  // ---------------------------------------------------- качество напряжения
+  gWeb.on("/vlog", []() {
+    String out = "{\"n\":" + String((unsigned)sVevCnt) + ",\"items\":[";
+    for (uint8_t k = 0; k < sVevCnt; k++) {
+      uint8_t idx = (uint8_t)((sVevHead + VEV_N - 1 - k) % VEV_N);
+      if (k) out += ',';
+      out += "{\"t\":" + String(sVev[idx].t) + ",\"v\":" + String(sVev[idx].v) +
+             ",\"s\":" + String(sVev[idx].sec) + ",\"k\":" + String(sVev[idx].kind) + "}";
+    }
+    out += "]}";
+    gWeb.send(200, "application/json; charset=utf-8", out);
+  });
+
+  gWeb.on("/gost", []() {
+    float avg = sVn ? (float)(sVSum / sVn) : 0;
+    float bad = sVn ? (100.0f * (float)sVbad / (float)sVn) : 0;
+    String out = "{";
+    out += "\"n\":" + String((unsigned long)sVn);
+    out += ",\"vmin\":" + String(sVn ? sVmin : 0, 1);
+    out += ",\"vmax\":" + String(sVn ? sVmax : 0, 1);
+    out += ",\"vavg\":" + String(avg, 1);
+    out += ",\"lo\":" + String(GOST_LO, 0) + ",\"hi\":" + String(GOST_HI, 0);
+    out += ",\"bad\":" + String((unsigned long)sVbad);
+    out += ",\"badPct\":" + String(bad, 2);
+    out += ",\"events\":" + String((unsigned)sVevCnt);
+    out += ",\"freq\":null,\"freqNote\":\"нет датчика частоты\"";
+    out += "}";
+    gWeb.send(200, "application/json; charset=utf-8", out);
+  });
+
+  gWeb.on("/protect", []() {
+    bool changed = false;
+    if (gWeb.hasArg("on"))    { gProtOn   = gWeb.arg("on").toInt() != 0; changed = true; }
+    if (gWeb.hasArg("cut"))   { gProtCut  = gWeb.arg("cut").toInt() != 0; changed = true; }
+    if (gWeb.hasArg("vmax"))  { gProtVMax = gWeb.arg("vmax").toFloat(); changed = true; }
+    if (gWeb.hasArg("vmin"))  { gProtVMin = gWeb.arg("vmin").toFloat(); changed = true; }
+    if (gWeb.hasArg("tmax"))  { gProtTMax = gWeb.arg("tmax").toFloat(); changed = true; }
+    if (gWeb.hasArg("pmax"))  { gProtPMax = gWeb.arg("pmax").toFloat(); changed = true; }
+    if (changed) { protSave(); Serial.println("защита: уставки сохранены"); }
+
+    String out = "{";
+    out += "\"on\":" + String(gProtOn ? 1 : 0);
+    out += ",\"cut\":" + String(gProtCut ? 1 : 0);
+    out += ",\"vmax\":" + String(gProtVMax, 0);
+    out += ",\"vmin\":" + String(gProtVMin, 0);
+    out += ",\"tmax\":" + String(gProtTMax, 0);
+    out += ",\"pmax\":" + String(gProtPMax, 0);
+    out += ",\"trig\":" + String((unsigned)gProtTrigN);
+    out += ",\"why\":\"" + String(gProtWhy) + "\"";
+    out += ",\"v\":" + String(gVoltage, 1);
+    out += ",\"t\":" + String(gTemp, 1);
+    out += ",\"p\":" + String(gPower, 0);
+    // пробный прогон: /protect?test=270 — что было бы при таком напряжении
+    if (gWeb.hasArg("test")) {
+      float vv = gWeb.arg("test").toFloat();
+      const char* act = "нет";
+      if (vv > gProtVMax) act = "перенапряжение";
+      else if (vv < gProtVMin) act = "просадка";
+      out += ",\"test\":{\"v\":" + String(vv, 0) + ",\"action\":\"" + String(act) + "\"}";
+    }
+    out += "}";
+    gWeb.send(200, "application/json; charset=utf-8", out);
+  });
+
   gWeb.begin();
   Serial.println("веб: http://" + WiFi.localIP().toString() + "/");
   mdnsBegin();                       // плата = cyd.local
@@ -11348,6 +11559,7 @@ void setup() {
   esp_task_wdt_reset();
 
   dispLoad();          // яркость/вкл из NVS — до экрана, чтобы ночью не вспыхнуть
+  protLoad();          // уставки защиты из NVS
   dispPwmBegin();      // ШИМ подсветки до tft.init()
   ledInit();           // синий на время загрузки
   gLedBootUntil = millis() + 3000;
@@ -11902,6 +12114,8 @@ void loop() {
       }
     }
   }
+
+  protCheck();      // защита по напряжению/температуре/мощности
 
   // отложенная перезагрузка (после /update или /reboot): не из обработчика HTTP —
   // иначе Reset reason пишется как PANIC
