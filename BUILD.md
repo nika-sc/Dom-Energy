@@ -345,3 +345,51 @@ DomMonitor -> tg-relay.ps1 -> GitHub API (repository_dispatch)
 Токен GitHub (PAT) вводится только локально в `settings.json`.
 
 Проверка реле вручную: Actions -> **telegram-relay** -> Run workflow.
+
+## Прошивка 4.11: схема разделов и OTA
+
+С 4.11.0 используется **`PartitionScheme=min_spiffs`** — два слота приложения
+по 1.875 МБ. Только с ней работает обновление по Wi-Fi: в `huge_app` второй слот
+отсутствует, и `Update.begin()` падает (в `boots.log` это выглядело как `rr=PANIC`).
+
+```bash
+# первая прошивка (USB, один раз)
+arduino-cli upload -p COM5 \
+  --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs firmware/cydv4
+
+# дальше — по Wi-Fi
+powershell -ExecutionPolicy Bypass -File flash-http.ps1 -Ip 192.168.0.51
+```
+
+Проверка: `POST /update` отвечает `OK`, в `/boots.log` появляется `rr=OTA(11)`.
+
+## Защита: что где лежит
+
+| Порог | DP автомата Tuya | Наша плата (второй слой) |
+|---|---|---|
+| Перенапряжение | `alarm_set_2`, код 3, В | `gProtVMax` (NVS `prot/vmax`) |
+| Просадка | `alarm_set_2`, код 4, В | `gProtVMin` |
+| Перегруз | `alarm_set_2`, код 1, А | `gProtPMax` = А × 230 |
+| Перегрев | `alarm_set_1`, код 5, °C | `gProtTMax` |
+
+Запись: `GET /protect?apply=1&vmax=250&vmin=200&tmax=60&imax=25` — плата отправляет
+один облачный `POST /v1.0/devices/{id}/commands` с двумя DP и дублирует значения локально.
+Ответ содержит `{"apply":{"a1":1,"a2":1}}` при успехе.
+
+Формат `alarm_set_*`: base64, каждая запись 4 байта — `код`, `включено`, `значение` (big-endian).
+
+## Планировщик
+
+`GET /sched` — чтение; `GET /sched?set=07:30,on,127,1;23:30,off,127,1` — запись
+(`ЧЧ:ММ,действие,маска_дней,включено`); `GET /sched?allow=1` — разрешить выключение реле.
+
+Правила хранятся в NVS (`prot/sched`), проверяются раз в 20 секунд; выключение
+выполняется только при `allowOff=1`, иначе в MQTT уходит `schedule_off_blocked`.
+
+## Как читать quality-эндпоинты
+
+- `/gost` → `n`, `vmin`, `vmax`, `vavg`, `bad`, `badPct`, `events`
+- `/vlog` → `{"n":N,"items":[{"t":epoch,"v":В,"s":секунд,"k":0|1}]}` (0 — провал, 1 — всплеск)
+- `/tuya` → `a1`, `a2` (base64), температура, состояние реле
+
+Частота сети не измеряется: у реле Tuya нет такого DP, на плате нет датчика напряжения.
