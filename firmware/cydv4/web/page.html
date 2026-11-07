@@ -240,7 +240,7 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
     <span class="legend"><span><i class="sw" style="background:#60a5fa"></i>В</span><span><i class="sw" style="background:#f472b6"></i>°C</span></span>
   </div>
   <svg class="chart" id="chVT" viewBox="0 0 900 140" preserveAspectRatio="none"></svg>
-  <div class="gapbox" id="gapBox" style="display:none"><span id="gapTxt"></span><button class="iconbtn" id="gapBtn" type="button">подтянуть</button></div>
+  <div class="gapbox" id="gapBox" style="display:none"><span id="gapTxt"></span><button class="iconbtn" id="gapDayBtn" type="button">подтянуть</button></div>
 </div>
 
 <h2 class="sect">За период<span>любой диапазон дат, день/ночь, погода</span></h2>
@@ -638,7 +638,7 @@ G("scrIdle").addEventListener("change",function(){
   var n=+this.value; if(isNaN(n)||n<0||n>60)return;
   fetch("/disp?idle="+n,{cache:"no-store"}).then(function(){setTimeout(poll,700)}).catch(function(){});
 });
-G("gapBtn").addEventListener("click",function(){
+G("gapDayBtn").addEventListener("click",function(){
   var b=this; b.disabled=true; b.textContent="тяну…";
   fetch("/gapfill?run=1&from="+S.date+"&to="+S.date,{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){
     var n0=(j&&j.gaps)||0,t0=Date.now(),last=-1,same=0;

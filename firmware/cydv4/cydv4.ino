@@ -1201,10 +1201,6 @@ bool scanSdRange(long start, long end, float nowKwh,
   long rangeEnd = (end > 0) ? end : now;
   if (rangeEnd <= start) return false;
 
-  if (!sRec) {
-    sRec = (SdRec*)malloc(sizeof(SdRec) * SD_REC_MAX);
-    if (!sRec) { Serial.println("карта: нет памяти под буфер истории"); return false; }
-  }
 
   // Если запрошенный диапазон целиком лежит ДО первой строки рабочего файла
   // (например, «вчера» 1-го числа), читаем архив прошлого месяца.
@@ -1236,7 +1232,7 @@ bool scanSdRange(long start, long end, float nowKwh,
   if (!sRec) {
     sRec = (SdRec*)malloc(sizeof(SdRec) * needRows);
     if (!sRec) { Serial.println("карта: нет памяти под буфер истории"); return false; }
-    sRecCap = needRows;
+    sRecCap = needRows;     // без этого переполнение сбрасывало буфер в 1 запись
   }
   RecGuard recGuard;
 
@@ -5001,6 +4997,11 @@ static bool weatherLogFind(const char* date, char* desc, size_t dn, float* tmin,
         d.trim();
         strncpy(desc, d.c_str(), dn - 1);
         desc[dn - 1] = 0;
+        // откатываемся, если обрезали посреди UTF-8: иначе JSON становится битым
+        int k = (int)strlen(desc);
+        while (k > 0 && ((unsigned char)desc[k] & 0xC0) == 0x80) k--;
+        while (k > 0 && ((unsigned char)desc[k - 1] & 0xC0) == 0xC0) k--;
+        desc[k] = 0;
       }
       found = true;
     }
@@ -12194,7 +12195,7 @@ void webSetup() {
       out += ",\"tmin\":" + String(agg[i].tmin == 999 ? 0 : agg[i].tmin / 10.0f, 1);
       out += ",\"tmax\":" + String(agg[i].tmax == -999 ? 0 : agg[i].tmax / 10.0f, 1);
       {
-        char wdesc[40]; float wtmin = 0, wtmax = 0;
+        char wdesc[72]; float wtmin = 0, wtmax = 0;
         bool okw = weatherLogFind(dateFromEpoch((long)agg[i].day * 86400L).c_str(), wdesc, sizeof(wdesc), &wtmin, &wtmax);
         out += ",\"w\":\"";
         if (okw) { for (char* c = wdesc; *c; c++) { if (*c == '"') *c = '\''; } out += wdesc; }
@@ -12241,7 +12242,9 @@ void webSetup() {
           float nd = sv.substring(0, q1).toFloat();
           if (nd <= 0) { gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"bad price\"}"); return; }
           sTar[i].day = nd;
-          sTar[i].night = (q2 > 0) ? sv.substring(q1 + 1, q2).toFloat() : sTar[i].day;
+          float nn = sv.substring(q1 + 1, q2).toFloat();
+          if (nn <= 0) { gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"bad night\"}"); return; }
+          sTar[i].night = nn;
           sTar[i].h1 = (q2 > 0 && q3 > 0) ? (uint8_t)constrain(sv.substring(q2 + 1, q3).toInt(), 0, 23) : 6;
           sTar[i].h2 = (q3 > 0) ? (uint8_t)constrain(sv.substring(q3 + 1).toInt(), 1, 24) : 23;
           sTarToday[0] = 0; tarSave(); tarApplyToday();
@@ -12250,6 +12253,10 @@ void webSetup() {
         }
       }
       if (sTarCnt >= TAR_N) { gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"log full\"}"); return; }
+      if (c1 <= 0 || c2 <= 0) {
+        gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"need day,night\"}");
+        return;
+      }
       if (c1 > 0 && sTarCnt < TAR_N) {
         TarRec& r = sTar[sTarCnt];
         strncpy(r.from, from.c_str(), 10); r.from[10] = 0;

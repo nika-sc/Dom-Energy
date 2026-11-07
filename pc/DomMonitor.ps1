@@ -1056,16 +1056,17 @@ function Request-Day([string]$date) {
 
 
 
-function Fill-DayGaps($date) {
+function Fill-DayGaps($from, $to) {
     # Плата умеет добирать пропущенные строки из облака Tuya: /gapfill?run=1.
     # Запускаем и не ждём: заполнение идёт в фоне на самой плате, история
     # перечитается обычным опросом.
     $ip = [string]$script:cfg.boardIp
-    if (-not $ip -or -not $date) { return }
+    if (-not $ip -or -not $from) { return }
+    if (-not $to) { $to = $from }
     try {
-        $r = Invoke-RestMethod ('http://' + $ip + '/gapfill?run=1&from=' + $date + '&to=' + $date) -TimeoutSec 12
+        $r = Invoke-RestMethod ('http://' + $ip + '/gapfill?run=1&from=' + $from + '&to=' + $to) -TimeoutSec 12
         if ($r.ok) {
-            Add-Log ('заполнение пропусков из облака за ' + $date + ': запущено') 'info'
+            Add-Log ('заполнение пропусков из облака за ' + $from + '…' + $to + ': запущено') 'info'
         } else {
             Add-Log 'заполнение пропусков: плата не приняла запрос' 'warn'
         }
@@ -5737,7 +5738,37 @@ function Update-RangeGrid($grid, $sum, $ip, $from, $to) {
     if ([datetime]$from -gt [datetime]$to) { $x = $from; $from = $to; $to = $x }
     $sum.Text = 'считаю…'
     try {
-        $r = Invoke-RestMethod ("http://" + $ip + "/range?from=" + $from + "&to=" + $to) -TimeoutSec 120
+        # Плата отдаёт максимум 31 день за запрос — длинные периоды режем на куски
+        $dA = [datetime]$from
+        $dB = [datetime]$to
+        $allRows = @()
+        $sumK = 0.0; $sumC = 0.0; $sumD = 0.0; $sumN = 0.0; $sumDC = 0.0; $sumNC = 0.0
+        $vminAll = 0; $vmaxAll = 0; $pmaxAll = 0
+        while ($dA -le $dB) {
+            $chunkEnd = $dA.AddDays(30)
+            if ($chunkEnd -gt $dB) { $chunkEnd = $dB }
+            $ca = $dA.ToString('yyyy-MM-dd')
+            $cb = $chunkEnd.ToString('yyyy-MM-dd')
+            $part = Invoke-RestMethod ("http://" + $ip + "/range?from=" + $ca + "&to=" + $cb) -TimeoutSec 120
+            $allRows += @($part.rows)
+            $ct = $part.totals
+            $sumK += [double]$ct.kwh; $sumC += [double]$ct.cost
+            $sumD += [double]$ct.dayKwh; $sumN += [double]$ct.nightKwh
+            $sumDC += [double]$ct.dayCost; $sumNC += [double]$ct.nightCost
+            if ([int]$ct.vmin -gt 0 -and ($vminAll -eq 0 -or [int]$ct.vmin -lt $vminAll)) { $vminAll = [int]$ct.vmin }
+            if ([int]$ct.vmax -gt $vmaxAll) { $vmaxAll = [int]$ct.vmax }
+            if ([int]$ct.pmax -gt $pmaxAll) { $pmaxAll = [int]$ct.pmax }
+            $dA = $chunkEnd.AddDays(1)
+        }
+        $r = [pscustomobject]@{
+            rows = $allRows
+            totals = [pscustomobject]@{
+                kwh = $sumK; cost = $sumC; dayKwh = $sumD; nightKwh = $sumN
+                dayCost = $sumDC; nightCost = $sumNC
+                avgDayKwh = $(if ($allRows.Count -gt 0) { $sumK / $allRows.Count } else { 0 })
+                vmin = $vminAll; vmax = $vmaxAll; pmax = $pmaxAll
+            }
+        }
         $script:rangeRows = @($r.rows)
         $grid.Rows.Clear()
         foreach ($row in $r.rows) {
@@ -5901,7 +5932,7 @@ function Show-Range {
     $btnFill.Add_Click({
         $a = $d1.Value.ToString('yyyy-MM-dd')
         $b = $d2.Value.ToString('yyyy-MM-dd')
-        Fill-DayGaps $a
+        Fill-DayGaps $a $b
         Add-Log ('заполнение за ' + $a + '…' + $b + ': идёт в фоне на плате')
     })
 
@@ -7083,7 +7114,7 @@ $btnToday.Add_Click({
 
 $btnReload.Add_Click({
 
-    Fill-DayGaps $script:histSel
+    Fill-DayGaps $script:histSel $script:histSel
 
     if ($script:histCache.ContainsKey($script:histSel)) { $script:histCache.Remove($script:histSel) }
 
