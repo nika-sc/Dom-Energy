@@ -248,31 +248,6 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
   <div class="gapbox" id="gapBox" style="display:none"><span id="gapTxt"></span><button class="iconbtn" id="gapBtn" type="button">подтянуть</button></div>
 </div>
 
-<h2 class="sect">Качество и защита<span>ГОСТ 32144 и пороги автомата</span></h2>
-
-<div class="qgrid" style="margin-top:12px">
-  <div class="card">
-    <div class="head"><span class="ttl">Качество энергии · ГОСТ 32144</span><span class="legend" id="gostSrc">за сеанс</span></div>
-    <div class="qbig c1"><span id="gostAvg">—</span><small>В среднее</small></div>
-    <div class="pbar2"><i id="gostBar"></i></div>
-    <div class="qrow"><span>мин <b id="gostMin">—</b></span><span>макс <b id="gostMax">—</b></span><span>вне нормы <b id="gostBad">—</b></span></div>
-    <div class="qrow"><span>норма <b id="gostRange">207–253 В</b></span><span>замеров <b id="gostN">—</b></span></div>
-  </div>
-  <div class="card">
-    <div class="head"><span class="ttl">Защита реле</span><span class="legend">настройки автомата Tuya</span></div>
-    <div class="qrow"><span>перенапряжение &gt;</span><b><input class="qin" id="pvmax" value="250"> В</b>
-      <span>просадка &lt;</span><b><input class="qin" id="pvmin" value="200"> В</b></div>
-    <div class="qrow"><span>перегрев &gt;</span><b><input class="qin" id="ptmax" value="60"> °C</b>
-      <span>перегруз &gt;</span><b><input class="qin" id="pimax" value="25"> А</b></div>
-    <div class="qrow"><button class="qbtn" id="protApply" type="button">записать в автомат</button>
-      <button class="qbtn" id="protLocal" type="button">только в плату</button>
-      <span>срабатываний <b id="protTrig">0</b></span></div>
-    <div class="qrow"><span>в автомате:</span><b id="tuyaS">—</b></div>
-    <div class="qrow"><span>проверка:</span><input class="qin" id="ptestv" value="270"> <span>В</span>
-      <button class="qbtn" id="protTest" type="button">проверить</button><b id="ptestres">—</b></div>
-  </div>
-</div>
-
 <h2 class="sect">За период<span>любой диапазон дат, день/ночь, погода</span></h2>
 
 <div class="card" style="margin-top:12px" id="rngCard">
@@ -310,6 +285,33 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
     <th>День</th><th>кВт·ч</th><th>₽</th><th>день</th><th>ночь</th><th>U мин–макс</th><th>t мин–макс</th><th>пик</th><th>погода</th>
   </tr></thead><tbody><tr><td colspan="9" class="mut">нет данных</td></tr></tbody></table></div>
 </div>
+
+<h2 class="sect">Качество и защита<span>ГОСТ 32144 и пороги автомата</span></h2>
+
+<div class="qgrid" style="margin-top:12px">
+  <div class="card">
+    <div class="head"><span class="ttl">Качество энергии · ГОСТ 32144</span><span class="legend" id="gostSrc">за сеанс</span></div>
+    <div class="qbig c1"><span id="gostAvg">—</span><small>В среднее</small></div>
+    <div class="pbar2"><i id="gostBar"></i></div>
+    <div class="qrow"><span>мин <b id="gostMin">—</b></span><span>макс <b id="gostMax">—</b></span><span>вне нормы <b id="gostBad">—</b></span></div>
+    <div class="qrow"><span>норма <b id="gostRange">207–253 В</b></span><span>замеров <b id="gostN">—</b></span></div>
+  </div>
+  <div class="card">
+    <div class="head"><span class="ttl">Защита реле</span><span class="legend">настройки автомата Tuya</span></div>
+    <div class="qrow"><span>перенапряжение &gt;</span><b><input class="qin" id="pvmax" value="250"> В</b>
+      <span>просадка &lt;</span><b><input class="qin" id="pvmin" value="200"> В</b></div>
+    <div class="qrow"><span>перегрев &gt;</span><b><input class="qin" id="ptmax" value="60"> °C</b>
+      <span>перегруз &gt;</span><b><input class="qin" id="pimax" value="25"> А</b></div>
+    <div class="qrow"><button class="qbtn" id="protApply" type="button">записать в автомат</button>
+      <button class="qbtn" id="protLocal" type="button">только в плату</button>
+      <span>срабатываний <b id="protTrig">0</b></span></div>
+    <div class="qrow"><span>в автомате:</span><b id="tuyaS">—</b></div>
+    <div class="qrow"><span>проверка:</span><input class="qin" id="ptestv" value="270"> <span>В</span>
+      <button class="qbtn" id="protTest" type="button">проверить</button><b id="ptestres">—</b></div>
+  </div>
+</div>
+
+
 
 <h2 class="sect">Погода и тарифы</h2>
 
@@ -1071,19 +1073,6 @@ function dayTodayGo(){
   // старый переключатель дня внутри карточки «История» больше не нужен — он теперь сверху
   var pv=G("prev");
   if(pv && pv.parentNode) pv.parentNode.style.display="none";
-  // «За период» ставим сразу после «За день»
-  var rng=G("rngCard"), hist=document.querySelector(".card .ttl");
-  var cards=document.querySelectorAll(".wrap > .card");
-  if(rng){
-    var histCard=null;
-    for(var i=0;i<cards.length;i++){
-      var ttl=cards[i].querySelector(".ttl");
-      if(ttl && ttl.textContent.indexOf("История")>=0){ histCard=cards[i]; break; }
-    }
-    if(histCard && histCard.parentNode===rng.parentNode){
-      histCard.parentNode.insertBefore(rng, histCard.nextSibling);
-    }
-  }
 })();
 window.addEventListener("beforeprint", function(){
   var m=G("printMeta"); if(!m) return;
