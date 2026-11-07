@@ -1056,6 +1056,24 @@ function Request-Day([string]$date) {
 
 
 
+function Fill-DayGaps($date) {
+    # Плата умеет добирать пропущенные строки из облака Tuya: /gapfill?run=1.
+    # Запускаем и не ждём: заполнение идёт в фоне на самой плате, история
+    # перечитается обычным опросом.
+    $ip = [string]$script:cfg.boardIp
+    if (-not $ip -or -not $date) { return }
+    try {
+        $r = Invoke-RestMethod ('http://' + $ip + '/gapfill?run=1&from=' + $date + '&to=' + $date) -TimeoutSec 12
+        if ($r.ok) {
+            Add-Log ('заполнение пропусков из облака за ' + $date + ': запущено') 'info'
+        } else {
+            Add-Log 'заполнение пропусков: плата не приняла запрос' 'warn'
+        }
+    } catch {
+        Add-Log ('заполнение пропусков: ' + $_.Exception.Message) 'warn'
+    }
+}
+
 function Pump-History {
 
     if ($null -eq $script:httpSlow) { return }
@@ -7048,6 +7066,8 @@ $btnToday.Add_Click({
 })
 
 $btnReload.Add_Click({
+
+    Fill-DayGaps $script:histSel
 
     if ($script:histCache.ContainsKey($script:histSel)) { $script:histCache.Remove($script:histSel) }
 
