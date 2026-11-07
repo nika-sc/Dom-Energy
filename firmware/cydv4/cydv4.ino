@@ -33,7 +33,7 @@ struct RngDay {
   float kwh, cost, dayKwh, nightKwh;
   uint16_t vmin, vmax, pmax;
   int16_t tmin, tmax;
-  uint8_t rows;
+  uint16_t rows;
 };
 
 #include <time.h>
@@ -884,6 +884,7 @@ struct SdRec { uint32_t t; float e; };
                                  // и занижало «вчера» на 45 % (регрессия 28.10)
 static SdRec* sRec = nullptr;
 static int sRecN = 0;
+static int sRecCap = 0;          // сколько записей реально выделено
 
 static int cmpSdRec(const void* a, const void* b) {
   uint32_t x = ((const SdRec*)a)->t, y = ((const SdRec*)b)->t;
@@ -1180,6 +1181,16 @@ static size_t sScanSize  = 0;
 static int    sScanRecN  = 0;
 static unsigned long sScanFullAt = 0;
 static unsigned long sScanGen    = 0;
+
+// Освобождает буфер истории при выходе из скана: держать 29 КБ постоянно нельзя —
+// mbedTLS для облака ищет непрерывный блок и не находит.
+struct RecGuard {
+  ~RecGuard() {
+    if (sRec) { free(sRec); sRec = nullptr; }
+    sRecN = 0; sRecCap = 0;
+    sScanRecN = 0; sScanStart = 0; sScanSize = 0;   // буфера нет — читаем заново
+  }
+};
 unsigned long gSdGen = 0;          // меняется при перезаписи /energy.csv
 
 bool scanSdRange(long start, long end, float nowKwh,
@@ -1217,6 +1228,17 @@ bool scanSdRange(long start, long end, float nowKwh,
   if (!f) return false;
   bool arch = (strcmp(path, "/energy.csv") != 0);
   long span = rangeEnd - start + 6L * 3600L;
+
+  // Буфер держим только на время скана: размер по окну, освобождение — RecGuard.
+  int needRows = (int)(span / 30L) + 300;
+  if (needRows > SD_REC_MAX) needRows = SD_REC_MAX;
+  if (needRows < 600) needRows = 600;
+  if (!sRec) {
+    sRec = (SdRec*)malloc(sizeof(SdRec) * needRows);
+    if (!sRec) { Serial.println("карта: нет памяти под буфер истории"); return false; }
+    sRecCap = needRows;
+  }
+  RecGuard recGuard;
 
   unsigned long need = (unsigned long)(span / 30L) * 52UL;
   if (need < 60000UL) need = 60000UL;
@@ -1261,10 +1283,10 @@ bool scanSdRange(long start, long end, float nowKwh,
       if (t != 0 && t >= minT && t <= maxT) {
         float e = 0;
         if (csvFieldFloat((const char*)(sbuf + i), len, 3, &e) && e > 0) {
-          if (sRecN >= SD_REC_MAX) {
+          if (sRecN >= sRecCap) {
             // Переполнение: выбрасываем самую старую половину, новые строки важнее.
             // Иначе терялся конец окна и «вчера/сегодня» считались по обрезанным данным.
-            int half = SD_REC_MAX / 2;
+            int half = sRecCap / 2;
             memmove(sRec, sRec + half, sizeof(SdRec) * half);
             sRecN = half;
           }
@@ -4917,11 +4939,6 @@ bool fetchWeather() {
   // TLS-клиент живёт на стеке: после запроса stop() и деструктор возвращают
   // память mbedTLS (без этого течёт ~40 КБ на каждый запрос).
   if (!netOnline()) return false;
-  // TLS требует ~35 КБ подряд: перед запросом освобождаем кэш страницы,
-  // иначе прогноз молча падает с «SSL - Memory allocation failed» (видно по wfHeap=0)
-  pageCacheFree();
-  if (ESP.getFreeHeap() < 58000) { wFcFail++; return false; }
-
   uint32_t heap0 = ESP.getFreeHeap();
   String j;
   {
@@ -5015,6 +5032,9 @@ bool fetchForecast() {
   // съедает heap целиком, поэтому разбираем ТОЛЬКО нужные поля.
   // TLS-клиент на стеке + stop(): mbedTLS возвращает память сразу.
   if (!netOnline()) return false;
+  // mbedTLS нужно ~35 КБ ПОДРЯД: смотрим максимальный непрерывный блок,
+  // а не свободную кучу. Если его нет — запрос даже не начинаем.
+  if (ESP.getMaxAllocHeap() < 40000) { wFcFail++; return false; }
 
   uint32_t heap0 = ESP.getFreeHeap();
   String j;
@@ -12133,7 +12153,9 @@ void webSetup() {
         if (!strcmp(sTar[i].from, from.c_str())) {
           String sv = gWeb.arg("set");
           int q1 = sv.indexOf(','), q2 = sv.indexOf(',', q1 + 1), q3 = sv.indexOf(',', q2 + 1);
-          sTar[i].day = sv.substring(0, q1).toFloat();
+          float nd = sv.substring(0, q1).toFloat();
+          if (nd <= 0) { gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"bad price\"}"); return; }
+          sTar[i].day = nd;
           sTar[i].night = (q2 > 0) ? sv.substring(q1 + 1, q2).toFloat() : sTar[i].day;
           sTar[i].h1 = (q2 > 0 && q3 > 0) ? (uint8_t)constrain(sv.substring(q2 + 1, q3).toInt(), 0, 23) : 6;
           sTar[i].h2 = (q3 > 0) ? (uint8_t)constrain(sv.substring(q3 + 1).toInt(), 1, 24) : 23;
