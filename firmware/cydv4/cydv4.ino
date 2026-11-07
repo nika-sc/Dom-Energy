@@ -6022,10 +6022,16 @@ static uint16_t bpFreq = 2200, bpOn = 40, bpOff = 60;
 static bool     bpSounding = false;
 static unsigned long bpAt = 0;
 
+// Предел громкости для системных звуков (загрузка/перезагрузка/ошибка):
+// динамик подключён напрямую к GPIO, поэтому держим не громче 40 %.
+#define BEEP_SYS_MAX 40
+
 void beepTone(bool on) {
   if (on) {
     ledcWriteTone(BEEP_CH, bpFreq);
-    uint16_t duty = (uint16_t)((uint32_t)gBeepVol * 127 / 100);  // 127 = 50 % ШИМ
+    uint8_t v = gBeepVol;
+    if (v > BEEP_SYS_MAX) v = BEEP_SYS_MAX;
+    uint16_t duty = (uint16_t)((uint32_t)v * 127 / 100);  // 127 = 50 % ШИМ
     ledcWrite(BEEP_CH, duty);
   } else {
     ledcWriteTone(BEEP_CH, 0);
@@ -6069,6 +6075,12 @@ void beepStart(uint8_t n, uint16_t freq, uint16_t onMs, uint16_t offMs) {
 void beepStartForce(uint8_t n, uint16_t freq, uint16_t onMs, uint16_t offMs) {
   beepPlay(n, freq, onMs, offMs);   // BEEP TEST — даже при выключенном звуке
 }
+// ---- системные звуки: короткие и тихие ----
+void beepBoot()    { beepStartForce(2, 1200, 45, 70); }   // включились
+void beepReboot()  { beepStartForce(1, 800, 140, 0); }    // уходим на перезагрузку
+void beepError()   { beepStartForce(3, 480, 60, 70); }    // ошибка/срабатывание защиты
+void beepOk()      { beepStartForce(1, 1600, 40, 0); }    // короткое «ок»
+
 void beepTick() {
   if (!bpSounding && bpLeft == 0) return;
   unsigned long now = millis();
@@ -12069,7 +12081,8 @@ void webSetup() {
 
   gWeb.on("/reboot", []() {
     gWeb.send(200, "text/plain", "rebooting");
-    gRestartAt = millis() + 200;
+    beepReboot();                 // тихий сигнал «ухожу на перезагрузку»
+    gRestartAt = millis() + 350;  // чтобы сигнал успел прозвучать
   });
 
 
@@ -12212,7 +12225,19 @@ void webSetup() {
     gWeb.send(200, "application/json; charset=utf-8", out);
   });
 
-  gWeb.on("/tariff", []() {
+  gWeb.on("/beep", []() {
+    String s = gWeb.hasArg("sound") ? gWeb.arg("sound") : "test";
+    s.toLowerCase();
+    if (s == "boot") beepBoot();
+    else if (s == "reboot") beepReboot();
+    else if (s == "error") beepError();
+    else if (s == "ok") beepOk();
+    else beepStartForce(1, 2200, 80, 0);
+    String out = "{\"ok\":true,\"sound\":\"" + s + "\",\"vol\":" + String(gBeepVol) + "}";
+    gWeb.send(200, "application/json", out);
+  });
+
+gWeb.on("/tariff", []() {
     bool changed = false;
     if (gWeb.hasArg("reset")) {
       sTarCnt = 0;
@@ -12424,7 +12449,8 @@ void setup() {
   dispPwmBegin();      // ШИМ подсветки до tft.init()
   ledInit();           // синий на время загрузки
   gLedBootUntil = millis() + 3000;
-  beepInit();          // динамик: тишина (звук по умолчанию выключен)
+  beepInit();
+  beepBoot();          // короткий тихий сигнал загрузки          // динамик: тишина (звук по умолчанию выключен)
 
   tpInit();
   loadCal();
@@ -13009,6 +13035,8 @@ void loop() {
   // отложенная перезагрузка (после /update или /reboot): не из обработчика HTTP —
   // иначе Reset reason пишется как PANIC
   if (gRestartAt && millis() >= gRestartAt) {
+    beepReboot();
+    delay(220);
     gRestartAt = 0;
     bootMarkOta();
     delay(150);
