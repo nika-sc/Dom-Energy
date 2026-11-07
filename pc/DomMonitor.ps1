@@ -932,7 +932,7 @@ function Pump-Firmware {
 
             try {
 
-                $m = [regex]::Match([string]$task.Result, 'CYD-\d\.\d')
+                $m = [regex]::Match([string]$task.Result, 'CYD-\d+\.\d+(?:\.\d+)?')
 
                 if ($m.Success) {
 

@@ -124,7 +124,7 @@ void dispApply();                 // подсветка: определена н
 #include <mbedtls/md.h>
 
 // ---------------------------------------------------------------- настройки
-const char* FW_VER = "4.11.0";
+const char* FW_VER = "4.12.0";
 
 // ---------------------------------------------------------------- секреты
 // Пароли и ключи НЕ хранятся в репозитории. Скопируйте secrets.example.h
@@ -11116,7 +11116,7 @@ void webSetup() {
     long atP = (gPowerMs  && clockOk) ? (long)(nowT - aP) : 0;
     long atE = (gEnergyMs && clockOk) ? (long)(nowT - aE) : 0;
     snprintf(b, sizeof(b),
-      "{\"v\":%.0f,\"temp\":%.1f,\"p\":%.1f,\"amp\":%.2f,\"e\":%.2f,"
+      "{\"fw\":\"%s\",\"v\":%.0f,\"temp\":%.1f,\"p\":%.1f,\"amp\":%.2f,\"e\":%.2f,"
       "\"r\":%s,\"tkwh\":%.3f,\"tcost\":%.2f,\"ykwh\":%.3f,\"ykost\":%.2f,"
       "\"mkwh\":%.2f,\"mcost\":%.2f,\"tariff\":%.2f,\"tday\":%.2f,\"tnight\":%.2f,\"rssi\":%d,\"sdRows\":%d,"
       "\"vAge\":%lu,\"tAge\":%lu,\"pAge\":%lu,\"eAge\":%lu,"
@@ -11154,7 +11154,7 @@ void webSetup() {
       "\"wPop\":%.0f,\"wPopT\":%.0f,\"wTminT\":%.1f,\"wTmaxT\":%.1f,"
       "\"wDescT\":\"%s\",\"wRainT\":%.1f,\"wfHeap\":%u,"
       "\"now\":\"%s\"}",
-      gVoltage, gTemp, gPower, gCurrent, gEnergy,
+      FW_VER, gVoltage, gTemp, gPower, gCurrent, gEnergy,
       gRelay ? "true" : "false", myTodayKwh, myTodayCost, yKwh, yCost,
       mKwh, mCost, measuredTariff(), TARIFF_DAY, TARIFF_NIGHT, gRssi, gSdRows,
       aV, aT, aP, aE, atV, atT, atP, atE,
