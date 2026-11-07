@@ -121,12 +121,27 @@ svg.chart{cursor:default}
 .rt td.mut{color:var(--mut)}
 .rtwrap{overflow-x:auto}
 @media print{
- body{background:#fff;color:#000}
- .top,.pb,.qrow,.build,#tip,.btnrow{display:none!important}
- .card{break-inside:avoid;border:1px solid #ccc;background:#fff;color:#000}
- .rt th,.rt td{color:#000;border-color:#ccc}
-}
-.sch{font-size:12.5px;color:var(--mut)}.sch .r{display:flex;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid var(--ln)}.sch .r:last-child{border-bottom:0}.sch .t{color:var(--ink);font-weight:700;font-variant-numeric:tabular-nums}.sch .days{font-size:11px}</style>
+  @page{size:A4 portrait;margin:12mm}
+  body{background:#fff;color:#000}
+  .wrap{max-width:none;padding:0}
+  .wrap>*{display:none!important}
+  .wrap>#rngCard{display:block!important}
+  #rngCard{background:#fff!important;border:0!important;padding:0}
+  #rngCard .card{background:#fff!important;border:0!important}
+  #rngCard .pb,#rngCard .qrow{display:none!important}
+  #rngCard .head .ttl{font-size:17pt;color:#000}
+  #rngCard .legend{font-size:9pt;color:#333}
+  #rngCard .t{background:#fff!important;border:1px solid #999;border-radius:4px;padding:5px 7px}
+  #rngCard .t .k{color:#444}
+  #rngCard .t .v{color:#000!important}
+  #rngCard .t .s{color:#555}
+  .rt{font-size:9pt}
+  .rt th{color:#222!important;border:1px solid #888!important;padding:4px 5px}
+  .rt td{color:#000!important;border:1px solid #bbb!important;padding:3px 5px}
+  #rngCard .head{border-bottom:1.5px solid #000;padding-bottom:4px;margin-bottom:6px}
+  .rt tr{break-inside:avoid}
+  #tip{display:none}
+}</style>
 </head>
 <body>
 <div class="wrap">
@@ -913,6 +928,18 @@ function rngClear(){
   G("rngTbl").getElementsByTagName("tbody")[0].innerHTML="<tr><td colspan='9' class='mut'>нет данных за период</td></tr>";
 }
 // период длиннее 31 дня плата считает порциями: 31 день за запрос
+var RNG_PRINT_NOTE="";
+function printStamp(){
+  var el=G("rngNote"); if(!el) return;
+  RNG_PRINT_NOTE=el.textContent;
+  var n=new Date();
+  var d=("0"+n.getDate()).slice(-2)+"."+("0"+(n.getMonth()+1)).slice(-2)+"."+n.getFullYear();
+  var tm=("0"+n.getHours()).slice(-2)+":"+("0"+n.getMinutes()).slice(-2);
+  el.textContent=el.textContent+" · сформировано "+d+" "+tm;
+}
+window.addEventListener("beforeprint", printStamp);
+window.addEventListener("afterprint", function(){ if(RNG_PRINT_NOTE) G("rngNote").textContent=RNG_PRINT_NOTE; });
+
 function rngLoad(from,to){
   RNG.from=from; RNG.to=to; RNG.rows=[];
   txt("rngNote","считаю…");
@@ -973,7 +1000,7 @@ G("rngGo").addEventListener("click",function(){
   rngMark(""); rngLoad(a,b);
 });
 G("rngCsv").addEventListener("click",rngCsv);
-G("rngPrint").addEventListener("click",function(){ window.print(); });
+G("rngPrint").addEventListener("click", function(){ window.print(); });
 
 loadDays(); poll(); setInterval(poll,5000); (function(){
   var q=(location.search.match(/[?&]p=([a-z0-9]+)/)||[])[1];
