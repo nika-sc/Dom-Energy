@@ -3173,6 +3173,8 @@ $btnReload  = New-Btn $pgHist 'Обновить' '#2A3240' $script:CLR.text 100 
 
 $btnRange   = New-Btn $pgHist 'Период'  '#24405A' $script:CLR.text 96 30
 
+$btnRange.Add_Click({ Show-Range })
+
 
 
 
@@ -3848,13 +3850,11 @@ function Layout-History {
 
     $btnReload.Location = New-Object System.Drawing.Point(($m + 420), 12)
 
-$btnRange.Location  = New-Object System.Drawing.Point(($m + 528), 12)
+$btnRange.Location  = New-Object System.Drawing.Point(($m + 604), 12)
 
-$btnRange.Add_Click({ Show-Range })
+    $btnHistTg.Location = New-Object System.Drawing.Point(($m + 708), 12)
 
-    $btnHistTg.Location = New-Object System.Drawing.Point(($m + 528), 12)
-
-    $btnHistCsv.Location = New-Object System.Drawing.Point(($m + 704), 12)
+    $btnHistCsv.Location = New-Object System.Drawing.Point(($m + 884), 12)
 
     $lblHistSum.TextAlign = 'MiddleLeft'
 
@@ -5717,6 +5717,7 @@ function Update-RangeGrid($grid, $sum, $ip, $from, $to) {
     $sum.Text = 'считаю…'
     try {
         $r = Invoke-RestMethod ("http://" + $ip + "/range?from=" + $from + "&to=" + $to) -TimeoutSec 120
+        $script:rangeRows = @($r.rows)
         $grid.Rows.Clear()
         foreach ($row in $r.rows) {
             $null = $grid.Rows.Add(
@@ -5874,10 +5875,21 @@ function Show-Range {
         $dlg.FileName = 'energy-' + $d1.Value.ToString('yyyy-MM-dd') + '_' + $d2.Value.ToString('yyyy-MM-dd') + '.csv'
         if ($dlg.ShowDialog() -eq 'OK') {
             $sb = New-Object System.Text.StringBuilder
-            [void]$sb.AppendLine('date,kwh,cost,day_kwh,night_kwh,day_cost,night_cost,vmin,vmax,tmin,tmax,pmax')
+            $inv = [System.Globalization.CultureInfo]::InvariantCulture
+            [void]$sb.AppendLine('date;kwh;cost;day_kwh;night_kwh;day_cost;night_cost;vmin;vmax;tmin;tmax;pmax')
             foreach ($row in $script:rangeRows) {
-                [void]$sb.AppendLine(($row.d, $row.kwh, $row.cost, $row.dayKwh, $row.nightKwh,
-                    $row.dayCost, $row.nightCost, $row.vmin, $row.vmax, $row.tmin, $row.tmax, $row.pmax) -join ',')
+                $vals = @($row.d,
+                    ([double]$row.kwh).ToString('0.###', $inv),
+                    ([double]$row.cost).ToString('0.##', $inv),
+                    ([double]$row.dayKwh).ToString('0.###', $inv),
+                    ([double]$row.nightKwh).ToString('0.###', $inv),
+                    ([double]$row.dayCost).ToString('0.##', $inv),
+                    ([double]$row.nightCost).ToString('0.##', $inv),
+                    [string]$row.vmin, [string]$row.vmax,
+                    ([double]$row.tmin).ToString('0.#', $inv),
+                    ([double]$row.tmax).ToString('0.#', $inv),
+                    [string]$row.pmax)
+                [void]$sb.AppendLine($vals -join ';')
             }
             [System.IO.File]::WriteAllText($dlg.FileName, $sb.ToString(), [System.Text.Encoding]::UTF8)
             Add-Log ('CSV за период: ' + $dlg.FileName)
@@ -5886,8 +5898,11 @@ function Show-Range {
 
     $d1.Value = (Get-Date).AddDays(-6)
     $d2.Value = (Get-Date)
-    $null = Update-RangeGrid $grid $sum $ip $d1.Value.ToString('yyyy-MM-dd') $d2.Value.ToString('yyyy-MM-dd')
+    $f.Add_Shown({
+        $null = Update-RangeGrid $grid $sum $ip $d1.Value.ToString('yyyy-MM-dd') $d2.Value.ToString('yyyy-MM-dd')
+    })
     [void]$f.ShowDialog()
+    $f.Dispose()
 }
 
 function Show-Scheduler {

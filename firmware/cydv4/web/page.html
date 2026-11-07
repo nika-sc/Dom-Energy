@@ -868,12 +868,44 @@ function rngRender(j){
   if(!h) h="<tr><td colspan='8' class='mut'>нет данных за период</td></tr>";
   tb.innerHTML=h;
 }
+function rngClear(){
+  ["rKwh","rCost","rDN","rAvg","rKwhS","rCostS","rDNS","rAvgS"].forEach(function(i){ txt(i,"—"); });
+  RNG.rows=[];
+  G("rngTbl").getElementsByTagName("tbody")[0].innerHTML="<tr><td colspan='8' class='mut'>нет данных за период</td></tr>";
+}
+// период длиннее 31 дня плата считает порциями: 31 день за запрос
 function rngLoad(from,to){
-  RNG.from=from; RNG.to=to;
+  RNG.from=from; RNG.to=to; RNG.rows=[];
   txt("rngNote","считаю…");
-  fetch("/range?from="+from+"&to="+to).then(function(r){ return r.json(); })
-    .then(function(j){ if(j.ok===false){ txt("rngNote","ошибка: "+(j.err||"?")); return; } rngRender(j); })
-    .catch(function(){ txt("rngNote","плата не ответила"); });
+  var d1=new Date(from+"T00:00:00"), d2=new Date(to+"T00:00:00");
+  var chunks=[], cur=new Date(d1.getTime());
+  while(cur.getTime()<=d2.getTime()){
+    var end=new Date(Math.min(cur.getTime()+30*86400000, d2.getTime()));
+    chunks.push([iso(cur), iso(end)]);
+    cur=new Date(end.getTime()+86400000);
+  }
+  var idx=0, all=[], tot={kwh:0,cost:0,dayKwh:0,nightKwh:0,dayCost:0,nightCost:0,vmin:0,vmax:0,pmax:0};
+  function finish(){
+    tot.avgDayKwh = all.length ? tot.kwh/all.length : 0;
+    rngRender({from:from,to:to,days:all.length,totals:tot,rows:all});
+  }
+  function step(){
+    if(idx>=chunks.length){ finish(); return; }
+    var c=chunks[idx];
+    if(chunks.length>1) txt("rngNote","считаю… "+(idx+1)+" из "+chunks.length);
+    fetch("/range?from="+c[0]+"&to="+c[1]).then(function(r){ return r.json(); }).then(function(j){
+      if(j.ok===false){ txt("rngNote","ошибка: "+(j.err||"?")); rngClear(); return; }
+      all=all.concat(j.rows||[]);
+      var q=j.totals||{};
+      tot.kwh+=q.kwh||0; tot.cost+=q.cost||0; tot.dayKwh+=q.dayKwh||0; tot.nightKwh+=q.nightKwh||0;
+      tot.dayCost+=q.dayCost||0; tot.nightCost+=q.nightCost||0;
+      if(q.vmin>0 && (!tot.vmin || q.vmin<tot.vmin)) tot.vmin=q.vmin;
+      if(q.vmax>tot.vmax) tot.vmax=q.vmax;
+      if(q.pmax>tot.pmax) tot.pmax=q.pmax;
+      idx++; step();
+    }).catch(function(){ txt("rngNote","плата не ответила"); rngClear(); });
+  }
+  step();
 }
 function rngApply(p){
   rngMark(p);
@@ -883,9 +915,9 @@ function rngApply(p){
 }
 function rngCsv(){
   if(!RNG.rows.length){ alert("нет данных за период"); return; }
-  var s="date,kwh,cost,day_kwh,night_kwh,day_cost,night_cost,vmin,vmax,tmin,tmax,pmax\n";
+  var s="\ufeffdate;kwh;cost;day_kwh;night_kwh;day_cost;night_cost;vmin;vmax;tmin;tmax;pmax\r\n";
   RNG.rows.forEach(function(r){
-    s+=[r.d,r.kwh,r.cost,r.dayKwh,r.nightKwh,r.dayCost,r.nightCost,r.vmin,r.vmax,r.tmin,r.tmax,r.pmax].join(",")+"\n";
+    s+=[r.d,r.kwh,r.cost,r.dayKwh,r.nightKwh,r.dayCost,r.nightCost,r.vmin,r.vmax,r.tmin,r.tmax,r.pmax].join(";")+"\r\n";
   });
   var a=document.createElement("a");
   a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(s);
@@ -904,7 +936,11 @@ G("rngGo").addEventListener("click",function(){
 G("rngCsv").addEventListener("click",rngCsv);
 G("rngPrint").addEventListener("click",function(){ window.print(); });
 
-loadDays(); poll(); setInterval(poll,5000); rngApply("today"); initQuality(); initSched(); tuyaUpdate(); setInterval(tuyaUpdate, 60000);
+loadDays(); poll(); setInterval(poll,5000); (function(){
+  var q=(location.search.match(/[?&]p=([a-z0-9]+)/)||[])[1];
+  var ok=["today","yest","d2","d7","d30","week","month","quarter","half","prev","year","ytd"];
+  rngApply(ok.indexOf(q)>=0?q:"today");
+})(); initQuality(); initSched(); tuyaUpdate(); setInterval(tuyaUpdate, 60000);
 </script>
 </body>
 </html>
