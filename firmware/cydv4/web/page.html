@@ -102,6 +102,25 @@ svg.chart{cursor:default}
 .build{font-size:10px;color:var(--dim);text-align:center;margin-top:14px;opacity:.7}
 
 .qgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}@media(max-width:820px){.qgrid{grid-template-columns:1fr}}.qrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--mut);padding:6px 0}.qrow b{color:var(--ink)}.qbig{font-size:26px;font-weight:800;letter-spacing:-.03em;line-height:1.1}.qbig small{font-size:12px;color:var(--mut);font-weight:600;margin-left:3px}.pbar2{height:8px;border-radius:99px;background:var(--grid);overflow:hidden;margin-top:6px}.pbar2 i{display:block;height:100%;width:0;background:var(--c1);border-radius:99px}.qbtn{background:var(--card);border:1px solid var(--ln);color:var(--ink);border-radius:9px;padding:4px 10px;cursor:pointer;font:inherit;font-size:12px}.qbtn.on{border-color:var(--c2);color:var(--c2);font-weight:700}.qbtn.danger.on{border-color:var(--red);color:var(--red)}.qin{width:64px;background:var(--card);border:1px solid var(--ln);color:var(--ink);border-radius:8px;padding:3px 7px;font:inherit;font-size:12px;text-align:right}.evlist{max-height:190px;overflow:auto;font-size:12px;color:var(--mut)}.ev{border-bottom:1px solid var(--ln);padding:5px 0;display:flex;gap:8px}.ev:last-child{border-bottom:0}.ev .t{color:var(--ink);font-variant-numeric:tabular-nums}.ev .sag{color:var(--c4)} .ev .swl{color:var(--red)}
+.pb{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+.pb button{background:var(--card);border:1px solid var(--ln);color:var(--mut);border-radius:999px;
+ padding:5px 11px;font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
+.pb button:hover{border-color:var(--c1);color:var(--ink)}
+.pb button.on{background:var(--c1);border-color:var(--c1);color:#04202a;font-weight:700}
+.rt{width:100%;border-collapse:collapse;margin-top:10px;font-size:12.5px}
+.rt th{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);font-weight:700;
+ text-align:right;padding:6px 4px;border-bottom:1px solid var(--ln);white-space:nowrap}
+.rt th:first-child,.rt td:first-child{text-align:left}
+.rt td{padding:6px 4px;border-bottom:1px solid var(--ln);text-align:right;color:var(--ink);white-space:nowrap}
+.rt tr:hover td{background:var(--card)}
+.rt td.mut{color:var(--mut)}
+.rtwrap{overflow-x:auto}
+@media print{
+ body{background:#fff;color:#000}
+ .top,.pb,.qrow,.build,#tip,.btnrow{display:none!important}
+ .card{break-inside:avoid;border:1px solid #ccc;background:#fff;color:#000}
+ .rt th,.rt td{color:#000;border-color:#ccc}
+}
 .sch{font-size:12.5px;color:var(--mut)}.sch .r{display:flex;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid var(--ln)}.sch .r:last-child{border-bottom:0}.sch .t{color:var(--ink);font-weight:700;font-variant-numeric:tabular-nums}.sch .days{font-size:11px}</style>
 </head>
 <body>
@@ -227,6 +246,40 @@ svg.chart{cursor:default}
     <button class="qbtn" id="schAdd" type="button">добавить</button>
     <span class="small">маска дней: 127 — все, 31 — пн–пт, 96 — сб+вс</span>
   </div>
+</div>
+
+<div class="card" style="margin-top:12px" id="rngCard">
+  <div class="head"><span class="ttl">Статистика за период</span>
+    <span class="legend" id="rngNote">выбери период</span></div>
+  <div class="pb" id="rngBtns">
+    <button type="button" data-p="today">Сегодня</button>
+    <button type="button" data-p="yest">Вчера</button>
+    <button type="button" data-p="d2">Позавчера</button>
+    <button type="button" data-p="d7">7 дней</button>
+    <button type="button" data-p="d30">30 дней</button>
+    <button type="button" data-p="week">Неделя</button>
+    <button type="button" data-p="month">Месяц</button>
+    <button type="button" data-p="quarter">Квартал</button>
+    <button type="button" data-p="half">Полгода</button>
+    <button type="button" data-p="prev">Прошлый месяц</button>
+    <button type="button" data-p="year">Год</button>
+    <button type="button" data-p="ytd">С начала года</button>
+  </div>
+  <div class="qrow" style="margin-top:8px">
+    <input class="qin" type="date" id="rngFrom"> <span>—</span> <input class="qin" type="date" id="rngTo">
+    <button class="qbtn" id="rngGo" type="button">Применить</button>
+    <button class="qbtn" id="rngCsv" type="button">CSV за период</button>
+    <button class="qbtn" id="rngPrint" type="button">Печать</button>
+  </div>
+  <div class="row4" style="margin-top:10px">
+    <div class="t"><div class="k">Расход</div><div class="v c1" id="rKwh">—</div><div class="s" id="rKwhS">—</div></div>
+    <div class="t"><div class="k">Стоимость</div><div class="v c2" id="rCost">—</div><div class="s" id="rCostS">—</div></div>
+    <div class="t"><div class="k">День / ночь</div><div class="v" id="rDN">—</div><div class="s" id="rDNS">—</div></div>
+    <div class="t"><div class="k">В среднем в сутки</div><div class="v c3" id="rAvg">—</div><div class="s" id="rAvgS">—</div></div>
+  </div>
+  <div class="rtwrap"><table class="rt" id="rngTbl"><thead><tr>
+    <th>День</th><th>кВт·ч</th><th>₽</th><th>день</th><th>ночь</th><th>U мин–макс</th><th>t мин–макс</th><th>пик</th>
+  </tr></thead><tbody><tr><td colspan="8" class="mut">нет данных</td></tr></tbody></table></div>
 </div>
 
 <div class="two">
@@ -769,7 +822,89 @@ function tuyaUpdate(){
   }).catch(function(){});
 }
 
-loadDays(); poll(); setInterval(poll,5000); initQuality(); initSched(); tuyaUpdate(); setInterval(tuyaUpdate, 60000);
+
+// ---------------------------------------------------------------- статистика за период
+var RNG={from:"",to:"",rows:[],on:""};
+function pad2(n){return (n<10?"0":"")+n}
+function iso(d){return d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate())}
+function addDays(d,n){var x=new Date(d.getTime());x.setDate(x.getDate()+n);return x}
+function rngPeriod(p){
+  var now=new Date(), a, b=new Date(now.getTime());
+  if(p=="today"){a=new Date(now.getTime());}
+  else if(p=="yest"){a=addDays(now,-1);b=addDays(now,-1);}
+  else if(p=="d2"){a=addDays(now,-2);b=addDays(now,-2);}
+  else if(p=="d7"){a=addDays(now,-6);}
+  else if(p=="d30"){a=addDays(now,-29);}
+  else if(p=="week"){var w=(now.getDay()+6)%7;a=addDays(now,-w);}
+  else if(p=="month"){a=new Date(now.getFullYear(),now.getMonth(),1);}
+  else if(p=="quarter"){a=new Date(now.getFullYear(),Math.floor(now.getMonth()/3)*3,1);}
+  else if(p=="half"){a=new Date(now.getFullYear(),now.getMonth()<6?0:6,1);}
+  else if(p=="prev"){a=new Date(now.getFullYear(),now.getMonth()-1,1);b=new Date(now.getFullYear(),now.getMonth(),0);}
+  else if(p=="year"){a=new Date(now.getFullYear(),0,1);}
+  else if(p=="ytd"){a=new Date(now.getFullYear(),0,1);}
+  else {a=new Date(now.getTime());}
+  return {from:iso(a),to:iso(b)};
+}
+function rngMark(p){
+  var bs=G("rngBtns").getElementsByTagName("button");
+  for(var i=0;i<bs.length;i++) bs[i].className=(bs[i].getAttribute("data-p")===p)?"on":"";
+}
+function rngRender(j){
+  RNG.rows=j.rows||[];
+  var t=j.totals||{};
+  txt("rKwh",num(t.kwh,2)); txt("rKwhS",j.days+(j.days==1?" день":" дней"));
+  txt("rCost",num(t.cost,2)); txt("rCostS","средний тариф "+(t.kwh>0?(t.cost/t.kwh).toFixed(2):"—")+" ₽");
+  txt("rDN",num(t.dayKwh,2)+" / "+num(t.nightKwh,2)); txt("rDNS",num(t.dayCost,2)+" ₽ / "+num(t.nightCost,2)+" ₽");
+  txt("rAvg",num(t.avgDayKwh,2)); txt("rAvgS","U "+t.vmin+"–"+t.vmax+" В · пик "+t.pmax+" Вт");
+  txt("rngNote",(j.from||"")+" — "+(j.to||""));
+  var tb=G("rngTbl").getElementsByTagName("tbody")[0], h="";
+  for(var i=0;i<RNG.rows.length;i++){
+    var r=RNG.rows[i];
+    h+="<tr><td>"+fmtDate(r.d)+"</td><td>"+num(r.kwh,2)+"</td><td>"+num(r.cost,2)+"</td>"
+      +"<td class='mut'>"+num(r.dayKwh,2)+"</td><td class='mut'>"+num(r.nightKwh,2)+"</td>"
+      +"<td>"+r.vmin+"–"+r.vmax+"</td><td>"+(r.tmin?num(r.tmin,1)+"–"+num(r.tmax,1):"—")+"</td>"
+      +"<td class='mut'>"+r.pmax+"</td></tr>";
+  }
+  if(!h) h="<tr><td colspan='8' class='mut'>нет данных за период</td></tr>";
+  tb.innerHTML=h;
+}
+function rngLoad(from,to){
+  RNG.from=from; RNG.to=to;
+  txt("rngNote","считаю…");
+  fetch("/range?from="+from+"&to="+to).then(function(r){ return r.json(); })
+    .then(function(j){ if(j.ok===false){ txt("rngNote","ошибка: "+(j.err||"?")); return; } rngRender(j); })
+    .catch(function(){ txt("rngNote","плата не ответила"); });
+}
+function rngApply(p){
+  rngMark(p);
+  var r=rngPeriod(p);
+  G("rngFrom").value=r.from; G("rngTo").value=r.to;
+  rngLoad(r.from,r.to);
+}
+function rngCsv(){
+  if(!RNG.rows.length){ alert("нет данных за период"); return; }
+  var s="date,kwh,cost,day_kwh,night_kwh,day_cost,night_cost,vmin,vmax,tmin,tmax,pmax\n";
+  RNG.rows.forEach(function(r){
+    s+=[r.d,r.kwh,r.cost,r.dayKwh,r.nightKwh,r.dayCost,r.nightCost,r.vmin,r.vmax,r.tmin,r.tmax,r.pmax].join(",")+"\n";
+  });
+  var a=document.createElement("a");
+  a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(s);
+  a.download="energy-"+RNG.from+"_"+RNG.to+".csv"; a.click();
+}
+document.getElementById("rngBtns").addEventListener("click",function(e){
+  var p=e.target.getAttribute&&e.target.getAttribute("data-p");
+  if(p) rngApply(p);
+});
+G("rngGo").addEventListener("click",function(){
+  var a=G("rngFrom").value,b=G("rngTo").value;
+  if(!a||!b){ alert("укажи даты"); return; }
+  if(a>b){ var x=a;a=b;b=x; }
+  rngMark(""); rngLoad(a,b);
+});
+G("rngCsv").addEventListener("click",rngCsv);
+G("rngPrint").addEventListener("click",function(){ window.print(); });
+
+loadDays(); poll(); setInterval(poll,5000); rngApply("today"); initQuality(); initSched(); tuyaUpdate(); setInterval(tuyaUpdate, 60000);
 </script>
 </body>
 </html>

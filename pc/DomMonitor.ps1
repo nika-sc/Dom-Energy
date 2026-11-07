@@ -3171,6 +3171,9 @@ $btnToday   = New-Btn $pgHist 'Сегодня'  '#24405A' $script:CLR.text 96 30
 
 $btnReload  = New-Btn $pgHist 'Обновить' '#2A3240' $script:CLR.text 100 30
 
+$btnRange   = New-Btn $pgHist 'Период'  '#24405A' $script:CLR.text 96 30
+
+
 
 
 $lblHistDay = New-Object System.Windows.Forms.Label
@@ -3844,6 +3847,10 @@ function Layout-History {
     $btnToday.Location  = New-Object System.Drawing.Point(($m + 316), 12)
 
     $btnReload.Location = New-Object System.Drawing.Point(($m + 420), 12)
+
+$btnRange.Location  = New-Object System.Drawing.Point(($m + 528), 12)
+
+$btnRange.Add_Click({ Show-Range })
 
     $btnHistTg.Location = New-Object System.Drawing.Point(($m + 528), 12)
 
@@ -5702,6 +5709,180 @@ $script:alertSeen = @{}
 
 
 
+
+
+function Show-Range {
+    $ip = [string]$script:cfg.boardIp
+    if (-not $ip) { $ip = '192.168.0.51' }
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'Статистика за период — ' + $ip
+    $f.Size = New-Object System.Drawing.Size(880, 560)
+    $f.StartPosition = 'CenterParent'
+    $f.BackColor = C $script:CLR.bg
+    $f.ForeColor = C $script:CLR.text
+
+    $font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $presets = @(
+        @('Сегодня', 0), @('Вчера', 1), @('7 дней', 2), @('30 дней', 3),
+        @('Месяц', 4), @('Прошлый', 5), @('Год', 6), @('С начала года', 7)
+    )
+
+    $x = 12
+    foreach ($p in $presets) {
+        $b = New-Object System.Windows.Forms.Button
+        $b.Text = $p[0]
+        $b.Tag = $p[1]
+        $b.Size = New-Object System.Drawing.Size(84, 28)
+        $b.Location = New-Object System.Drawing.Point($x, 10)
+        $b.FlatStyle = 'Flat'
+        $b.BackColor = C '#24405A'
+        $b.ForeColor = C $script:CLR.text
+        $b.Font = $font
+        $f.Controls.Add($b)
+        $x += 88
+    }
+
+    $d1 = New-Object System.Windows.Forms.DateTimePicker
+    $d1.Format = 'Short'
+    $d1.Location = New-Object System.Drawing.Point(12, 46)
+    $d1.Size = New-Object System.Drawing.Size(130, 24)
+    $f.Controls.Add($d1)
+
+    $d2 = New-Object System.Windows.Forms.DateTimePicker
+    $d2.Format = 'Short'
+    $d2.Location = New-Object System.Drawing.Point(150, 46)
+    $d2.Size = New-Object System.Drawing.Size(130, 24)
+    $f.Controls.Add($d2)
+
+    $btnGo = New-Object System.Windows.Forms.Button
+    $btnGo.Text = 'Применить'
+    $btnGo.Location = New-Object System.Drawing.Point(292, 44)
+    $btnGo.Size = New-Object System.Drawing.Size(110, 28)
+    $btnGo.FlatStyle = 'Flat'
+    $btnGo.BackColor = C '#24405A'
+    $btnGo.ForeColor = C $script:CLR.text
+    $f.Controls.Add($btnGo)
+
+    $btnCsv = New-Object System.Windows.Forms.Button
+    $btnCsv.Text = 'CSV за период'
+    $btnCsv.Location = New-Object System.Drawing.Point(412, 44)
+    $btnCsv.Size = New-Object System.Drawing.Size(130, 28)
+    $btnCsv.FlatStyle = 'Flat'
+    $btnCsv.BackColor = C '#2A3240'
+    $btnCsv.ForeColor = C $script:CLR.text
+    $f.Controls.Add($btnCsv)
+
+    $sum = New-Object System.Windows.Forms.Label
+    $sum.Location = New-Object System.Drawing.Point(12, 80)
+    $sum.Size = New-Object System.Drawing.Size(840, 22)
+    $sum.ForeColor = C $script:CLR.dim2
+    $sum.Text = 'выбери период'
+    $f.Controls.Add($sum)
+
+    $grid = New-Object System.Windows.Forms.DataGridView
+    $grid.Location = New-Object System.Drawing.Point(12, 108)
+    $grid.Size = New-Object System.Drawing.Size(840, 400)
+    $grid.BackgroundColor = C '#0F1218'
+    $grid.GridColor = C '#232B39'
+    $grid.BorderStyle = 'None'
+    $grid.EnableHeadersVisualStyles = $false
+    $grid.ColumnHeadersDefaultCellStyle.BackColor = C '#151B26'
+    $grid.ColumnHeadersDefaultCellStyle.ForeColor = C '#8FA3BF'
+    $grid.DefaultCellStyle.BackColor = C '#0F1218'
+    $grid.DefaultCellStyle.ForeColor = C '#D6E2F5'
+    $grid.DefaultCellStyle.SelectionBackColor = C '#24405A'
+    $grid.DefaultCellStyle.SelectionForeColor = C '#FFFFFF'
+    $grid.RowHeadersVisible = $false
+    $grid.AllowUserToAddRows = $false
+    $grid.ReadOnly = $true
+    $grid.AutoSizeColumnsMode = 'Fill'
+    $grid.Font = $font
+    foreach ($col in @(
+        @('d', 'День', 90), @('kwh', 'кВт·ч', 70), @('cost', '₽', 70),
+        @('dayKwh', 'день', 70), @('nightKwh', 'ночь', 70),
+        @('dayCost', '₽ день', 70), @('nightCost', '₽ ночь', 70),
+        @('v', 'U мин–макс', 100), @('t', 't мин–макс', 90), @('pmax', 'пик Вт', 70)
+    )) {
+        $null = $grid.Columns.Add($col[0], $col[1])
+        $grid.Columns[$col[0]].FillWeight = $col[2]
+    }
+    $f.Controls.Add($grid)
+
+    $script:rangeRows = @()
+
+    $load = {
+        $a = $d1.Value.ToString('yyyy-MM-dd')
+        $b = $d2.Value.ToString('yyyy-MM-dd')
+        if ([datetime]$a -gt [datetime]$b) { $t = $a; $a = $b; $b = $t }
+        $sum.Text = 'считаю…'
+        try {
+            $r = Invoke-RestMethod ("http://" + $ip + "/range?from=" + $a + "&to=" + $b) -TimeoutSec 120
+            $script:rangeRows = @($r.rows)
+            $grid.Rows.Clear()
+            foreach ($row in $r.rows) {
+                $null = $grid.Rows.Add(
+                    $row.d, [math]::Round($row.kwh, 2), [math]::Round($row.cost, 2),
+                    [math]::Round($row.dayKwh, 2), [math]::Round($row.nightKwh, 2),
+                    [math]::Round($row.dayCost, 2), [math]::Round($row.nightCost, 2),
+                    ([string]$row.vmin + '–' + [string]$row.vmax),
+                    ([string]$row.tmin + '–' + [string]$row.tmax), $row.pmax)
+            }
+            $t = $r.totals
+            $sum.Text = ('итого ' + [math]::Round($t.kwh, 2) + ' кВт·ч · ' + [math]::Round($t.cost, 2) + ' ₽' +
+                         ' · день ' + [math]::Round($t.dayKwh, 2) + ' / ночь ' + [math]::Round($t.nightKwh, 2) +
+                         ' · в среднем ' + [math]::Round($t.avgDayKwh, 2) + ' кВт·ч в сутки' +
+                         ' · U ' + $t.vmin + '–' + $t.vmax + ' В · пик ' + $t.pmax + ' Вт')
+            Add-Log ('период ' + $a + '…' + $b + ': ' + [math]::Round($t.kwh, 2) + ' кВт·ч')
+        } catch {
+            $sum.Text = 'ошибка: ' + $_.Exception.Message
+        }
+    }
+
+    $btnGo.Add_Click($load)
+    foreach ($c in $f.Controls) {
+        if ($c -is [System.Windows.Forms.Button] -and $null -ne $c.Tag) {
+            $c.Add_Click({
+                $now = Get-Date
+                switch ([int]$this.Tag) {
+                    0 { $a = $now;                 $b = $now }
+                    1 { $a = $now.AddDays(-1);     $b = $a }
+                    2 { $a = $now.AddDays(-6);     $b = $now }
+                    3 { $a = $now.AddDays(-29);    $b = $now }
+                    4 { $a = Get-Date -Year $now.Year -Month $now.Month -Day 1; $b = $now }
+                    5 { $a = (Get-Date -Year $now.Year -Month $now.Month -Day 1).AddMonths(-1)
+                        $b = (Get-Date -Year $now.Year -Month $now.Month -Day 1).AddDays(-1) }
+                    6 { $a = Get-Date -Year $now.Year -Month 1 -Day 1;           $b = $now }
+                    7 { $a = Get-Date -Year $now.Year -Month 1 -Day 1;           $b = $now }
+                }
+                $d1.Value = $a
+                $d2.Value = $b
+                & $load
+            }.GetNewClosure())
+        }
+    }
+
+    $btnCsv.Add_Click({
+        if (-not $script:rangeRows -or $script:rangeRows.Count -eq 0) { return }
+        $dlg = New-Object System.Windows.Forms.SaveFileDialog
+        $dlg.Filter = 'CSV (*.csv)|*.csv'
+        $dlg.FileName = 'energy-' + $d1.Value.ToString('yyyy-MM-dd') + '_' + $d2.Value.ToString('yyyy-MM-dd') + '.csv'
+        if ($dlg.ShowDialog() -eq 'OK') {
+            $sb = New-Object System.Text.StringBuilder
+            [void]$sb.AppendLine('date,kwh,cost,day_kwh,night_kwh,day_cost,night_cost,vmin,vmax,tmin,tmax,pmax')
+            foreach ($row in $script:rangeRows) {
+                [void]$sb.AppendLine(($row.d, $row.kwh, $row.cost, $row.dayKwh, $row.nightKwh,
+                    $row.dayCost, $row.nightCost, $row.vmin, $row.vmax, $row.tmin, $row.tmax, $row.pmax) -join ',')
+            }
+            [System.IO.File]::WriteAllText($dlg.FileName, $sb.ToString(), [System.Text.Encoding]::UTF8)
+            Add-Log ('CSV за период: ' + $dlg.FileName)
+        }
+    })
+
+    $d1.Value = (Get-Date).AddDays(-6)
+    $d2.Value = (Get-Date)
+    & $load
+    [void]$f.ShowDialog()
+}
 
 function Show-Scheduler {
     $ip = [string]$script:cfg.boardIp
