@@ -1230,10 +1230,8 @@ python tests\test-board.py --quick
 
 ## 🔗 Мы в Threads
 
-История сборки и обновления — в Threads:
+История сборки и обновления — в Threads: [пост о плате](https://www.threads.com/@nika.service/post/DfVcBmNCGNq).
 
-- [Первый пост о плате](https://www.threads.com/@nika.service/post/DfVcBmNCGNq) — с чего всё началось
-- [Релиз 4.11.0](https://www.threads.com/@nika.service/post/DfVcBmNCGNq) — OTA и защита в автомате
 
 ## 👤 Разработчик
 
