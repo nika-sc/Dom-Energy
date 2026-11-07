@@ -4948,7 +4948,11 @@ static uint32_t wDayKey(int y, int mo, int d) {
   return (uint32_t)daysFromCivil(y, (unsigned)mo, (unsigned)d);
 }
 
-// обновить строку за сегодня (перезапись файла: он маленький, ~40 байт на день)
+// Дописываем строку за сегодня. Перезапись файла (remove+rename) на этой карте
+// теряла weather.csv целиком — поэтому только append, а при чтении берём
+// ПОСЛЕДНЮЮ строку за день.
+static uint32_t wLogAt = 0;      // когда последний раз писали (раз в час)
+
 static void weatherLogTouch() {
   struct tm ti;
   if (!getLocalTime(&ti, 10)) return;
@@ -4959,50 +4963,31 @@ static void weatherLogTouch() {
     if (gTemp < wLogTMin) wLogTMin = gTemp;
     if (gTemp > wLogTMax) wLogTMax = gTemp;
   }
-  // описание: текущее, иначе прогноз на завтра
-  const char* desc = wDescRu.length() ? wDescRu.c_str() : "—";
-  char line[128];
-  snprintf(line, sizeof(line), "%04d-%02d-%02d,%.1f,%.1f,%s,%.0f,%.1f",
+  if (wLogAt && millis() - wLogAt < 3600000UL) return;
+  wLogAt = millis();
+
+  const char* desc = wDescRu.length() ? wDescRu.c_str() : "-";
+  bool wxExists = SD.exists(WLOG_PATH);
+  File f = SD.open(WLOG_PATH, wxExists ? FILE_APPEND : FILE_WRITE);
+  if (!f) { Serial.println("погода: не открылся weather.csv"); return; }
+  f.printf("%04d-%02d-%02d,%.1f,%.1f,%s,%.0f\n",
            y, mo, d,
            (wLogTMin == 999 ? 0.0f : wLogTMin),
            (wLogTMax == -999 ? 0.0f : wLogTMax),
-           desc, wPopNow, 0.0f);
-
-  // читаем старый файл, заменяем/дописываем строку этого дня
-  File in = SD.open(WLOG_PATH, FILE_READ);
-  File out = SD.open("/weather.tmp", FILE_WRITE);
-  if (!out) { if (in) in.close(); return; }
-  bool replaced = false;
-  if (in) {
-    while (in.available()) {
-      String l = in.readStringUntil('\n');
-      l.trim();
-      if (!l.length()) continue;
-      if (l.startsWith(line, 10)) {           // та же дата — заменяем
-        out.println(line);
-        replaced = true;
-      } else {
-        out.println(l);
-      }
-    }
-    in.close();
-  }
-  if (!replaced) out.println(line);
-  out.close();
-  SD.remove(WLOG_PATH);
-  SD.rename("/weather.tmp", WLOG_PATH);
+           desc, wPopNow);
+  f.close();
+  Serial.printf("погода: записано за %04d-%02d-%02d\n", y, mo, d);
 }
 
-// найти строку погоды за день (возвращает false, если нет)
+// найти ПОСЛЕДНЮЮ строку погоды за день
 static bool weatherLogFind(const char* date, char* desc, size_t dn, float* tmin, float* tmax) {
   File f = SD.open(WLOG_PATH, FILE_READ);
   if (!f) return false;
   bool found = false;
   int guard = 0;
-  while (f.available() && guard++ < 2000) {
+  while (f.available() && guard++ < 4000) {
     String l = f.readStringUntil('\n');
     l.trim();
-    if (l.length() < 12) continue;
     if (!l.startsWith(date)) continue;
     int c1 = l.indexOf(',');
     int c2 = l.indexOf(',', c1 + 1);
@@ -5013,12 +4998,12 @@ static bool weatherLogFind(const char* date, char* desc, size_t dn, float* tmin,
       *tmax = l.substring(c2 + 1, c3).toFloat();
       if (c4 > c3) {
         String d = l.substring(c3 + 1, c4);
+        d.trim();
         strncpy(desc, d.c_str(), dn - 1);
         desc[dn - 1] = 0;
       }
       found = true;
     }
-    break;
   }
   f.close();
   return found;
@@ -11732,7 +11717,9 @@ void webSetup() {
       // Раньше неизвестное имя молча отдавало 264 КБ дефолта. Теперь — 404,
       // никакого fallback: клиент должен знать, что файла нет.
       // energy.peak / energy.bak / boots.log — чтобы полный архив снимался по HTTP
-      if (a == "energy.csv" || a == "energy.peak" || a == "energy.bak" ||
+      if (a == "weather.csv") {
+        fname = "/weather.csv"; explicitFile = true;
+      } else if (a == "energy.csv" || a == "energy.peak" || a == "energy.bak" ||
           a == "boots.log" ||
           (a.startsWith("energy-") && a.endsWith(".csv") && a.length() == 18)) {
         fname = "/" + a;
@@ -11963,6 +11950,7 @@ void webSetup() {
           int slash = n.lastIndexOf('/');
           if (slash >= 0) n = n.substring(slash + 1);
           if (n == "energy.csv" || n == "energy.bak" || n == "energy.peak" ||
+              n == "weather.csv" ||
               n == "boots.log" || n == "boots.1.log" ||
               (n.startsWith("energy-") && n.endsWith(".csv") && n.length() == 18)) {
             if (!first) out += ",";
@@ -12269,7 +12257,12 @@ void webSetup() {
         r.night = (c2 > 0) ? s.substring(c1 + 1, c2).toFloat() : r.day;
         r.h1 = (c2 > 0 && c3 > 0) ? (uint8_t)constrain(s.substring(c2 + 1, c3).toInt(), 0, 23) : 6;
         r.h2 = (c3 > 0) ? (uint8_t)constrain(s.substring(c3 + 1).toInt(), 1, 24) : 23;
-        if (r.day > 0) { sTarCnt++; sTarToday[0] = 0; tarSave(); tarApplyToday(); changed = true; }
+        if (r.day <= 0 || r.night <= 0) {
+          sTarToday[0] = 0; tarApplyToday();
+          gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"bad price\"}");
+          return;
+        }
+        sTarCnt++; sTarToday[0] = 0; tarSave(); tarApplyToday(); changed = true;
       }
     }
     String out = "{\"day\":";
@@ -12995,6 +12988,12 @@ void loop() {
       tarSeed();        // если журнал пуст (например, на старте не было времени) — заведём
       tarApplyToday();
     }
+  }
+
+  // история погоды пишется независимо от прогноза (раз в час внутри функции)
+  {
+    static unsigned long sWLogAt = 0;
+    if (millis() - sWLogAt > 60000UL) { sWLogAt = millis(); weatherLogTouch(); }
   }
 
   protCheck();      // защита по напряжению/температуре/мощности
