@@ -110,23 +110,23 @@ svg.chart{cursor:default}
 /* Широкий монитор: раскладываем карточки в 2 колонки, чтобы не было длинной прокрутки.
    На телефоне всё остаётся одной колонкой. */
 @media(min-width:1300px){
-  .wrap{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start;max-width:1720px}
-  .wrap>.top,.wrap>.daybar{grid-column:1/-1;margin-bottom:0}
-  .wrap>h2.sect{grid-column:1/-1;margin:6px 0 0}
-  .wrap>.detail,.wrap>.qgrid,.wrap>.two{grid-column:1/-1}
-  .wrap>.card,.wrap>.row4,.wrap>.hero{margin-top:0!important}
-  .wrap>.hero,.wrap>.row4{grid-column:1/-1}
+  .wrap{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start;
+        grid-auto-flow:row dense;max-width:1720px}
+  .wrap>.top,.wrap>.daybar,.wrap>h2.sect{grid-column:1/-1;margin-bottom:0}
+  .wrap>.detail,.wrap>.hero,.wrap>.row4,.wrap>.qgrid,.wrap>.two{grid-column:1/-1}
+  .wrap .card{margin-top:0!important;padding:12px}
   .wrap svg.chart{max-height:150px}
-  .wrap .card{padding:12px}
   .wrap .d svg.dchart{height:48px}
 }
 @media(min-width:1600px){
   .wrap{grid-template-columns:repeat(3,minmax(0,1fr));max-width:2100px}
   .wrap>.detail,.wrap>.hero,.wrap>.row4{grid-column:1/-1}
-  #histCard{grid-column:1/2}
-  #rngCard{grid-column:2/4}
-  .wrap>.qgrid{grid-column:1/3}
-  #evCard{grid-column:3/4}
+  #histCard{grid-column:span 1}
+  #rngCard{grid-column:span 2}
+  .wrap>.qgrid{grid-column:span 2}
+  #evCard{grid-column:span 1}
+  .wrap>.two{grid-column:span 2}
+  #devCard{grid-column:span 3}
 }
 .daybar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;position:sticky;top:0;z-index:20;
  background:rgba(10,15,26,.92);backdrop-filter:blur(6px);border:1px solid var(--ln);border-radius:14px;
@@ -331,8 +331,6 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
   </div>
 </div>
 
-<h2 class="sect">События и автоматика<span>провалы, всплески, планировщик</span></h2>
-
 <div class="card" id="evCard" style="margin-top:12px">
   <div class="head"><span class="ttl">События напряжения</span>
     <span class="legend"><span id="evCnt">0</span> · провалы и всплески · <a href="/csv" style="color:var(--c1)">CSV</a></span>
@@ -358,8 +356,6 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
 
 
 
-<h2 class="sect">Погода и тарифы</h2>
-
 <div class="two">
   <div class="card"><div class="head"><span class="ttl">Погода · Адлер</span></div>
     <div class="kv"><span>Сейчас</span><b id="wxNow">—</b></div>
@@ -372,7 +368,7 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
 
 <h2 class="sect">Устройство<span>экран, подсветка, гашение</span></h2>
 
-<div class="card" style="margin-top:12px">
+<div class="card" id="devCard" style="margin-top:12px">
   <div class="head"><span class="ttl">Экран платы</span><span class="nav"><button id="scrBtn" type="button">Экран</button></span></div>
   <div class="kv"><span>Подсветка</span><b id="scrState">—</b></div>
   <div class="kv"><span>Яркость</span><b><input id="scrBrightRange" type="range" min="5" max="100" step="5" value="100"> <span id="scrBright">—</span></b></div>
