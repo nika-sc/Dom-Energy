@@ -255,7 +255,7 @@ svg.chart{cursor:default}
 
 <div class="card" style="margin-top:12px" id="rngCard">
   <div class="head"><span class="ttl">Статистика за период</span>
-    <span class="legend" id="rngNote">выбери период</span></div>
+    <span class="legend"><span id="gapInfo">—</span> · <span id="rngNote">выбери период</span></span></div>
   <div class="pb" id="rngBtns">
     <button type="button" data-p="today">Сегодня</button>
     <button type="button" data-p="yest">Вчера</button>
@@ -275,6 +275,7 @@ svg.chart{cursor:default}
     <button class="qbtn" id="rngGo" type="button">Применить</button>
     <button class="qbtn" id="rngCsv" type="button">CSV за период</button>
     <button class="qbtn" id="rngPrint" type="button">Печать</button>
+    <button class="qbtn" id="gapBtn" type="button" title="добрать пропущенные строки из облака Tuya">Заполнить пропуски</button>
   </div>
   <div class="row4" style="margin-top:10px">
     <div class="t"><div class="k">Расход</div><div class="v c1" id="rKwh">—</div><div class="s" id="rKwhS">—</div></div>
@@ -358,6 +359,7 @@ function apply(d){
   txt("fc",num(d.mkwh/new Date().getDate()*30,1)+" кВт·ч");
   ring(d);
   if(S.hist&&S.date===S.today)drawE(S.hist);
+  if(typeof d.gaps!=="undefined") gapShow(d.gaps, d.gapMin);
 }
 function ring(d){
   var pw=+d.p||0;
@@ -382,6 +384,7 @@ function loadDays(cb){
     loadHist(cb);
   }).catch(function(){});
 }
+
 function loadHist(cb){
   if(!S.date){if(cb)cb();return}
   fetch("/history?date="+S.date,{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){
@@ -874,6 +877,36 @@ function rngRender(j){
   if(!h) h="<tr><td colspan='9' class='mut'>нет данных за период</td></tr>";
   tb.innerHTML=h;
 }
+var GAP_BUSY=false;
+function gapShow(g, m){
+  if (GAP_BUSY) return;
+  txt("gapInfo", (g>0) ? ("пропусков "+g+", "+(m||0)+" мин") : "пропусков нет");
+}
+function gapFillRun(){
+  var f=RNG.from||G("rngFrom").value, t2=RNG.to||G("rngTo").value;
+  if(!f||!t2){ alert("сначала выбери период"); return; }
+  GAP_BUSY=true;
+  txt("gapInfo","запускаю…");
+  fetch("/gapfill?run=1&from="+f+"&to="+t2).then(function(r){ return r.json(); }).then(function(j){
+    if(!j.ok){ GAP_BUSY=false; txt("gapInfo","не запустилось"); return; }
+    var n=0;
+    var tm=setInterval(function(){
+      fetch("/gapfill/status").then(function(r){ return r.json(); }).then(function(s){
+        if(s.active){
+          txt("gapInfo","идёт: пропусков "+(s.gaps||0)+", вставлено "+(s.insTotal||0));
+        } else {
+          clearInterval(tm);
+          GAP_BUSY=false;
+          txt("gapInfo","готово: вставлено "+(s.insTotal||0)+", пропусков "+(s.gaps||0));
+          rngLoad(f,t2);
+        }
+      }).catch(function(){ clearInterval(tm); GAP_BUSY=false; });
+      if(++n>120){ clearInterval(tm); GAP_BUSY=false; txt("gapInfo","не дождался ответа"); }
+    },2000);
+  }).catch(function(){ GAP_BUSY=false; txt("gapInfo","ошибка запроса"); });
+}
+document.getElementById("gapBtn").addEventListener("click", gapFillRun);
+
 function rngClear(){
   ["rKwh","rCost","rDN","rAvg","rKwhS","rCostS","rDNS","rAvgS"].forEach(function(i){ txt(i,"—"); });
   RNG.rows=[];

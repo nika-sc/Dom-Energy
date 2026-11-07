@@ -5814,6 +5814,15 @@ function Show-Range {
     $btnGo.ForeColor = C $script:CLR.text
     $f.Controls.Add($btnGo)
 
+    $btnFill = New-Object System.Windows.Forms.Button
+    $btnFill.Text = 'Заполнить пропуски'
+    $btnFill.Location = New-Object System.Drawing.Point(552, 44)
+    $btnFill.Size = New-Object System.Drawing.Size(150, 28)
+    $btnFill.FlatStyle = 'Flat'
+    $btnFill.BackColor = C '#24405A'
+    $btnFill.ForeColor = C $script:CLR.text
+    $f.Controls.Add($btnFill)
+
     $btnCsv = New-Object System.Windows.Forms.Button
     $btnCsv.Text = 'CSV за период'
     $btnCsv.Location = New-Object System.Drawing.Point(412, 44)
@@ -5887,6 +5896,13 @@ function Show-Range {
 
     $btnGo.Add_Click({
         $null = Update-RangeGrid $grid $sum $ip $d1.Value.ToString('yyyy-MM-dd') $d2.Value.ToString('yyyy-MM-dd')
+    })
+
+    $btnFill.Add_Click({
+        $a = $d1.Value.ToString('yyyy-MM-dd')
+        $b = $d2.Value.ToString('yyyy-MM-dd')
+        Fill-DayGaps $a
+        Add-Log ('заполнение за ' + $a + '…' + $b + ': идёт в фоне на плате')
     })
 
     $btnCsv.Add_Click({

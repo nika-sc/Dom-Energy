@@ -8683,7 +8683,7 @@ static size_t csvFileSize() {
 #define PAGE_SEND_STALL   800UL   // нет прогресса 0.8 с — клиент мёртв, рвём
 #define PAGE_CHUNK       4096     // мельче — больше задержек на TCP
 #define PAGE_MAX_TAGS      22     // столько подстановок в web/page.html
-#define PAGE_CAP        56000     // предел ответа: страница выросла (качество, защита)
+#define PAGE_CAP        64000     // предел ответа: страница выросла (период, погода)
 
 struct PgVal {
   const char* tag;      // "__FW__" и т.п.
