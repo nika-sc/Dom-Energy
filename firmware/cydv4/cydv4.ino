@@ -23,6 +23,19 @@
 #include <Update.h>
 #include <SPI.h>
 #include <SD.h>
+
+static void tarForEpoch(long a, float* day, float* night, uint8_t* h1, uint8_t* h2);
+
+// --- структура дня для /range (объявлена до функций: иначе автопрототипы её не видят)
+#define RNG_MAX 31
+struct RngDay {
+  uint32_t day;
+  float kwh, cost, dayKwh, nightKwh;
+  uint16_t vmin, vmax, pmax;
+  int16_t tmin, tmax;
+  uint8_t rows;
+};
+
 #include <time.h>
 #include <ArduinoJson.h>
 
@@ -357,16 +370,163 @@ float gVoltage = 0, gTemp = 0, gPower = 0, gEnergy = 0, gCost = 0;
 float gTodayKwh = 0, gTodayCost = 0;
 bool  gTempValid = false;      // температура реально пришла (а не ноль по умолчанию)
 
-// ---- тарифы: ночь 23:00-06:00
-const float TARIFF_DAY   = 8.39f;
-const float TARIFF_NIGHT = 4.49f;
+// ---- тарифы: ночь 23:00-06:00 (значения меняются из журнала тарифов)
+float TARIFF_DAY   = 8.39f;
+float TARIFF_NIGHT = 4.49f;
+
+// границы дневного окна текущего тарифа (по умолчанию 06:00-23:00)
+int gTarH1 = 6, gTarH2 = 23;
+
+// ---------------------------------------------------------------- журнал тарифов
+// Запись: с какой даты действует, цена день, цена ночь, границы дневного окна.
+// Старые записи не пересчитываются: стоимость уже заморожена в energy.csv (колонка cost),
+// а для периодов берётся тариф, действовавший в тот день.
+#define TAR_N 12
+struct TarRec { char from[11]; float day, night; uint8_t h1, h2; };
+static TarRec sTar[TAR_N];
+static uint8_t sTarCnt = 0;
+static char sTarToday[11] = "";      // какой тариф применён сейчас
+
+static void tarDump(String& out) {
+  out = "";
+  for (uint8_t i = 0; i < sTarCnt; i++) {
+    if (i) out += ';';
+    char b[48];
+    snprintf(b, sizeof(b), "%s,%.2f,%.2f,%u,%u", sTar[i].from, sTar[i].day, sTar[i].night,
+             (unsigned)sTar[i].h1, (unsigned)sTar[i].h2);
+    out += b;
+  }
+}
+
+static void tarParse(const String& src) {
+  sTarCnt = 0;
+  int start = 0;
+  while (start < (int)src.length() && sTarCnt < TAR_N) {
+    int semi = src.indexOf(';', start);
+    if (semi < 0) semi = src.length();
+    String one = src.substring(start, semi);
+    start = semi + 1;
+    one.trim();
+    if (one.length() < 10) continue;
+    int c1 = one.indexOf(',', 0);
+    int c2 = one.indexOf(',', c1 + 1);
+    int c3 = one.indexOf(',', c2 + 1);
+    int c4 = one.indexOf(',', c3 + 1);
+    if (c1 < 0 || c2 < 0) continue;
+    String d = one.substring(0, c1);
+    d.trim();
+    if (d.length() != 10) continue;
+    strncpy(sTar[sTarCnt].from, d.c_str(), 10);
+    sTar[sTarCnt].from[10] = 0;
+    sTar[sTarCnt].day = one.substring(c1 + 1, c2).toFloat();
+    if (sTar[sTarCnt].day <= 0) continue;
+    sTar[sTarCnt].night = (c2 > 0 && c3 > 0) ? one.substring(c2 + 1, c3).toFloat() : sTar[sTarCnt].day;
+    sTar[sTarCnt].h1 = (c3 > 0 && c4 > 0) ? (uint8_t)constrain(one.substring(c3 + 1, c4).toInt(), 0, 23) : 6;
+    sTar[sTarCnt].h2 = (c4 > 0) ? (uint8_t)constrain(one.substring(c4 + 1).toInt(), 1, 24) : 23;
+    sTarCnt++;
+  }
+}
+
+static void tarSave() {
+  String s;
+  tarDump(s);
+  Preferences p;
+  if (p.begin("tar", false)) { p.putString("log", s); p.end(); }
+}
+
+static void tarLoad() {
+  Preferences p;
+  if (!p.begin("tar", true)) return;
+  String s = p.getString("log", "");
+  p.end();
+  if (s.length()) tarParse(s);
+}
+
+// последний тариф, чья дата начала не позже указанной
+// (при одинаковой дате побеждает последняя запись — новая цена)
+static bool tarPick(const char* date, float* day, float* night, uint8_t* h1, uint8_t* h2) {
+  const TarRec* best = nullptr;
+  for (uint8_t i = 0; i < sTarCnt; i++) {
+    if (strcmp(sTar[i].from, date) <= 0) {
+      if (!best || strcmp(sTar[i].from, best->from) >= 0) best = &sTar[i];
+    }
+  }
+  if (!best) return false;
+  *day = best->day; *night = best->night;
+  if (h1) *h1 = best->h1;
+  if (h2) *h2 = best->h2;
+  return true;
+}
+
+// применить тариф на сегодня (вызывается на старте и при смене суток)
+static void tarApplyToday() {
+  struct tm ti;
+  if (!getLocalTime(&ti, 20)) return;
+  char d[11];
+  snprintf(d, sizeof(d), "%04d-%02d-%02d", ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+  if (!strcmp(d, sTarToday)) return;                 // уже применён
+  float day = TARIFF_DAY, night = TARIFF_NIGHT;
+  uint8_t h1 = gTarH1, h2 = gTarH2;
+  if (tarPick(d, &day, &night, &h1, &h2)) {
+    TARIFF_DAY = day; TARIFF_NIGHT = night;
+    gTarH1 = h1; gTarH2 = h2;
+  }
+  strncpy(sTarToday, d, 10); sTarToday[10] = 0;
+  Serial.printf("тариф на %s: день %.2f, ночь %.2f (записей %u)\n",
+                d, TARIFF_DAY, TARIFF_NIGHT, (unsigned)sTarCnt);
+}
+
+// первая запись: если журнал пуст — заводим текущий тариф на сегодня
+static void tarSeed() {
+  if (sTarCnt) return;
+  struct tm ti;
+  if (!getLocalTime(&ti, 50)) return;
+  snprintf(sTar[sTarCnt].from, sizeof(sTar[sTarCnt].from), "%04d-%02d-%02d",
+           ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+  sTar[sTarCnt].day = TARIFF_DAY;
+  sTar[sTarCnt].night = TARIFF_NIGHT;
+  sTar[sTarCnt].h1 = 6; sTar[sTarCnt].h2 = 23;
+  sTarCnt++;
+  tarSave();
+  Serial.println("тариф: журнал создан");
+}
 
 // нормы напряжения, ГОСТ 32144-2013
 const float V_NORM_LO = 207.0f, V_NORM_HI = 253.0f;
 const float V_WARN_LO = 190.0f, V_WARN_HI = 265.0f;
 
 float tariffForHour(int h) {
-  return (h >= 23 || h < 6) ? TARIFF_NIGHT : TARIFF_DAY;
+  return (h >= gTarH2 || h < gTarH1) ? TARIFF_NIGHT : TARIFF_DAY;
+}
+
+// средний тариф для интервала [a,b) с заданными ценами и окном
+float tariffAvgD(long a, long b, float day, float night, int h1, int h2) {
+  long nStart = (long)h2 * 3600L;      // начало ночи
+  long nEnd   = (long)h1 * 3600L;      // конец ночи
+  if (b <= a) {
+    long sod = ((a % 86400L) + 86400L) % 86400L;
+    return (sod >= nStart || sod < nEnd) ? night : day;
+  }
+  long total = b - a;
+  long stop = b;
+  if (total > 3L * 86400L) stop = a + 3L * 86400L;
+  long nightSec = 0;
+  long s = a;
+  int guard = 0;
+  while (s < stop && guard++ < 128) {
+    long sod = ((s % 86400L) + 86400L) % 86400L;
+    long next;
+    if (sod < nEnd)              next = s + (nEnd - sod);          // до конца ночи
+    else if (sod < nStart)       next = s + (nStart - sod);        // до начала ночи
+    else                         next = s + (86400L - sod);        // до полуночи
+    if (next > stop) next = stop;
+    if (sod >= nStart || sod < nEnd) nightSec += next - s;
+    s = next;
+  }
+  if (total > 3L * 86400L && stop > a)
+    nightSec = (long)((double)nightSec * (double)total / (double)(stop - a));
+  double nf = total > 0 ? (double)nightSec / (double)total : 0;
+  return (float)(nf * night + (1.0 - nf) * day);
 }
 
 // средний тариф при равномерной нагрузке: 7 ночных часов, 17 дневных
@@ -760,7 +920,169 @@ long lineEpoch(const String& line) {
        + h * 3600L + mi * 60L + se;
 }
 
+// ============================================================================
+//  /range — статистика за период: по дням, с делением день/ночь
+// ----------------------------------------------------------------------------
+//  Стоимость берётся из колонки cost в energy.csv (она пишется в момент записи,
+//  поэтому старые дни сохраняют старый тариф). День/ночь делим по времени.
+// ============================================================================
+
+static long dateEpoch(const char* s) {
+  int y = 0, mo = 0, d = 0;
+  if (sscanf(s, "%4d-%2d-%2d", &y, &mo, &d) != 3) return 0;
+  if (y < 2020 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31) return 0;
+  return daysFromCivil(y, (unsigned)mo, (unsigned)d) * 86400L;
+}
+
+static String dateFromEpoch(long t) {
+  long z = t / 86400L;
+  int y = 0, mo = 0, d = 0;
+  civilFromDays(z, &y, &mo, &d);
+  char b[16];
+  snprintf(b, sizeof(b), "%04d-%02d-%02d", y, mo, d);
+  return String(b);
+}
+
+// доля ночных секунд в интервале [a,b) при окне «день с h1 до h2»
+static float nightFrac(long a, long b, int h1, int h2) {
+  if (b <= a) return 0;
+  long nStart = (long)h2 * 3600L, nEnd = (long)h1 * 3600L;
+  long total = b - a, nightSec = 0, s = a;
+  int guard = 0;
+  while (s < b && guard++ < 64) {
+    long sod = ((s % 86400L) + 86400L) % 86400L;
+    long next;
+    if (sod < nEnd)        next = s + (nEnd - sod);
+    else if (sod < nStart) next = s + (nStart - sod);
+    else                   next = s + (86400L - sod);
+    if (next > b) next = b;
+    if (sod >= nStart || sod < nEnd) nightSec += next - s;
+    s = next;
+  }
+  return (float)nightSec / (float)total;
+}
+
+// разбор строки CSV: дата-время, вольт, ватт, кВт·ч, реле, стоимость, темп
+static bool csvRow(const String& l, long* t, float* v, float* p, float* e, float* c, float* tm) {
+  if (l.length() < 24) return false;
+  long ep = lineEpoch(l);
+  if (!ep) return false;
+  const char* s = l.c_str();
+  const char* q = s;
+  int comma = 0;
+  float vals[7] = {0, 0, 0, 0, 0, 0, 0};
+  while (*q && comma < 7) {
+    if (*q == ',') {
+      comma++;
+      if (comma < 7) vals[comma] = atof(q + 1);
+    }
+    q++;
+  }
+  if (comma < 5) return false;
+  *t = ep; *v = vals[1]; *p = vals[2]; *e = vals[3]; *c = vals[5];
+  *tm = (comma >= 6) ? vals[6] : -999.0f;   // температуры может не быть в старой строке
+  return true;
+}
+
+static int dayIndexOf(RngDay* arr, int n, uint32_t d) {
+  for (int i = 0; i < n; i++) if (arr[i].day == d) return i;
+  return -1;
+}
+
+static void rangeReset(RngDay* a, int n) {
+  for (int i = 0; i < n; i++) {
+    a[i].kwh = a[i].cost = a[i].dayKwh = a[i].nightKwh = 0;
+    a[i].vmin = 0xFFFF; a[i].vmax = 0; a[i].pmax = 0;
+    a[i].tmin = 999; a[i].tmax = -999; a[i].rows = 0;
+  }
+}
+
+// пройти файл месяца и накопить в buckets
+static void rangeScanFile(const char* path, long fromT, long toT, RngDay* b, int nb) {
+  File f = SD.open(path, FILE_READ);
+  if (!f) return;
+  // читаем БЛОКАМИ и режем на строки: readStringUntil() читает по байту и на 9000
+  // строк уходило 15 секунд, из-за чего страница ждала период целую вечность
+  static char buf[1400];
+  int len = 0;
+  long pt = 0; float pe = 0, pc = 0;
+  bool havePrev = false;
+  int guard = 0;
+
+  auto processLine = [&](char* s) {
+    int sl = (int)strlen(s);
+    if (sl < 24) return;
+    long rt; float v, p, e, c, tm;
+    String line(s);
+    if (!csvRow(line, &rt, &v, &p, &e, &c, &tm)) return;
+    if (rt < fromT - 86400L || rt > toT + 86400L) { havePrev = false; return; }
+    if (e <= 0) return;                       // импорт/GAPFILL с нулём — пропускаем
+    uint32_t day = (uint32_t)(rt / 86400L);
+    int idx = dayIndexOf(b, nb, day);
+    if (idx < 0) return;
+    if (havePrev && (uint32_t)(pt / 86400L) != day) havePrev = false;   // не тянем через сутки
+    if (havePrev && rt > pt && e >= pe) {
+      float de = e - pe;
+      if (de > 0 && de < 100) {
+        b[idx].kwh += de;
+        float dd, nn; uint8_t w1, w2;
+        tarForEpoch(pt, &dd, &nn, &w1, &w2);
+        float nf = nightFrac(pt, rt, (int)w1, (int)w2);
+        b[idx].nightKwh += de * nf;
+        b[idx].dayKwh += de * (1.0f - nf);
+      }
+    }
+    if (v > 50) { if (v < b[idx].vmin) b[idx].vmin = (uint16_t)v; if (v > b[idx].vmax) b[idx].vmax = (uint16_t)v; }
+    if (tm > 0.05f && tm < 120) {
+      if (tm * 10 < b[idx].tmin) b[idx].tmin = (int16_t)(tm * 10);
+      if (tm * 10 > b[idx].tmax) b[idx].tmax = (int16_t)(tm * 10);
+    }
+    if (p > b[idx].pmax) b[idx].pmax = (uint16_t)p;
+    if (c > 0) b[idx].cost = c;               // накопленная за сутки — берём последнее
+    b[idx].rows++;
+    havePrev = true; pt = rt; pe = e; pc = c;
+  };
+
+  while (f.available()) {
+    int r = f.read((uint8_t*)buf + len, (int)sizeof(buf) - 1 - len);
+    if (r <= 0) break;
+    len += r;
+    int from = 0;
+    for (int i = 0; i < len; i++) {
+      if (buf[i] == '\n') {
+        buf[i] = 0;
+        processLine(buf + from);
+        from = i + 1;
+        if ((++guard & 255) == 0) { esp_task_wdt_reset(); yield(); }
+      }
+    }
+    if (from > 0) { memmove(buf, buf + from, (size_t)(len - from)); len -= from; }
+    if (len >= (int)sizeof(buf) - 1) len = 0;   // слишком длинная строка — выбрасываем
+  }
+  if (len > 0) { buf[len] = 0; processLine(buf); }
+  f.close();
+}
+
+
+
 // Средний тариф на отрезке [a,b] с учётом ночных границ.
+// тариф, действовавший в день начала интервала (для пересчёта старых суток)
+static void tarForEpoch(long a, float* day, float* night, uint8_t* h1, uint8_t* h2) {
+  *day = TARIFF_DAY; *night = TARIFF_NIGHT; *h1 = gTarH1; *h2 = gTarH2;
+  time_t ts = (time_t)a;
+  struct tm ti;
+  localtime_r(&ts, &ti);
+  char d[11];
+  snprintf(d, sizeof(d), "%04d-%02d-%02d", ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+  tarPick(d, day, night, h1, h2);
+}
+
+float tariffAvgOn(long a, long b) {
+  float d, n; uint8_t h1, h2;
+  tarForEpoch(a, &d, &n, &h1, &h2);
+  return tariffAvgD(a, b, d, n, h1, h2);
+}
+
 float tariffAvg(long a, long b) {
   if (b <= a) {
     long sod = ((a % 86400L) + 86400L) % 86400L;
@@ -1032,7 +1354,7 @@ bool scanSdRange(long start, long end, float nowKwh,
     if (b <= a) continue;
     float w = (float)(b - a) / (float)(t1 - t0);
     double din = (double)de * w;
-    float ta = tariffAvg(a, b);
+    float ta = tariffAvgOn(a, b);   // тариф ДНЯ записи
     costSum += din * ta;
     deltaSum += din;
     double nf = (TARIFF_DAY - ta) / (TARIFF_DAY - TARIFF_NIGHT);
@@ -1052,7 +1374,7 @@ bool scanSdRange(long start, long end, float nowKwh,
         long b = now;
         if (b > a) {
           double din = (double)de;
-          float ta = tariffAvg(a, b);
+          float ta = tariffAvgOn(a, b);   // тариф ДНЯ записи
           costSum += din * ta;
           deltaSum += din;
           double nf = (TARIFF_DAY - ta) / (TARIFF_DAY - TARIFF_NIGHT);
@@ -1821,10 +2143,12 @@ bool tpPoint(int* sx, int* sy) {
 // работала болгарка на 1300 Вт). Поэтому график мощности за прошедшие часы
 // восстанавливаем из облака: там phase_a с шагом 16 секунд.
 // Один час за проход loop(), чтобы не держать цикл.
+
 bool cloudCall(const String& method, const String& path, String& body, int maxRaw = 3500, const String& reqBody = "");  // объявлена ниже
 extern unsigned long gCloudFailRun;   // неудач облака подряд (см. cloudTick)
 unsigned long netBudgetLeft();        // остаток сетевого бюджета прохода (см. cloudCall)
 int b64decode(const char* in, uint8_t* out, int maxOut);
+
 
 // «Фоновый» облачный запрос — дозаполнение (PWRFILL/PWRHIST/GAPFILL).
 // При отказе connect cloudCall() делает ВТОРУЮ попытку; для фона она не нужна:
@@ -9190,6 +9514,8 @@ int  gapTodayMinutes() { return sGF.todayMin; }
 #define MQTT_SOCKET_TIMEOUT 3
 #include <PubSubClient.h>
 
+
+
 #define MQ_HA_PREFIX  "homeassistant"
 #define MQ_STATE_MS   30000UL    // публикация состояния: раз в 30 с
 #define MQ_MIN_MS      5000UL    // при изменении — но не чаще раза в 5 с
@@ -11674,6 +12000,173 @@ void webSetup() {
     gWeb.send(200, "application/json; charset=utf-8", out);
   });
 
+  gWeb.on("/range", []() {
+    if (!gWeb.hasArg("from") || !gWeb.hasArg("to")) {
+      gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"from/to\"}");
+      return;
+    }
+    String f = gWeb.arg("from"), tt = gWeb.arg("to");
+    long fE = dateEpoch(f.c_str()), tE = dateEpoch(tt.c_str());
+    if (!fE || !tE || tE < fE) {
+      gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"bad date\"}");
+      return;
+    }
+    long days = (tE - fE) / 86400L + 1;
+    if (days > RNG_MAX) {
+      gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"max 31 days\",\"days\":" + String(days) + "}");
+      return;
+    }
+    static RngDay agg[RNG_MAX];
+    // кэш: тот же диапазон и файл не вырос — отдаём без сканирования (скан дорогой)
+    static char cKey[40] = "";
+    static String cJson;
+    static unsigned long cSize = 0, cAt = 0;
+    char kbuf[40];
+    snprintf(kbuf, sizeof(kbuf), "%s|%s", f.c_str(), tt.c_str());
+    File probe = SD.open("/energy.csv", FILE_READ);
+    unsigned long curSize = probe ? (unsigned long)probe.size() : 0;
+    if (probe) probe.close();
+    if (!strcmp(kbuf, cKey) && cJson.length() && curSize < cSize + 8192UL && millis() - cAt < 120000UL) {
+      gWeb.send(200, "application/json; charset=utf-8", cJson);
+      return;
+    }
+    int n = (int)days;
+    for (int i = 0; i < n; i++) { agg[i].day = (uint32_t)((fE / 86400L) + i); }
+    rangeReset(agg, n);
+
+    // проходим по месяцам: текущий файл + архивы
+    int y1, m1, d1, y2, m2, d2;
+    sscanf(f.c_str(), "%4d-%2d-%2d", &y1, &m1, &d1);
+    sscanf(tt.c_str(), "%4d-%2d-%2d", &y2, &m2, &d2);
+    int stamp = y1 * 100 + m1, stampEnd = y2 * 100 + m2;
+    struct tm nowTi;
+    int curStamp = 0;
+    if (getLocalTime(&nowTi, 20)) curStamp = (nowTi.tm_year + 1900) * 100 + nowTi.tm_mon + 1;
+    int sy = stamp / 100, sm = stamp % 100;
+    int ey = stampEnd / 100, em = stampEnd % 100;
+    while (sy < ey || (sy == ey && sm <= em)) {
+      int s = sy * 100 + sm;
+      char path[40];
+      if (s == curStamp) strcpy(path, "/energy.csv");
+      else snprintf(path, sizeof(path), "/energy-%04d-%02d.csv", s / 100, s % 100);
+      if (SD.exists(path)) rangeScanFile(path, fE, tE + 86400L - 1, agg, n);
+      sm++;
+      if (sm > 12) { sm = 1; sy++; }
+    }
+
+    String out = "{\"from\":\"" + f + "\",\"to\":\"" + tt + "\",\"days\":" + String(n);
+    float tK = 0, tC = 0, tD = 0, tN = 0;
+    uint16_t vmin = 0xFFFF, vmax = 0, pmaxAll = 0;
+    for (int i = 0; i < n; i++) {
+      tK += agg[i].kwh; tC += agg[i].cost; tD += agg[i].dayKwh; tN += agg[i].nightKwh;
+      if (agg[i].vmin < vmin) vmin = agg[i].vmin;
+      if (agg[i].vmax > vmax) vmax = agg[i].vmax;
+      if (agg[i].pmax > pmaxAll) pmaxAll = agg[i].pmax;
+    }
+    if (vmin == 0xFFFF) vmin = 0;
+    out += ",\"totals\":{\"kwh\":" + String(tK, 2) + ",\"cost\":" + String(tC, 2);
+    out += ",\"dayKwh\":" + String(tD, 2) + ",\"nightKwh\":" + String(tN, 2);
+    float tDC = 0, tNC = 0;
+    for (int i = 0; i < n; i++) {
+      float dPr, nPr; uint8_t w1, w2;
+      tarForEpoch((long)agg[i].day * 86400L, &dPr, &nPr, &w1, &w2);
+      tDC += agg[i].dayKwh * dPr;
+      tNC += agg[i].nightKwh * nPr;
+    }
+    out += ",\"dayCost\":" + String(tDC, 2);
+    out += ",\"nightCost\":" + String(tNC, 2);
+    out += ",\"avgDayKwh\":" + String(n ? tK / n : 0, 2);
+    out += ",\"vmin\":" + String(vmin) + ",\"vmax\":" + String(vmax) + ",\"pmax\":" + String(pmaxAll) + "}";
+    out += ",\"rows\":[";
+    for (int i = 0; i < n; i++) {
+      if (i) out += ',';
+      uint32_t d = agg[i].day;
+      out += "{\"d\":\"" + dateFromEpoch((long)d * 86400L) + "\"";
+      out += ",\"kwh\":" + String(agg[i].kwh, 3) + ",\"cost\":" + String(agg[i].cost, 2);
+      float dPr, nPr; uint8_t w1, w2;
+      tarForEpoch((long)agg[i].day * 86400L, &dPr, &nPr, &w1, &w2);
+      out += ",\"dayKwh\":" + String(agg[i].dayKwh, 3) + ",\"nightKwh\":" + String(agg[i].nightKwh, 3);
+      out += ",\"dayCost\":" + String(agg[i].dayKwh * dPr, 2) + ",\"nightCost\":" + String(agg[i].nightKwh * nPr, 2);
+      out += ",\"vmin\":" + String(agg[i].vmin == 0xFFFF ? 0 : agg[i].vmin);
+      out += ",\"vmax\":" + String(agg[i].vmax) + ",\"pmax\":" + String(agg[i].pmax);
+      out += ",\"tmin\":" + String(agg[i].tmin == 999 ? 0 : agg[i].tmin / 10.0f, 1);
+      out += ",\"tmax\":" + String(agg[i].tmax == -999 ? 0 : agg[i].tmax / 10.0f, 1);
+      out += ",\"rows\":" + String(agg[i].rows) + "}";
+    }
+    out += "]}";
+    cJson = out;
+    strncpy(cKey, kbuf, sizeof(cKey) - 1);
+    cKey[sizeof(cKey) - 1] = 0;
+    cSize = curSize;
+    cAt = millis();
+    gWeb.send(200, "application/json; charset=utf-8", out);
+  });
+
+  gWeb.on("/tariff", []() {
+    bool changed = false;
+    if (gWeb.hasArg("reset")) {
+      sTarCnt = 0;
+      sTarToday[0] = 0;
+      tarSeed();
+      tarApplyToday();
+      changed = true;
+    }
+    if (gWeb.hasArg("set")) {
+      String s = gWeb.arg("set");          // "8.39,4.49,6,23"
+      String from = gWeb.hasArg("from") ? gWeb.arg("from") : String(sTarToday);
+      int c1 = s.indexOf(','); int c2 = s.indexOf(',', c1 + 1);
+      int c3 = s.indexOf(',', c2 + 1);
+      bool dateOk = from.length() == 10 && from[4] == '-' && from[7] == '-';
+      for (int k = 0; dateOk && k < 10; k++) {
+        if (k == 4 || k == 7) continue;
+        if (from[k] < '0' || from[k] > '9') dateOk = false;
+      }
+      int mm = from.substring(5, 7).toInt(), dd = from.substring(8, 10).toInt();
+      if (dateOk && (mm < 1 || mm > 12 || dd < 1 || dd > 31)) dateOk = false;
+      if (!dateOk) { gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"bad date\"}"); return; }
+      // запись с такой же датой заменяем, а не плодим дубликаты
+      for (uint8_t i = 0; i < sTarCnt; i++) {
+        if (!strcmp(sTar[i].from, from.c_str())) {
+          String sv = gWeb.arg("set");
+          int q1 = sv.indexOf(','), q2 = sv.indexOf(',', q1 + 1), q3 = sv.indexOf(',', q2 + 1);
+          sTar[i].day = sv.substring(0, q1).toFloat();
+          sTar[i].night = (q2 > 0) ? sv.substring(q1 + 1, q2).toFloat() : sTar[i].day;
+          sTar[i].h1 = (q2 > 0 && q3 > 0) ? (uint8_t)constrain(sv.substring(q2 + 1, q3).toInt(), 0, 23) : 6;
+          sTar[i].h2 = (q3 > 0) ? (uint8_t)constrain(sv.substring(q3 + 1).toInt(), 1, 24) : 23;
+          sTarToday[0] = 0; tarSave(); tarApplyToday();
+          gWeb.send(200, "application/json", "{\"ok\":true,\"replaced\":1}");
+          return;
+        }
+      }
+      if (sTarCnt >= TAR_N) { gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"log full\"}"); return; }
+      if (c1 > 0 && sTarCnt < TAR_N) {
+        TarRec& r = sTar[sTarCnt];
+        strncpy(r.from, from.c_str(), 10); r.from[10] = 0;
+        r.day = s.substring(0, c1).toFloat();
+        r.night = (c2 > 0) ? s.substring(c1 + 1, c2).toFloat() : r.day;
+        r.h1 = (c2 > 0 && c3 > 0) ? (uint8_t)constrain(s.substring(c2 + 1, c3).toInt(), 0, 23) : 6;
+        r.h2 = (c3 > 0) ? (uint8_t)constrain(s.substring(c3 + 1).toInt(), 1, 24) : 23;
+        if (r.day > 0) { sTarCnt++; sTarToday[0] = 0; tarSave(); tarApplyToday(); changed = true; }
+      }
+    }
+    String out = "{\"day\":";
+    out += String(TARIFF_DAY, 2);
+    out += ",\"night\":";
+    out += String(TARIFF_NIGHT, 2);
+    out += ",\"today\":\"" + String(sTarToday) + "\"";
+    out += ",\"cnt\":" + String((unsigned)sTarCnt);
+    out += ",\"log\":[";
+    for (uint8_t i = 0; i < sTarCnt; i++) {
+      if (i) out += ',';
+      char b[96];
+      snprintf(b, sizeof(b), "{\"from\":\"%s\",\"day\":%.2f,\"night\":%.2f,\"h1\":%u,\"h2\":%u}",
+               sTar[i].from, sTar[i].day, sTar[i].night, (unsigned)sTar[i].h1, (unsigned)sTar[i].h2);
+      out += b;
+    }
+    out += "]}";
+    gWeb.send(200, "application/json; charset=utf-8", out);
+  });
+
   gWeb.on("/tuya", []() {
     String out = "{\"a1\":\"" + gAlarm1 + "\",\"a2\":\"" + gAlarm2 + "\"";
     out += ",\"temp\":" + String(gTemp, 1);
@@ -11802,6 +12295,9 @@ void setup() {
   dispLoad();          // яркость/вкл из NVS — до экрана, чтобы ночью не вспыхнуть
   protLoad();          // уставки защиты из NVS
   schLoad();           // правила планировщика
+  tarLoad();          // журнал тарифов
+  tarSeed();          // если пуст — заводим текущий
+  tarApplyToday();    // применяем тариф на сегодня
   dispPwmBegin();      // ШИМ подсветки до tft.init()
   ledInit();           // синий на время загрузки
   gLedBootUntil = millis() + 3000;
@@ -12364,6 +12860,16 @@ void loop() {
     if (millis() - sLastV > 1000UL) {
       sLastV = millis();
       if (gVoltage > 80 && gVoltage < 400) volQuality(gVoltage);
+    }
+  }
+
+  // раз в 10 минут: не сменились ли сутки/тариф
+  {
+    static unsigned long sTarAt = 0;
+    if (millis() - sTarAt > 600000UL) {
+      sTarAt = millis();
+      tarSeed();        // если журнал пуст (например, на старте не было времени) — заведём
+      tarApplyToday();
     }
   }
 
