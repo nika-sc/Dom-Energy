@@ -5704,6 +5704,8 @@ $script:trayAt = [datetime]::MinValue
 $script:discovered = @()
 $script:alertLast = @{}
 
+$script:alertState = @{}
+
 $script:alertSeen = @{}
 
 
@@ -6182,7 +6184,12 @@ function Send-TgRelay($text) {
 
         if (-not (Test-Path $relay)) { Add-Log ('нет tg-relay.ps1: ' + $relay) 'err'; return }
 
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+        # не чаще одной отправки в 3 секунды, чтобы пачка событий не плодила процессы
+    $nowTg = Get-Date
+    if ($script:tgLastAt -and ($nowTg - $script:tgLastAt).TotalSeconds -lt 3) { Start-Sleep -Milliseconds 3100 }
+    $script:tgLastAt = Get-Date
+
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
 
         $b64 = [Convert]::ToBase64String($bytes)
 
@@ -6199,6 +6206,24 @@ function Send-TgRelay($text) {
 
 
 # cooldown: одно и то же уведомление не чаще раза в 15 минут
+
+function Alert-State($key, $bad, $title, $text, $kind, $okTitle, $okText) {
+    # Уведомляем о СМЕНЕ состояния, а не каждые 15 минут: пока напряжение
+    # висит за порогом, сообщений больше не будет; вернулось в норму — придёт
+    # одно короткое «восстановилось».
+    $prev = [bool]$script:alertState[$key]
+    if ($bad -eq $prev) { return }
+    $script:alertState[$key] = $bad
+    if ($bad) {
+        Add-Log ('УВЕДОМЛЕНИЕ: ' + $title + ' — ' + $text) $kind
+        Show-Toast $title $text $kind
+        Send-TgRelay ($title + ': ' + $text)
+    } elseif ($okTitle) {
+        Add-Log ('восстановилось: ' + $okTitle) 'ok'
+        Show-Toast $okTitle $okText 'ok'
+        Send-TgRelay ($okTitle + ': ' + $okText)
+    }
+}
 
 function Alert-Once($key, $title, $text, $kind) {
 
@@ -6219,6 +6244,43 @@ function Alert-Once($key, $title, $text, $kind) {
 }
 
 
+
+function Maybe-DailyReport {
+    # Ежедневная сводка в Telegram. Включается в settings.json:
+    #   "tgDaily": true, "tgDailyAt": "23:55". По умолчанию выключено.
+    if (-not [bool]$script:cfg.tgDaily) { return }
+    $now = Get-Date
+    $today = $now.ToString('yyyy-MM-dd')
+    if ($script:tgDailyDay -eq $today) { return }
+    $at = [string]$script:cfg.tgDailyAt
+    if (-not $at) { $at = '23:55' }
+    if ($now.ToString('HH:mm') -lt $at) { return }
+    $script:tgDailyDay = $today
+    $cand = @()
+    if ($script:cfg.tgScript) { $cand += [string]$script:cfg.tgScript }
+    $cand += (Join-Path $script:AppDir 'energy-telegram.ps1')
+    $cand += 'D:\DSH-Workspace\timelapse\watchdog\energy-telegram.ps1'
+    $scr = $cand | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    if (-not $scr) { Add-Log 'ежедневный отчёт: не найден energy-telegram.ps1' 'err'; return }
+    try {
+        Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scr) | Out-Null
+        Add-Log 'ежедневный отчёт: отправлен' 'ok'
+    } catch {
+        Add-Log ('ежедневный отчёт: ошибка ' + $_.Exception.Message) 'err'
+    }
+}
+
+function Log-AlertConfig {
+    if ($script:alertCfgLogged) { return }
+    $script:alertCfgLogged = $true
+    $on = $(if ([bool]$script:cfg.alertOn) { 'вкл' } else { 'выкл' })
+    $tg = $(if ([bool]$script:cfg.tgRelay) { 'через реле' } else { 'выкл' })
+    $dl = $(if ([bool]$script:cfg.tgDaily) { [string]$script:cfg.tgDailyAt } else { 'выкл' })
+    Add-Log ('уведомления: ' + $on + ', U ' + (Get-AlertCfg 'alertVMin' 200) + '–' + (Get-AlertCfg 'alertVMax' 250) +
+        ' В, t ' + (Get-AlertCfg 'alertTMax' 55) + ' °C, скачок ' + (Get-AlertCfg 'alertSpikeW' 500) +
+        ' Вт, офлайн ' + (Get-AlertCfg 'alertOffMin' 3) + ' мин, telegram ' + $tg + ', сводка ' + $dl)
+}
 
 function Check-Alerts {
 
@@ -6281,16 +6343,12 @@ function Check-Alerts {
             }
         }
 
-        Alert-Once 'offline' 'Плата не отвечает' ('нет данных ' + [Math]::Round($age, 1) + ' мин · ' + $script:cfg.boardIp) 'err'
+        Alert-State 'offline' $true 'Плата не отвечает' ('нет данных ' + [Math]::Round($age, 1) + ' мин · ' + $script:cfg.boardIp) 'err' 'Плата на связи' ('данные снова идут · ' + $script:cfg.boardIp)
 
         return
 
-    } elseif ($script:alertSeen['wasOffline'] -and $graceOver) {
-
-        $script:alertSeen['wasOffline'] = $false
-
-        Alert-Once 'online' 'Плата на связи' ('данные снова идут · ' + $script:cfg.boardIp) 'info'
-
+    } elseif ($graceOver) {
+        Alert-State 'offline' $false '' '' 'info'
     }
 
     if ($null -eq $d) { return }
@@ -6303,9 +6361,8 @@ function Check-Alerts {
 
     if ($v -gt 0) {
 
-        if ($v -lt $vmin) { Alert-Once 'vlow' 'Низкое напряжение' ($v.ToString('0') + ' В · порог ' + $vmin + ' В') 'warn' }
-
-        if ($v -gt $vmax) { Alert-Once 'vhigh' 'Высокое напряжение' ($v.ToString('0') + ' В · порог ' + $vmax + ' В') 'warn' }
+        Alert-State 'vlow' ($v -lt $vmin) 'Низкое напряжение' ($v.ToString('0') + ' В · порог ' + $vmin + ' В') 'warn' 'Напряжение в норме' ($v.ToString('0') + ' В')
+        Alert-State 'vhigh' ($v -gt $vmax) 'Высокое напряжение' ($v.ToString('0') + ' В · порог ' + $vmax + ' В') 'warn' 'Напряжение в норме' ($v.ToString('0') + ' В')
 
         $script:alertSeen['v'] = $v
 
@@ -6317,10 +6374,8 @@ function Check-Alerts {
 
     $tp = 0.0; try { $tp = [double]$d.temp } catch { }
 
-    if ($tp -gt 0 -and $tp -ge $tmax) {
-
-        Alert-Once 'temp' 'Перегрев реле' ($tp.ToString('0.0') + ' °C · порог ' + $tmax + ' °C') 'err'
-
+    if ($tp -gt 0) {
+        Alert-State 'temp' ($tp -ge $tmax) 'Перегрев реле' ($tp.ToString('0.0') + ' °C · порог ' + $tmax + ' °C') 'err' 'Реле остыло' ($tp.ToString('0.0') + ' °C')
     }
 
 
@@ -6365,7 +6420,11 @@ function On-Tick {
 
 
 
+        Log-AlertConfig
+
         Check-Alerts
+
+        Maybe-DailyReport
 
 
 
