@@ -5711,6 +5711,35 @@ $script:alertSeen = @{}
 
 
 
+
+function Update-RangeGrid($grid, $sum, $ip, $from, $to) {
+    if ([datetime]$from -gt [datetime]$to) { $x = $from; $from = $to; $to = $x }
+    $sum.Text = 'считаю…'
+    try {
+        $r = Invoke-RestMethod ("http://" + $ip + "/range?from=" + $from + "&to=" + $to) -TimeoutSec 120
+        $grid.Rows.Clear()
+        foreach ($row in $r.rows) {
+            $null = $grid.Rows.Add(
+                $row.d, [math]::Round($row.kwh, 2), [math]::Round($row.cost, 2),
+                [math]::Round($row.dayKwh, 2), [math]::Round($row.nightKwh, 2),
+                [math]::Round($row.dayCost, 2), [math]::Round($row.nightCost, 2),
+                ([string]$row.vmin + '–' + [string]$row.vmax),
+                ([string]$row.tmin + '–' + [string]$row.tmax), $row.pmax)
+        }
+        $t = $r.totals
+        $sum.Text = ('итого ' + [math]::Round($t.kwh, 2) + ' кВт·ч · ' + [math]::Round($t.cost, 2) + ' ₽' +
+                     ' · день ' + [math]::Round($t.dayKwh, 2) + ' / ночь ' + [math]::Round($t.nightKwh, 2) +
+                     ' · в среднем ' + [math]::Round($t.avgDayKwh, 2) + ' кВт·ч в сутки' +
+                     ' · U ' + $t.vmin + '–' + $t.vmax + ' В · пик ' + $t.pmax + ' Вт')
+        Add-Log ('период ' + $from + '…' + $to + ': ' + [math]::Round($t.kwh, 2) + ' кВт·ч, ' + [math]::Round($t.cost, 2) + ' ₽')
+        return $r
+    } catch {
+        $sum.Text = 'ошибка: ' + $_.Exception.Message
+        Add-Log ('период: ошибка ' + $_.Exception.Message)
+        return $null
+    }
+}
+
 function Show-Range {
     $ip = [string]$script:cfg.boardIp
     if (-not $ip) { $ip = '192.168.0.51' }
@@ -5810,56 +5839,33 @@ function Show-Range {
 
     $script:rangeRows = @()
 
-    $load = {
-        $a = $d1.Value.ToString('yyyy-MM-dd')
-        $b = $d2.Value.ToString('yyyy-MM-dd')
-        if ([datetime]$a -gt [datetime]$b) { $t = $a; $a = $b; $b = $t }
-        $sum.Text = 'считаю…'
-        try {
-            $r = Invoke-RestMethod ("http://" + $ip + "/range?from=" + $a + "&to=" + $b) -TimeoutSec 120
-            $script:rangeRows = @($r.rows)
-            $grid.Rows.Clear()
-            foreach ($row in $r.rows) {
-                $null = $grid.Rows.Add(
-                    $row.d, [math]::Round($row.kwh, 2), [math]::Round($row.cost, 2),
-                    [math]::Round($row.dayKwh, 2), [math]::Round($row.nightKwh, 2),
-                    [math]::Round($row.dayCost, 2), [math]::Round($row.nightCost, 2),
-                    ([string]$row.vmin + '–' + [string]$row.vmax),
-                    ([string]$row.tmin + '–' + [string]$row.tmax), $row.pmax)
-            }
-            $t = $r.totals
-            $sum.Text = ('итого ' + [math]::Round($t.kwh, 2) + ' кВт·ч · ' + [math]::Round($t.cost, 2) + ' ₽' +
-                         ' · день ' + [math]::Round($t.dayKwh, 2) + ' / ночь ' + [math]::Round($t.nightKwh, 2) +
-                         ' · в среднем ' + [math]::Round($t.avgDayKwh, 2) + ' кВт·ч в сутки' +
-                         ' · U ' + $t.vmin + '–' + $t.vmax + ' В · пик ' + $t.pmax + ' Вт')
-            Add-Log ('период ' + $a + '…' + $b + ': ' + [math]::Round($t.kwh, 2) + ' кВт·ч')
-        } catch {
-            $sum.Text = 'ошибка: ' + $_.Exception.Message
-        }
-    }
 
-    $btnGo.Add_Click($load)
     foreach ($c in $f.Controls) {
         if ($c -is [System.Windows.Forms.Button] -and $null -ne $c.Tag) {
+            $tag = [int]$c.Tag
             $c.Add_Click({
                 $now = Get-Date
-                switch ([int]$this.Tag) {
-                    0 { $a = $now;                 $b = $now }
-                    1 { $a = $now.AddDays(-1);     $b = $a }
-                    2 { $a = $now.AddDays(-6);     $b = $now }
-                    3 { $a = $now.AddDays(-29);    $b = $now }
-                    4 { $a = Get-Date -Year $now.Year -Month $now.Month -Day 1; $b = $now }
+                switch ($tag) {
+                    0 { $a = $now;              $b = $now }
+                    1 { $a = $now.AddDays(-1);  $b = $a }
+                    2 { $a = $now.AddDays(-6);  $b = $now }
+                    3 { $a = $now.AddDays(-29); $b = $now }
+                    4 { $a = (Get-Date -Year $now.Year -Month $now.Month -Day 1); $b = $now }
                     5 { $a = (Get-Date -Year $now.Year -Month $now.Month -Day 1).AddMonths(-1)
                         $b = (Get-Date -Year $now.Year -Month $now.Month -Day 1).AddDays(-1) }
-                    6 { $a = Get-Date -Year $now.Year -Month 1 -Day 1;           $b = $now }
-                    7 { $a = Get-Date -Year $now.Year -Month 1 -Day 1;           $b = $now }
+                    6 { $a = (Get-Date -Year $now.Year -Month 1 -Day 1); $b = $now }
+                    7 { $a = (Get-Date -Year $now.Year -Month 1 -Day 1); $b = $now }
                 }
                 $d1.Value = $a
                 $d2.Value = $b
-                & $load
+                $null = Update-RangeGrid $grid $sum $ip $a.ToString('yyyy-MM-dd') $b.ToString('yyyy-MM-dd')
             }.GetNewClosure())
         }
     }
+
+    $btnGo.Add_Click({
+        $null = Update-RangeGrid $grid $sum $ip $d1.Value.ToString('yyyy-MM-dd') $d2.Value.ToString('yyyy-MM-dd')
+    })
 
     $btnCsv.Add_Click({
         if (-not $script:rangeRows -or $script:rangeRows.Count -eq 0) { return }
@@ -5880,7 +5886,7 @@ function Show-Range {
 
     $d1.Value = (Get-Date).AddDays(-6)
     $d2.Value = (Get-Date)
-    & $load
+    $null = Update-RangeGrid $grid $sum $ip $d1.Value.ToString('yyyy-MM-dd') $d2.Value.ToString('yyyy-MM-dd')
     [void]$f.ShowDialog()
 }
 
