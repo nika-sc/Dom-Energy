@@ -278,8 +278,8 @@ svg.chart{cursor:default}
     <div class="t"><div class="k">В среднем в сутки</div><div class="v c3" id="rAvg">—</div><div class="s" id="rAvgS">—</div></div>
   </div>
   <div class="rtwrap"><table class="rt" id="rngTbl"><thead><tr>
-    <th>День</th><th>кВт·ч</th><th>₽</th><th>день</th><th>ночь</th><th>U мин–макс</th><th>t мин–макс</th><th>пик</th>
-  </tr></thead><tbody><tr><td colspan="8" class="mut">нет данных</td></tr></tbody></table></div>
+    <th>День</th><th>кВт·ч</th><th>₽</th><th>день</th><th>ночь</th><th>U мин–макс</th><th>t мин–макс</th><th>пик</th><th>погода</th>
+  </tr></thead><tbody><tr><td colspan="9" class="mut">нет данных</td></tr></tbody></table></div>
 </div>
 
 <div class="two">
@@ -863,15 +863,16 @@ function rngRender(j){
     h+="<tr><td>"+fmtDate(r.d)+"</td><td>"+num(r.kwh,2)+"</td><td>"+num(r.cost,2)+"</td>"
       +"<td class='mut'>"+num(r.dayKwh,2)+"</td><td class='mut'>"+num(r.nightKwh,2)+"</td>"
       +"<td>"+r.vmin+"–"+r.vmax+"</td><td>"+(r.tmin?num(r.tmin,1)+"–"+num(r.tmax,1):"—")+"</td>"
-      +"<td class='mut'>"+r.pmax+"</td></tr>";
+      +"<td class='mut'>"+r.pmax+"</td>"
+      +"<td class='mut' title='"+(r.w||"")+"'>"+(r.w? r.w+(r.wtmin? ' · '+num(r.wtmin,0)+'…'+num(r.wtmax,0)+'°':'') : '—')+"</td></tr>";
   }
-  if(!h) h="<tr><td colspan='8' class='mut'>нет данных за период</td></tr>";
+  if(!h) h="<tr><td colspan='9' class='mut'>нет данных за период</td></tr>";
   tb.innerHTML=h;
 }
 function rngClear(){
   ["rKwh","rCost","rDN","rAvg","rKwhS","rCostS","rDNS","rAvgS"].forEach(function(i){ txt(i,"—"); });
   RNG.rows=[];
-  G("rngTbl").getElementsByTagName("tbody")[0].innerHTML="<tr><td colspan='8' class='mut'>нет данных за период</td></tr>";
+  G("rngTbl").getElementsByTagName("tbody")[0].innerHTML="<tr><td colspan='9' class='mut'>нет данных за период</td></tr>";
 }
 // период длиннее 31 дня плата считает порциями: 31 день за запрос
 function rngLoad(from,to){

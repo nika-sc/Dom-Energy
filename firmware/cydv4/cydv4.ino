@@ -4934,6 +4934,96 @@ static void weatherDesc(char* out, size_t n, int maxChars) {
   }
 }
 
+
+// ============================================================================
+//  История погоды: одна строка на день в /weather.csv
+//  Формат: ГГГГ-ММ-ДД,tmin,tmax,описание,вероятность дождя,осадки
+//  Нужна, чтобы в статистике за период была погода за каждый день.
+// ============================================================================
+#define WLOG_PATH "/weather.csv"
+static float    wLogTMin = 999, wLogTMax = -999;   // фактические мин/макс за сегодня
+static uint32_t wLogDay = 0;                        // день, к которому относятся
+
+static uint32_t wDayKey(int y, int mo, int d) {
+  return (uint32_t)daysFromCivil(y, (unsigned)mo, (unsigned)d);
+}
+
+// обновить строку за сегодня (перезапись файла: он маленький, ~40 байт на день)
+static void weatherLogTouch() {
+  struct tm ti;
+  if (!getLocalTime(&ti, 10)) return;
+  int y = ti.tm_year + 1900, mo = ti.tm_mon + 1, d = ti.tm_mday;
+  uint32_t key = wDayKey(y, mo, d);
+  if (key != wLogDay) { wLogDay = key; wLogTMin = 999; wLogTMax = -999; }
+  if (gTempValid && gTemp > -60 && gTemp < 80) {
+    if (gTemp < wLogTMin) wLogTMin = gTemp;
+    if (gTemp > wLogTMax) wLogTMax = gTemp;
+  }
+  // описание: текущее, иначе прогноз на завтра
+  const char* desc = wDescRu.length() ? wDescRu.c_str() : "—";
+  char line[128];
+  snprintf(line, sizeof(line), "%04d-%02d-%02d,%.1f,%.1f,%s,%.0f,%.1f",
+           y, mo, d,
+           (wLogTMin == 999 ? 0.0f : wLogTMin),
+           (wLogTMax == -999 ? 0.0f : wLogTMax),
+           desc, wPopNow, 0.0f);
+
+  // читаем старый файл, заменяем/дописываем строку этого дня
+  File in = SD.open(WLOG_PATH, FILE_READ);
+  File out = SD.open("/weather.tmp", FILE_WRITE);
+  if (!out) { if (in) in.close(); return; }
+  bool replaced = false;
+  if (in) {
+    while (in.available()) {
+      String l = in.readStringUntil('\n');
+      l.trim();
+      if (!l.length()) continue;
+      if (l.startsWith(line, 10)) {           // та же дата — заменяем
+        out.println(line);
+        replaced = true;
+      } else {
+        out.println(l);
+      }
+    }
+    in.close();
+  }
+  if (!replaced) out.println(line);
+  out.close();
+  SD.remove(WLOG_PATH);
+  SD.rename("/weather.tmp", WLOG_PATH);
+}
+
+// найти строку погоды за день (возвращает false, если нет)
+static bool weatherLogFind(const char* date, char* desc, size_t dn, float* tmin, float* tmax) {
+  File f = SD.open(WLOG_PATH, FILE_READ);
+  if (!f) return false;
+  bool found = false;
+  int guard = 0;
+  while (f.available() && guard++ < 2000) {
+    String l = f.readStringUntil('\n');
+    l.trim();
+    if (l.length() < 12) continue;
+    if (!l.startsWith(date)) continue;
+    int c1 = l.indexOf(',');
+    int c2 = l.indexOf(',', c1 + 1);
+    int c3 = l.indexOf(',', c2 + 1);
+    int c4 = l.indexOf(',', c3 + 1);
+    if (c1 > 0 && c2 > c1 && c3 > c2) {
+      *tmin = l.substring(c1 + 1, c2).toFloat();
+      *tmax = l.substring(c2 + 1, c3).toFloat();
+      if (c4 > c3) {
+        String d = l.substring(c3 + 1, c4);
+        strncpy(desc, d.c_str(), dn - 1);
+        desc[dn - 1] = 0;
+      }
+      found = true;
+    }
+    break;
+  }
+  f.close();
+  return found;
+}
+
 bool fetchWeather() {
   // Погода — OpenWeatherMap по HTTPS. wttr.in в сети пользователя заблокирован.
   // TLS-клиент живёт на стеке: после запроса stop() и деструктор возвращают
@@ -12115,6 +12205,13 @@ void webSetup() {
       out += ",\"vmax\":" + String(agg[i].vmax) + ",\"pmax\":" + String(agg[i].pmax);
       out += ",\"tmin\":" + String(agg[i].tmin == 999 ? 0 : agg[i].tmin / 10.0f, 1);
       out += ",\"tmax\":" + String(agg[i].tmax == -999 ? 0 : agg[i].tmax / 10.0f, 1);
+      {
+        char wdesc[40]; float wtmin = 0, wtmax = 0;
+        bool okw = weatherLogFind(dateFromEpoch((long)agg[i].day * 86400L).c_str(), wdesc, sizeof(wdesc), &wtmin, &wtmax);
+        out += ",\"w\":\"";
+        if (okw) { for (char* c = wdesc; *c; c++) { if (*c == '"') *c = '\''; } out += wdesc; }
+        out += "\",\"wtmin\":" + String(okw ? wtmin : 0, 1) + ",\"wtmax\":" + String(okw ? wtmax : 0, 1);
+      }
       out += ",\"rows\":" + String(agg[i].rows) + "}";
     }
     out += "]}";
@@ -12596,6 +12693,7 @@ void loop() {
         unsigned long b0 = millis();
         bool fck = fetchForecast();
         blkNote("forecast", millis() - b0);
+        weatherLogTouch();
         if (fck) gLastDraw = 0;       // карточка «ЗАВТРА» обновилась
       }
     }

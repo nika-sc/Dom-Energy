@@ -3852,9 +3852,10 @@ function Layout-History {
 
 $btnRange.Location  = New-Object System.Drawing.Point(($m + 604), 12)
 
-    $btnHistTg.Location = New-Object System.Drawing.Point(($m + 708), 12)
+    # «Отчёт в Telegram» и «CSV дня» прижимаем к правому краю: на узком окне они обрезались
+    $btnHistCsv.Location = New-Object System.Drawing.Point(($pw - $m - 100), 12)
 
-    $btnHistCsv.Location = New-Object System.Drawing.Point(($m + 884), 12)
+    $btnHistTg.Location = New-Object System.Drawing.Point(($pw - $m - 100 - 8 - 160), 12)
 
     $lblHistSum.TextAlign = 'MiddleLeft'
 
@@ -6174,20 +6175,23 @@ function Send-TgRelay($text) {
 
     try {
 
-        if (-not $script:cfg.tgRelay) { return }
+        if (-not $script:cfg.tgRelay) { Add-Log 'telegram: реле выключено (tgRelay=false)' 'warn'; return }
 
         $token = [string]$script:cfg.githubToken
 
-        if (-not $token) { return }
+        if (-not $token) { Add-Log 'telegram: нет githubToken в настройках' 'warn'; return }
 
         $relay = Join-Path $script:AppDir 'tg-relay.ps1'
 
         if (-not (Test-Path $relay)) { Add-Log ('нет tg-relay.ps1: ' + $relay) 'err'; return }
 
-        # не чаще одной отправки в 3 секунды, чтобы пачка событий не плодила процессы
+        # не чаще одной отправки в 3 секунды; БЕЗ Start-Sleep — иначе замирает интерфейс
     $nowTg = Get-Date
-    if ($script:tgLastAt -and ($nowTg - $script:tgLastAt).TotalSeconds -lt 3) { Start-Sleep -Milliseconds 3100 }
-    $script:tgLastAt = Get-Date
+    if ($script:tgLastAt -and ($nowTg - $script:tgLastAt).TotalSeconds -lt 3) {
+        Add-Log 'telegram: пропуск (слишком часто)' 'warn'
+        return
+    }
+    $script:tgLastAt = $nowTg
 
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
 
@@ -6251,11 +6255,13 @@ function Maybe-DailyReport {
     if (-not [bool]$script:cfg.tgDaily) { return }
     $now = Get-Date
     $today = $now.ToString('yyyy-MM-dd')
-    if ($script:tgDailyDay -eq $today) { return }
+    if ([string]$script:cfg.tgDailyDay -eq $today) { return }
     $at = [string]$script:cfg.tgDailyAt
     if (-not $at) { $at = '23:55' }
-    if ($now.ToString('HH:mm') -lt $at) { return }
-    $script:tgDailyDay = $today
+    $atTime = [datetime]::ParseExact($at, 'H:mm', $null)
+    if ($now.TimeOfDay -lt $atTime.TimeOfDay) { return }
+    $script:cfg.tgDailyDay = $today
+    try { Save-Cfg } catch { }
     $cand = @()
     if ($script:cfg.tgScript) { $cand += [string]$script:cfg.tgScript }
     $cand += (Join-Path $script:AppDir 'energy-telegram.ps1')
@@ -6280,6 +6286,23 @@ function Log-AlertConfig {
     Add-Log ('уведомления: ' + $on + ', U ' + (Get-AlertCfg 'alertVMin' 200) + '–' + (Get-AlertCfg 'alertVMax' 250) +
         ' В, t ' + (Get-AlertCfg 'alertTMax' 55) + ' °C, скачок ' + (Get-AlertCfg 'alertSpikeW' 500) +
         ' Вт, офлайн ' + (Get-AlertCfg 'alertOffMin' 3) + ' мин, telegram ' + $tg + ', сводка ' + $dl)
+}
+
+function Check-ProtAlerts {
+    # /data не отдаёт счётчик срабатываний — раз в минуту спрашиваем /protect.
+    $ip = [string]$script:cfg.boardIp
+    if (-not $ip) { return }
+    $now = Get-Date
+    if ($script:protAt -and ($now - $script:protAt).TotalSeconds -lt 60) { return }
+    $script:protAt = $now
+    try { $pf = Invoke-RestMethod ('http://' + $ip + '/protect') -TimeoutSec 8 } catch { return }
+    $trig = 0; try { $trig = [int]$pf.trig } catch { }
+    if ($null -ne $script:protTrigPrev -and $trig -gt $script:protTrigPrev) {
+        $txt = 'отключений: ' + $trig + ' · U ' + $pf.vmin + '–' + $pf.vmax + ' В, t ' + $pf.tmax + ' °C'
+        Alert-Once 'prot' 'Защита сработала' $txt 'err'
+        if ([int]$pf.on -eq 0) { Alert-Once 'protoff' 'Защита выключена' 'в автомате защита не активна' 'warn' }
+    }
+    $script:protTrigPrev = $trig
 }
 
 function Check-Alerts {
@@ -6361,8 +6384,11 @@ function Check-Alerts {
 
     if ($v -gt 0) {
 
+        # Гистерезис 3 В: иначе на границе порога приходят пары «в норме / высокое»
         Alert-State 'vlow' ($v -lt $vmin) 'Низкое напряжение' ($v.ToString('0') + ' В · порог ' + $vmin + ' В') 'warn' 'Напряжение в норме' ($v.ToString('0') + ' В')
+        if ($v -gt ($vmin + 3)) { Alert-State 'vlow' $false '' '' 'warn' }
         Alert-State 'vhigh' ($v -gt $vmax) 'Высокое напряжение' ($v.ToString('0') + ' В · порог ' + $vmax + ' В') 'warn' 'Напряжение в норме' ($v.ToString('0') + ' В')
+        if ($v -lt ($vmax - 3)) { Alert-State 'vhigh' $false '' '' 'warn' }
 
         $script:alertSeen['v'] = $v
 
@@ -6376,6 +6402,7 @@ function Check-Alerts {
 
     if ($tp -gt 0) {
         Alert-State 'temp' ($tp -ge $tmax) 'Перегрев реле' ($tp.ToString('0.0') + ' °C · порог ' + $tmax + ' °C') 'err' 'Реле остыло' ($tp.ToString('0.0') + ' °C')
+        if ($tp -lt ($tmax - 2)) { Alert-State 'temp' $false '' '' 'err' }
     }
 
 
@@ -6421,6 +6448,8 @@ function On-Tick {
 
 
         Log-AlertConfig
+
+        Check-ProtAlerts
 
         Check-Alerts
 
