@@ -268,31 +268,6 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
   </div>
 </div>
 
-<h2 class="sect">События и автоматика<span>провалы, всплески, планировщик</span></h2>
-
-<div class="card" style="margin-top:12px">
-  <div class="head"><span class="ttl">События напряжения</span>
-    <span class="legend"><span id="evCnt">0</span> · провалы и всплески · <a href="/csv" style="color:var(--c1)">CSV</a></span>
-    <span class="ctrl"><button class="qbtn" id="weekBtn" type="button">7 дней</button></span>
-  </div>
-  <svg class="chart" id="chW" viewBox="0 0 900 150" preserveAspectRatio="none" style="display:none"></svg>
-  <div class="evlist" id="evList"><div class="ev"><span>пока событий нет</span></div></div>
-</div>
-
-<div class="card" style="margin-top:12px">
-  <div class="head"><span class="ttl">Планировщик реле</span>
-    <span class="legend"><span class="qbtn danger" id="allowBtn" type="button">выключение: запрещено</span></span>
-  </div>
-  <div class="sch" id="schList"><div class="r"><span>правил пока нет</span></div></div>
-  <div class="qrow" style="margin-top:8px">
-    <input class="qin" id="schTime" value="07:30" style="width:76px">
-    <select class="qbtn" id="schAct"><option value="on">включить</option><option value="off">выключить</option></select>
-    <input class="qin" id="schDays" value="127" style="width:56px" title="маска дней: 127 = все, 31 = пн-пт">
-    <button class="qbtn" id="schAdd" type="button">добавить</button>
-    <span class="small">маска дней: 127 — все, 31 — пн–пт, 96 — сб+вс</span>
-  </div>
-</div>
-
 <h2 class="sect">За период<span>любой диапазон дат, день/ночь, погода</span></h2>
 
 <div class="card" style="margin-top:12px" id="rngCard">
@@ -352,7 +327,33 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
   <div class="kv"><span>Гасить через</span><b><input id="scrIdle" type="number" min="0" max="60" step="1" value="2"> мин</b></div>
   <div class="kv"><span>Экономия</span><b id="scrEco">—</b></div>
 </div>
-<div class="build">сборка 05.11.2026 12:21 · CYD-4.10.1 · файл 100% с платы</div>
+<h2 class="sect">События и автоматика<span>провалы, всплески, планировщик</span></h2>
+
+<div class="card" style="margin-top:12px">
+  <div class="head"><span class="ttl">События напряжения</span>
+    <span class="legend"><span id="evCnt">0</span> · провалы и всплески · <a href="/csv" style="color:var(--c1)">CSV</a></span>
+    <span class="ctrl"><button class="qbtn" id="weekBtn" type="button">7 дней</button></span>
+  </div>
+  <svg class="chart" id="chW" viewBox="0 0 900 150" preserveAspectRatio="none" style="display:none"></svg>
+  <div class="evlist" id="evList"><div class="ev"><span>пока событий нет</span></div></div>
+</div>
+
+<div class="card" style="margin-top:12px">
+  <div class="head"><span class="ttl">Планировщик реле</span>
+    <span class="legend"><span class="qbtn danger" id="allowBtn" type="button">выключение: запрещено</span></span>
+  </div>
+  <div class="sch" id="schList"><div class="r"><span>правил пока нет</span></div></div>
+  <div class="qrow" style="margin-top:8px">
+    <input class="qin" id="schTime" value="07:30" style="width:76px">
+    <select class="qbtn" id="schAct"><option value="on">включить</option><option value="off">выключить</option></select>
+    <input class="qin" id="schDays" value="127" style="width:56px" title="маска дней: 127 = все, 31 = пн-пт">
+    <button class="qbtn" id="schAdd" type="button">добавить</button>
+    <span class="small">маска дней: 127 — все, 31 — пн–пт, 96 — сб+вс</span>
+  </div>
+</div>
+
+
+<div class="build">CYD-__FW__ · страница с платы · данные с карты памяти</div>
 </div>
 <div id="tip" class="tip"></div>
 <script>
