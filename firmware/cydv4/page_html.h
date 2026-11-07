@@ -107,27 +107,6 @@ svg.chart{cursor:default}
 .build{font-size:10px;color:var(--dim);text-align:center;margin-top:14px;opacity:.7}
 
 .qgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}@media(max-width:820px){.qgrid{grid-template-columns:1fr}}.qrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--mut);padding:6px 0}.qrow b{color:var(--ink)}.qbig{font-size:26px;font-weight:800;letter-spacing:-.03em;line-height:1.1}.qbig small{font-size:12px;color:var(--mut);font-weight:600;margin-left:3px}.pbar2{height:8px;border-radius:99px;background:var(--grid);overflow:hidden;margin-top:6px}.pbar2 i{display:block;height:100%;width:0;background:var(--c1);border-radius:99px}.qbtn{background:var(--card);border:1px solid var(--ln);color:var(--ink);border-radius:9px;padding:4px 10px;cursor:pointer;font:inherit;font-size:12px}.qbtn.on{border-color:var(--c2);color:var(--c2);font-weight:700}.qbtn.danger.on{border-color:var(--red);color:var(--red)}.qin{width:64px;background:var(--card);border:1px solid var(--ln);color:var(--ink);border-radius:8px;padding:3px 7px;font:inherit;font-size:12px;text-align:right}.evlist{max-height:190px;overflow:auto;font-size:12px;color:var(--mut)}.ev{border-bottom:1px solid var(--ln);padding:5px 0;display:flex;gap:8px}.ev:last-child{border-bottom:0}.ev .t{color:var(--ink);font-variant-numeric:tabular-nums}.ev .sag{color:var(--c4)} .ev .swl{color:var(--red)}
-/* Широкий монитор: раскладываем карточки в 2 колонки, чтобы не было длинной прокрутки.
-   На телефоне всё остаётся одной колонкой. */
-@media(min-width:1300px){
-  .wrap{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start;
-        grid-auto-flow:row dense;max-width:1720px}
-  .wrap>.top,.wrap>.daybar,.wrap>h2.sect{grid-column:1/-1;margin-bottom:0}
-  .wrap>.detail,.wrap>.hero,.wrap>.row4,.wrap>.qgrid,.wrap>.two{grid-column:1/-1}
-  .wrap .card{margin-top:0!important;padding:12px}
-  .wrap svg.chart{max-height:150px}
-  .wrap .d svg.dchart{height:48px}
-}
-@media(min-width:1600px){
-  .wrap{grid-template-columns:repeat(3,minmax(0,1fr));max-width:2100px}
-  .wrap>.detail,.wrap>.hero,.wrap>.row4{grid-column:1/-1}
-  #histCard{grid-column:span 1}
-  #rngCard{grid-column:span 2}
-  .wrap>.qgrid{grid-column:span 2}
-  #evCard{grid-column:span 1}
-  .wrap>.two{grid-column:span 2}
-  #devCard{grid-column:span 3}
-}
 .daybar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;position:sticky;top:0;z-index:20;
  background:rgba(10,15,26,.92);backdrop-filter:blur(6px);border:1px solid var(--ln);border-radius:14px;
  padding:8px 10px;margin:0 0 12px}
@@ -152,7 +131,6 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
 .rt tr:hover td{background:var(--card)}
 .rt td.mut{color:var(--mut)}
 .rtwrap{overflow-x:auto}
-.rt{min-width:660px}
 @media print{
   @page{size:A4 portrait;margin:12mm}
   body{background:#fff;color:#000}
@@ -254,7 +232,7 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
 
 <h2 class="sect">За день<span>по часам выбранного дня</span></h2>
 
-<div class="card" id="histCard" style="margin-top:12px">
+<div class="card" style="margin-top:12px">
   <div class="head"><span class="ttl">История</span>
     <span class="nav"><button id="prev" type="button">‹</button><span class="date" id="dateLabel">—</span><button id="next" type="button">›</button></span>
   </div>
@@ -269,6 +247,58 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
   <svg class="chart" id="chVT" viewBox="0 0 900 140" preserveAspectRatio="none"></svg>
   <div class="gapbox" id="gapBox" style="display:none"><span id="gapTxt"></span><button class="iconbtn" id="gapBtn" type="button">подтянуть</button></div>
 </div>
+
+<h2 class="sect">Качество и защита<span>ГОСТ 32144 и пороги автомата</span></h2>
+
+<div class="qgrid" style="margin-top:12px">
+  <div class="card">
+    <div class="head"><span class="ttl">Качество энергии · ГОСТ 32144</span><span class="legend" id="gostSrc">за сеанс</span></div>
+    <div class="qbig c1"><span id="gostAvg">—</span><small>В среднее</small></div>
+    <div class="pbar2"><i id="gostBar"></i></div>
+    <div class="qrow"><span>мин <b id="gostMin">—</b></span><span>макс <b id="gostMax">—</b></span><span>вне нормы <b id="gostBad">—</b></span></div>
+    <div class="qrow"><span>норма <b id="gostRange">207–253 В</b></span><span>замеров <b id="gostN">—</b></span></div>
+  </div>
+  <div class="card">
+    <div class="head"><span class="ttl">Защита реле</span><span class="legend">настройки автомата Tuya</span></div>
+    <div class="qrow"><span>перенапряжение &gt;</span><b><input class="qin" id="pvmax" value="250"> В</b>
+      <span>просадка &lt;</span><b><input class="qin" id="pvmin" value="200"> В</b></div>
+    <div class="qrow"><span>перегрев &gt;</span><b><input class="qin" id="ptmax" value="60"> °C</b>
+      <span>перегруз &gt;</span><b><input class="qin" id="pimax" value="25"> А</b></div>
+    <div class="qrow"><button class="qbtn" id="protApply" type="button">записать в автомат</button>
+      <button class="qbtn" id="protLocal" type="button">только в плату</button>
+      <span>срабатываний <b id="protTrig">0</b></span></div>
+    <div class="qrow"><span>в автомате:</span><b id="tuyaS">—</b></div>
+    <div class="qrow"><span>проверка:</span><input class="qin" id="ptestv" value="270"> <span>В</span>
+      <button class="qbtn" id="protTest" type="button">проверить</button><b id="ptestres">—</b></div>
+  </div>
+</div>
+
+<h2 class="sect">События и автоматика<span>провалы, всплески, планировщик</span></h2>
+
+<div class="card" style="margin-top:12px">
+  <div class="head"><span class="ttl">События напряжения</span>
+    <span class="legend"><span id="evCnt">0</span> · провалы и всплески · <a href="/csv" style="color:var(--c1)">CSV</a></span>
+    <span class="ctrl"><button class="qbtn" id="weekBtn" type="button">7 дней</button></span>
+  </div>
+  <svg class="chart" id="chW" viewBox="0 0 900 150" preserveAspectRatio="none" style="display:none"></svg>
+  <div class="evlist" id="evList"><div class="ev"><span>пока событий нет</span></div></div>
+</div>
+
+<div class="card" style="margin-top:12px">
+  <div class="head"><span class="ttl">Планировщик реле</span>
+    <span class="legend"><span class="qbtn danger" id="allowBtn" type="button">выключение: запрещено</span></span>
+  </div>
+  <div class="sch" id="schList"><div class="r"><span>правил пока нет</span></div></div>
+  <div class="qrow" style="margin-top:8px">
+    <input class="qin" id="schTime" value="07:30" style="width:76px">
+    <select class="qbtn" id="schAct"><option value="on">включить</option><option value="off">выключить</option></select>
+    <input class="qin" id="schDays" value="127" style="width:56px" title="маска дней: 127 = все, 31 = пн-пт">
+    <button class="qbtn" id="schAdd" type="button">добавить</button>
+    <span class="small">маска дней: 127 — все, 31 — пн–пт, 96 — сб+вс</span>
+  </div>
+</div>
+
+<h2 class="sect">За период<span>любой диапазон дат, день/ночь, погода</span></h2>
 
 <div class="card" style="margin-top:12px" id="rngCard">
   <div id="printMeta"></div>
@@ -306,55 +336,7 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
   </tr></thead><tbody><tr><td colspan="9" class="mut">нет данных</td></tr></tbody></table></div>
 </div>
 
-<h2 class="sect">Качество и защита<span>ГОСТ 32144 и пороги автомата</span></h2>
-
-<div class="qgrid" style="margin-top:12px">
-  <div class="card">
-    <div class="head"><span class="ttl">Качество энергии · ГОСТ 32144</span><span class="legend" id="gostSrc">за сеанс</span></div>
-    <div class="qbig c1"><span id="gostAvg">—</span><small>В среднее</small></div>
-    <div class="pbar2"><i id="gostBar"></i></div>
-    <div class="qrow"><span>мин <b id="gostMin">—</b></span><span>макс <b id="gostMax">—</b></span><span>вне нормы <b id="gostBad">—</b></span></div>
-    <div class="qrow"><span>норма <b id="gostRange">207–253 В</b></span><span>замеров <b id="gostN">—</b></span></div>
-  </div>
-  <div class="card">
-    <div class="head"><span class="ttl">Защита реле</span><span class="legend">настройки автомата Tuya</span></div>
-    <div class="qrow"><span>перенапряжение &gt;</span><b><input class="qin" id="pvmax" value="250"> В</b>
-      <span>просадка &lt;</span><b><input class="qin" id="pvmin" value="200"> В</b></div>
-    <div class="qrow"><span>перегрев &gt;</span><b><input class="qin" id="ptmax" value="60"> °C</b>
-      <span>перегруз &gt;</span><b><input class="qin" id="pimax" value="25"> А</b></div>
-    <div class="qrow"><button class="qbtn" id="protApply" type="button">записать в автомат</button>
-      <button class="qbtn" id="protLocal" type="button">только в плату</button>
-      <span>срабатываний <b id="protTrig">0</b></span></div>
-    <div class="qrow"><span>в автомате:</span><b id="tuyaS">—</b></div>
-    <div class="qrow"><span>проверка:</span><input class="qin" id="ptestv" value="270"> <span>В</span>
-      <button class="qbtn" id="protTest" type="button">проверить</button><b id="ptestres">—</b></div>
-  </div>
-</div>
-
-<div class="card" id="evCard" style="margin-top:12px">
-  <div class="head"><span class="ttl">События напряжения</span>
-    <span class="legend"><span id="evCnt">0</span> · провалы и всплески · <a href="/csv" style="color:var(--c1)">CSV</a></span>
-    <span class="ctrl"><button class="qbtn" id="weekBtn" type="button">7 дней</button></span>
-  </div>
-  <svg class="chart" id="chW" viewBox="0 0 900 150" preserveAspectRatio="none" style="display:none"></svg>
-  <div class="evlist" id="evList"><div class="ev"><span>пока событий нет</span></div></div>
-</div>
-
-<div class="card" style="margin-top:12px">
-  <div class="head"><span class="ttl">Планировщик реле</span>
-    <span class="legend"><span class="qbtn danger" id="allowBtn" type="button">выключение: запрещено</span></span>
-  </div>
-  <div class="sch" id="schList"><div class="r"><span>правил пока нет</span></div></div>
-  <div class="qrow" style="margin-top:8px">
-    <input class="qin" id="schTime" value="07:30" style="width:76px">
-    <select class="qbtn" id="schAct"><option value="on">включить</option><option value="off">выключить</option></select>
-    <input class="qin" id="schDays" value="127" style="width:56px" title="маска дней: 127 = все, 31 = пн-пт">
-    <button class="qbtn" id="schAdd" type="button">добавить</button>
-    <span class="small">маска дней: 127 — все, 31 — пн–пт, 96 — сб+вс</span>
-  </div>
-</div>
-
-
+<h2 class="sect">Погода и тарифы</h2>
 
 <div class="two">
   <div class="card"><div class="head"><span class="ttl">Погода · Адлер</span></div>
@@ -368,14 +350,14 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
 
 <h2 class="sect">Устройство<span>экран, подсветка, гашение</span></h2>
 
-<div class="card" id="devCard" style="margin-top:12px">
+<div class="card" style="margin-top:12px">
   <div class="head"><span class="ttl">Экран платы</span><span class="nav"><button id="scrBtn" type="button">Экран</button></span></div>
   <div class="kv"><span>Подсветка</span><b id="scrState">—</b></div>
   <div class="kv"><span>Яркость</span><b><input id="scrBrightRange" type="range" min="5" max="100" step="5" value="100"> <span id="scrBright">—</span></b></div>
   <div class="kv"><span>Гасить через</span><b><input id="scrIdle" type="number" min="0" max="60" step="1" value="2"> мин</b></div>
   <div class="kv"><span>Экономия</span><b id="scrEco">—</b></div>
 </div>
-<div class="build">CYD-__FW__ · страница с платы · данные с карты памяти</div>
+<div class="build">сборка 05.11.2026 12:21 · CYD-4.10.1 · файл 100% с платы</div>
 </div>
 <div id="tip" class="tip"></div>
 <script>
@@ -1065,7 +1047,6 @@ function daySync(){
   if(l) l.textContent = txt2;
   if(n){
     var isToday = (S.date && S.date===S.today);
-    if(!S.date){ n.textContent = "загрузка…"; n.style.color=""; return; }
     n.textContent = isToday ? "данные за сегодня · всё обновляется автоматически"
                             : "все карточки ниже показывают данные за " + txt2;
     n.style.color = isToday ? "" : "var(--c4)";
@@ -1089,6 +1070,19 @@ function dayTodayGo(){
   // старый переключатель дня внутри карточки «История» больше не нужен — он теперь сверху
   var pv=G("prev");
   if(pv && pv.parentNode) pv.parentNode.style.display="none";
+  // «За период» ставим сразу после «За день»
+  var rng=G("rngCard"), hist=document.querySelector(".card .ttl");
+  var cards=document.querySelectorAll(".wrap > .card");
+  if(rng){
+    var histCard=null;
+    for(var i=0;i<cards.length;i++){
+      var ttl=cards[i].querySelector(".ttl");
+      if(ttl && ttl.textContent.indexOf("История")>=0){ histCard=cards[i]; break; }
+    }
+    if(histCard && histCard.parentNode===rng.parentNode){
+      histCard.parentNode.insertBefore(rng, histCard.nextSibling);
+    }
+  }
 })();
 window.addEventListener("beforeprint", function(){
   var m=G("printMeta"); if(!m) return;
