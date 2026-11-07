@@ -4917,6 +4917,10 @@ bool fetchWeather() {
   // TLS-клиент живёт на стеке: после запроса stop() и деструктор возвращают
   // память mbedTLS (без этого течёт ~40 КБ на каждый запрос).
   if (!netOnline()) return false;
+  // TLS требует ~35 КБ подряд: перед запросом освобождаем кэш страницы,
+  // иначе прогноз молча падает с «SSL - Memory allocation failed» (видно по wfHeap=0)
+  pageCacheFree();
+  if (ESP.getFreeHeap() < 58000) { wFcFail++; return false; }
 
   uint32_t heap0 = ESP.getFreeHeap();
   String j;
