@@ -107,6 +107,24 @@ svg.chart{cursor:default}
 .build{font-size:10px;color:var(--dim);text-align:center;margin-top:14px;opacity:.7}
 
 .qgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}@media(max-width:820px){.qgrid{grid-template-columns:1fr}}.qrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--mut);padding:6px 0}.qrow b{color:var(--ink)}.qbig{font-size:26px;font-weight:800;letter-spacing:-.03em;line-height:1.1}.qbig small{font-size:12px;color:var(--mut);font-weight:600;margin-left:3px}.pbar2{height:8px;border-radius:99px;background:var(--grid);overflow:hidden;margin-top:6px}.pbar2 i{display:block;height:100%;width:0;background:var(--c1);border-radius:99px}.qbtn{background:var(--card);border:1px solid var(--ln);color:var(--ink);border-radius:9px;padding:4px 10px;cursor:pointer;font:inherit;font-size:12px}.qbtn.on{border-color:var(--c2);color:var(--c2);font-weight:700}.qbtn.danger.on{border-color:var(--red);color:var(--red)}.qin{width:64px;background:var(--card);border:1px solid var(--ln);color:var(--ink);border-radius:8px;padding:3px 7px;font:inherit;font-size:12px;text-align:right}.evlist{max-height:190px;overflow:auto;font-size:12px;color:var(--mut)}.ev{border-bottom:1px solid var(--ln);padding:5px 0;display:flex;gap:8px}.ev:last-child{border-bottom:0}.ev .t{color:var(--ink);font-variant-numeric:tabular-nums}.ev .sag{color:var(--c4)} .ev .swl{color:var(--red)}
+/* Широкий монитор: раскладываем карточки в 2 колонки, чтобы не было длинной прокрутки.
+   На телефоне всё остаётся одной колонкой. */
+@media(min-width:1300px){
+  .wrap{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;max-width:1720px}
+  .wrap>.top,.wrap>.daybar{grid-column:1/-1;margin-bottom:0}
+  .wrap>h2.sect{grid-column:1/-1;margin:6px 0 0}
+  .wrap>.detail,.wrap>.qgrid,.wrap>.two{grid-column:1/-1}
+  .wrap>.card,.wrap>.row4,.wrap>.hero{margin-top:0!important}
+  .wrap>.hero,.wrap>.row4{grid-column:1/-1}
+  .wrap svg.chart{max-height:150px}
+  .wrap .card{padding:12px}
+  .wrap .d svg.dchart{height:48px}
+}
+@media(min-width:1850px){
+  .wrap{grid-template-columns:1fr 1fr 1fr;max-width:2100px}
+  .wrap>.detail,.wrap>.hero,.wrap>.row4,.wrap>.qgrid,.wrap>.two{grid-column:1/-1}
+  .wrap>#rngCard{grid-column:2/4}
+}
 .daybar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;position:sticky;top:0;z-index:20;
  background:rgba(10,15,26,.92);backdrop-filter:blur(6px);border:1px solid var(--ln);border-radius:14px;
  padding:8px 10px;margin:0 0 12px}
@@ -131,6 +149,7 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
 .rt tr:hover td{background:var(--card)}
 .rt td.mut{color:var(--mut)}
 .rtwrap{overflow-x:auto}
+.rt{min-width:660px}
 @media print{
   @page{size:A4 portrait;margin:12mm}
   body{background:#fff;color:#000}
@@ -1047,6 +1066,7 @@ function daySync(){
   if(l) l.textContent = txt2;
   if(n){
     var isToday = (S.date && S.date===S.today);
+    if(!S.date){ n.textContent = "загрузка…"; n.style.color=""; return; }
     n.textContent = isToday ? "данные за сегодня · всё обновляется автоматически"
                             : "все карточки ниже показывают данные за " + txt2;
     n.style.color = isToday ? "" : "var(--c4)";
