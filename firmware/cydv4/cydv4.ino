@@ -7271,18 +7271,35 @@ void drawMain() {
   drawTxt(rx, vb.y + 20, b, cMuted, cSurf, 1);
   snprintf(b, sizeof(b), "МАКС %.0f", dayMaxV);
   drawTxt(rx, vb.y + 32, b, cMuted, cSurf, 1);
+  // температура корпуса реле переехала сюда, к остальным «электрическим» цифрам
+  if (gTempValid) snprintf(b, sizeof(b), "РЕЛЕ %.1f", gTemp);
+  else            strcpy(b, "РЕЛЕ --");
+  drawTxt(rx, vb.y + 44, b, cTEMP_ACC, cSurf, 1);
   uint16_t rc = gRelay ? cGood : cBadC;
   drawTxtR(vb.x + vb.w - 8, vb.y + 44, gRelay ? "ВКЛ" : "ВЫКЛ", rc, cSurf, 2);
 
-  // ---- температура и мощность
+  // ---- климат в комнате (AHT20 + BMP280) вместо температуры реле
   const Block& tb = BLOCKS[1];
   drawBlockFrame(tb.x, tb.y, tb.w, tb.h);
-  drawTxt(tb.x + 7, tb.y + 5, "ТЕМПЕРАТУРА", cMuted, cSurf, 1);
-  snprintf(b, sizeof(b), "%.1f", gTemp);
-  seg7Str(tb.x + 7, tb.y + 19, 22, b, cTEMP_ACC, 7);
-  drawTxt(tb.x + 7 + seg7W(b, 22, 7) + 4, tb.y + 28, "C", cMuted, cSurf, 1);
-  snprintf(b, sizeof(b), "СР %.1f", dayTSec ? (float)(daySumT / dayTSec) : gTemp);
-  drawTxt(tb.x + 7, tb.y + 45, b, cMuted, cSurf, 1);
+  drawTxt(tb.x + 7, tb.y + 5, envOk ? "КЛИМАТ" : "ТЕМПЕРАТУРА", cMuted, cSurf, 1);
+  if (envOk) {
+    float et = isnan(envT) ? 0.0f : envT;
+    snprintf(b, sizeof(b), "%.1f", et);
+    int dh2 = 20;
+    seg7Str(tb.x + 7, tb.y + 17, dh2, b, cTEMP_ACC, 6);
+    drawTxt(tb.x + 7 + seg7W(b, dh2, 6) + 3, tb.y + 26, "C", cMuted, cSurf, 1);
+    float eh = isnan(envH) ? 0.0f : envH;
+    float ep = isnan(envP) ? 0.0f : envP * 0.75006f;
+    snprintf(b, sizeof(b), "%.0f%%  %.0f", eh, ep);
+    drawTxt(tb.x + 7, tb.y + 42, b, cAccent, cSurf, 1);
+    drawTxt(tb.x + 7, tb.y + 52, "ВЛАЖН  ДАВЛ", cMuted, cSurf, 1);
+  } else {
+    snprintf(b, sizeof(b), "%.1f", gTemp);
+    seg7Str(tb.x + 7, tb.y + 19, 22, b, cTEMP_ACC, 7);
+    drawTxt(tb.x + 7 + seg7W(b, 22, 7) + 4, tb.y + 28, "C", cMuted, cSurf, 1);
+    snprintf(b, sizeof(b), "СР %.1f", dayTSec ? (float)(daySumT / dayTSec) : gTemp);
+    drawTxt(tb.x + 7, tb.y + 45, b, cMuted, cSurf, 1);
+  }
 
   const Block& pb = BLOCKS[2];
   drawBlockFrame(pb.x, pb.y, pb.w, pb.h);
