@@ -5835,7 +5835,10 @@ void drawDetailHeader(const char* title) {
   uiFill(0, HDR_H - 1, 240, 1, cLine);
   uiFillRound(6, 4, 96, 38, 9, cElev);
   drawTxt(13, 15, "< НАЗАД", cText, cElev, 2);
-  drawTxtR(234, 15, title, cText, cSurf, 2);
+  // длинный заголовок рисуем мелким шрифтом, иначе он наезжает на кнопку «НАЗАД»
+  int n = (int)strlen(title);
+  if (n > 11) drawTxtR(234, 18, title, cText, cSurf, 1);
+  else        drawTxtR(234, 15, title, cText, cSurf, 2);
 }
 
 // Нижняя полоса — она же КНОПКА сторожа: нажал → открылось окно со списком.
