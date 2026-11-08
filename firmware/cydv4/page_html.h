@@ -315,12 +315,15 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
 
 
 <h2 class="sect">Климат в комнате<span>датчик AHT20 + BMP280 на шине I2C</span></h2>
-<div class="cards" id="envCards">
-  <div class="card"><div class="k">ТЕМПЕРАТУРА</div><div class="v c4" id="envT">—</div>
+<div class="qgrid" id="envCards">
+  <div class="card d"><div class="k">Температура</div>
+    <div class="v c4"><span id="envT">—</span><small>°C</small></div>
     <div class="s" id="envTS">датчик не найден</div></div>
-  <div class="card"><div class="k">ВЛАЖНОСТЬ</div><div class="v c1" id="envH">—</div>
+  <div class="card d"><div class="k">Влажность</div>
+    <div class="v c1"><span id="envH">—</span><small>%</small></div>
     <div class="s">относительная</div></div>
-  <div class="card"><div class="k">ДАВЛЕНИЕ</div><div class="v" id="envP">—</div>
+  <div class="card d"><div class="k">Давление</div>
+    <div class="v"><span id="envP">—</span><small>мм</small></div>
     <div class="s" id="envPS">—</div></div>
 </div>
 
@@ -402,10 +405,10 @@ function applyEnv(d){
     var et=document.getElementById('envT');
     if(!et) return;
     if(d.eok){
-      et.textContent=num(d.et,1)+'°';
+      et.textContent=num(d.et,1);
       document.getElementById('envTS').textContent='датчик подключён';
-      document.getElementById('envH').textContent=num(d.eh,0)+'%';
-      document.getElementById('envP').textContent=num((d.ep||0)*0.75006,0)+' мм';
+      document.getElementById('envH').textContent=num(d.eh,0);
+      document.getElementById('envP').textContent=num((d.ep||0)*0.75006,0);
       document.getElementById('envPS').textContent=num(d.ep,0)+' гПа';
     } else {
       et.textContent='—';
