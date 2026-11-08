@@ -39,7 +39,7 @@
 - [ ] `docs/RELEASE-X.Y.Z-draft.md` удалён или превращён в описание релиза
 
 ## 5. После релиза
-- [ ] посты (Instagram, Threads) по текстам из `work/social-X.Y.Z.md`
+- [ ] посты (Instagram, Threads) по текстам из `REPORT-<версия>/social-X.Y.Z.md`
 - [ ] полный архив платы (дамп 4 МБ + SD) в `DEVICE-ARCHIVE/`
 - [ ] проверка через сутки: пропуски, погода, звук, уведомления
 

@@ -2931,7 +2931,9 @@ static void volQuality(float v) {
 }
 
 // защита: раз в секунду проверяем уставки
-static void protCheck() {
+static void sndAlarm();   // определяется в блоке звука ниже
+
+void protCheck() {
   unsigned long now = millis();
   if (now - gProtCheckAt < 1000UL) return;
   gProtCheckAt = now;
@@ -2951,6 +2953,8 @@ static void protCheck() {
   gProtCool = now;
   Serial.printf("ЗАЩИТА: %s (реле %s)\n", gProtWhy, gProtCut ? "выключаю" : "только уведомление");
   mqttPublish("protect", gProtWhy, false);
+  // защита сработала — тревога слышна всегда, даже в тихие часы
+  sndAlarm();
   if (gProtCut) {
     bool ok = tuyaRelaySet(false);
     mqttPublish("protect_act", ok ? "relay_off" : "relay_off_fail", false);
@@ -6202,6 +6206,8 @@ void sndEvent(uint8_t ev) {
   bool alarm = (ev == EV_ALARM);
   sndPlayPreset(sndEv[ev], alarm);
 }
+
+void sndAlarm() { sndPlayPreset(sndEv[EV_ALARM], true); }
 
 void beepTick() {
   if (!bpSounding && bpStep + 1 >= bpSteps) return;
