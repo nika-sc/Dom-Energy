@@ -4975,6 +4975,7 @@ static void weatherLogTouch() {
   if (wLogAt && millis() - wLogAt < 3600000UL) return;
   wLogAt = millis();
 
+  if (!wOk && wDescRu.length() == 0) return;   // нет данных — строку не пишем
   const char* desc = wDescRu.length() ? wDescRu.c_str() : "-";
   bool wxExists = SD.exists(WLOG_PATH);
   File f = SD.open(WLOG_PATH, wxExists ? FILE_APPEND : FILE_WRITE);
@@ -4991,9 +4992,11 @@ static void weatherLogTouch() {
 }
 
 // найти ПОСЛЕДНЮЮ строку погоды за день
+// разбор строки weather.csv: старые (4 и 5 полей) и новый формат (7 полей)
 static bool weatherLogFind(const char* date, char* desc, size_t dn,
                            float* tmin, float* tmax, float* rmin, float* rmax) {
   if (desc && dn) desc[0] = 0;
+  if (rmin && rmax) { *rmin = 0; *rmax = 0; }
   File f = SD.open(WLOG_PATH, FILE_READ);
   if (!f) return false;
   bool found = false;
@@ -5001,47 +5004,59 @@ static bool weatherLogFind(const char* date, char* desc, size_t dn,
   while (f.available() && guard++ < 6000) {
     String l = f.readStringUntil('\n');
     l.trim();
-    if (!l.startsWith(date)) continue;
-    // поля: дата, t_улица_min, t_улица_max, [t_реле_min, t_реле_max,] описание, дождь
-    int p1 = l.indexOf(',');
-    int p2 = l.indexOf(',', p1 + 1);
-    int p3 = l.indexOf(',', p2 + 1);
-    int p4 = l.indexOf(',', p3 + 1);
-    if (p1 < 0 || p2 < 0 || p3 < 0) continue;
-    *tmin = l.substring(p1 + 1, p2).toFloat();
-    *tmax = l.substring(p2 + 1, p3).toFloat();
-    int descStart = p3 + 1, descEnd = p4;
-    if (rmin && rmax) { *rmin = 0; *rmax = 0; }
-    // если 4-е поле — число, значит это новый формат с температурой реле
-    String f4 = (p4 > 0) ? l.substring(p3 + 1, p4) : String("");
-    bool f4num = f4.length() > 0;
-    for (int i = 0; i < (int)f4.length() && f4num; i++) {
-      char c = f4[i];
-      if (!(isdigit(c) || c == '-' || c == '.')) f4num = false;
+    if (l.length() < 12 || !l.startsWith(date)) continue;
+
+    // режем на поля
+    String fd[8];
+    int n = 0, from = 0;
+    while (n < 8) {
+      int c = l.indexOf(',', from);
+      if (c < 0) { fd[n++] = l.substring(from); break; }
+      fd[n++] = l.substring(from, c);
+      from = c + 1;
     }
-    if (f4num && p4 > 0) {
-      if (rmin && rmax) { *rmin = f4.toFloat(); }
-      int p5 = l.indexOf(',', p4 + 1);
-      if (p5 > 0) {
-        if (rmin && rmax) { *rmax = l.substring(p4 + 1, p5).toFloat(); }
-        descStart = p5 + 1;
-        int p6 = l.indexOf(',', p5 + 1);
-        descEnd = (p6 > 0) ? p6 : (int)l.length();
-      } else {
-        descStart = p4 + 1;
-        descEnd = (int)l.length();
+    if (n < 4) continue;
+
+    // числовое ли поле
+    auto isNum = [](const String& s) -> bool {
+      if (!s.length()) return false;
+      for (uint16_t i = 0; i < s.length(); i++) {
+        char ch = s[i];
+        if (!(isdigit((unsigned char)ch) || ch == '-' || ch == '.' || ch == ' ')) return false;
       }
-    }
-    if (descEnd > descStart) {
-      String d = l.substring(descStart, descEnd);
+      return true;
+    };
+
+    float a = fd[1].toFloat(), b = fd[2].toFloat();
+    *tmin = a; *tmax = b;
+    if (n >= 7 && isNum(fd[3]) && isNum(fd[4])) {
+      // новый формат: улица min/max, реле min/max, описание, дождь
+      if (rmin && rmax) { *rmin = fd[3].toFloat(); *rmax = fd[4].toFloat(); }
+      int k = 5;
+      String d = fd[k];
+      if (k + 1 < n && isNum(fd[k + 1])) {
+        // описание могло содержать запятую — склеиваем всё до числового дождя
+        d = "";
+        for (int j = 5; j < n - 1; j++) { if (j > 5) d += ','; d += fd[j]; }
+      }
       d.trim();
-      strncpy(desc, d.c_str(), dn - 1);
-      desc[dn - 1] = 0;
-      int k = (int)strlen(desc);
-      while (k > 0 && ((unsigned char)desc[k] & 0xC0) == 0x80) k--;
-      while (k > 0 && ((unsigned char)desc[k - 1] & 0xC0) == 0xC0) k--;
-      desc[k] = 0;
+      strncpy(desc, d.c_str(), dn - 1); desc[dn - 1] = 0;
+    } else {
+      // старый формат: улица min/max (это была температура реле), описание, [дождь]
+      int k = 3;
+      String d = fd[k];
+      if (k + 1 < n && isNum(fd[k + 1])) {
+        d = "";
+        for (int j = 3; j < n - 1; j++) { if (j > 3) d += ','; d += fd[j]; }
+      }
+      d.trim();
+      strncpy(desc, d.c_str(), dn - 1); desc[dn - 1] = 0;
     }
+    // не рвать UTF-8
+    int k2 = (int)strlen(desc);
+    while (k2 > 0 && ((unsigned char)desc[k2] & 0xC0) == 0x80) k2--;
+    while (k2 > 0 && ((unsigned char)desc[k2 - 1] & 0xC0) == 0xC0) k2--;
+    desc[k2] = 0;
     found = true;
   }
   f.close();
@@ -11103,8 +11118,12 @@ static void weatherCompact() {
       if (lastLine[0]) out.println(lastLine);
       strncpy(curDate, d.c_str(), 10); curDate[10] = 0;
     }
-    strncpy(lastLine, l.c_str(), sizeof(lastLine) - 1);
-    lastLine[sizeof(lastLine) - 1] = 0;
+    // пустые строки (без описания) не должны затирать нормальные данные дня
+    bool empty = (l.indexOf(",-,") > 0);
+    if (!empty || !lastLine[0]) {
+      strncpy(lastLine, l.c_str(), sizeof(lastLine) - 1);
+      lastLine[sizeof(lastLine) - 1] = 0;
+    }
   }
   if (lastLine[0]) out.println(lastLine);
   in.close();
@@ -12541,7 +12560,21 @@ void webSetup() {
     gWeb.send(200, "application/json", "{\"ok\":true,\"sound\":\"" + s + "\"}");
   });
 
-  gWeb.on("/sound", []() {
+  gWeb.on("/weather", []() {
+    if (!gWeb.hasArg("compact")) {
+      File f = SD.open(WLOG_PATH, FILE_READ);
+      gWeb.send(200, "application/json", String("{\"ok\":true,\"size\":") + (f ? (unsigned long)f.size() : 0UL) + "}");
+      if (f) f.close();
+      return;
+    }
+    weatherCompact();
+    File f = SD.open(WLOG_PATH, FILE_READ);
+    unsigned long sz = f ? (unsigned long)f.size() : 0UL;
+    if (f) f.close();
+    gWeb.send(200, "application/json", String("{\"ok\":true,\"compact\":1,\"size\":") + sz + "}");
+  });
+
+gWeb.on("/sound", []() {
     bool changed = false;
     if (gWeb.hasArg("on"))    { gBeepOn  = (gWeb.arg("on") == "1"); changed = true; }
     if (gWeb.hasArg("quiet")) { sndQuiet = (gWeb.arg("quiet") == "1"); changed = true; }
