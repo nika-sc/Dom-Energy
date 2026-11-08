@@ -7252,31 +7252,40 @@ void drawMain() {
   bool vok = gVoltage > 50;
   uint16_t vc = vok ? voltColor(gVoltage) : cMuted;
 
-  // ---- напряжение
+  // ---- напряжение (левая половина) + температура реле (правая половина)
   const Block& vb = BLOCKS[0];
   drawBlockFrame(vb.x, vb.y, vb.w, vb.h);
-  drawTxt(vb.x + 8, vb.y + 5, "НАПРЯЖЕНИЕ", cMuted, cSurf, 1);
-  drawTxtR(vb.x + vb.w - 8, vb.y + 5, vok ? voltVerdict(gVoltage) : "НЕТ ДАННЫХ",
-           vc, cSurf, 1);
+
+  const int VSZ = 132;                       // граница: слева напряжение, справа реле
+  uiFill(vb.x + VSZ, vb.y + 6, 1, vb.h - 12, cLine);   // разделитель
+
+  drawTxt(vb.x + 7, vb.y + 4, "НАПРЯЖЕНИЕ", cMuted, cSurf, 1);
+  drawTxtR(vb.x + VSZ - 6, vb.y + 4, vok ? voltVerdict(gVoltage) : "НЕТ ДАННЫХ", vc, cSurf, 1);
 
   strcpy(b, vok ? "" : "---");
   if (vok) snprintf(b, sizeof(b), "%.0f", gVoltage);
-  int vdh = 34, vgap = 6;
-  seg7Str(vb.x + 10, vb.y + 16, vdh, b, vc, vgap);
+  int vdh = 30, vgap = 5;
+  seg7Str(vb.x + 7, vb.y + 14, vdh, b, vc, vgap);
   int vw = seg7W(b, vdh, vgap);
-  drawTxt(vb.x + 10 + vw + 6, vb.y + 30, "В", cMuted, cSurf, 2);
+  drawTxt(vb.x + 7 + vw + 5, vb.y + 26, "В", cMuted, cSurf, 1);
 
-  int rx = vb.x + 104;
-  snprintf(b, sizeof(b), "МИН %.0f", (dayMinV < 900) ? dayMinV : 0);
-  drawTxt(rx, vb.y + 20, b, cMuted, cSurf, 1);
-  snprintf(b, sizeof(b), "МАКС %.0f", dayMaxV);
-  drawTxt(rx, vb.y + 32, b, cMuted, cSurf, 1);
-  // температура корпуса реле переехала сюда, к остальным «электрическим» цифрам
-  if (gTempValid) snprintf(b, sizeof(b), "РЕЛЕ %.1f", gTemp);
-  else            strcpy(b, "РЕЛЕ --");
-  drawTxt(rx, vb.y + 44, b, cTEMP_ACC, cSurf, 1);
+  snprintf(b, sizeof(b), "МИН %.0f  МАКС %.0f", (dayMinV < 900) ? dayMinV : 0, dayMaxV);
+  drawTxt(vb.x + 7, vb.y + 46, b, cMuted, cSurf, 1);
   uint16_t rc = gRelay ? cGood : cBadC;
-  drawTxtR(vb.x + vb.w - 8, vb.y + 44, gRelay ? "ВКЛ" : "ВЫКЛ", rc, cSurf, 2);
+  drawTxt(vb.x + 7, vb.y + 57, "РЕЛЕ:", cMuted, cSurf, 1);
+  drawTxt(vb.x + 44, vb.y + 55, gRelay ? "ВКЛ" : "ВЫКЛ", rc, cSurf, 2);
+
+  // ---- температура корпуса реле (правая половина карточки напряжения)
+  drawTxt(vb.x + VSZ + 8, vb.y + 4, "ТЕМП РЕЛЕ", cMuted, cSurf, 1);
+  if (gTempValid) snprintf(b, sizeof(b), "%.1f", gTemp);
+  else            strcpy(b, "--");
+  int tdh = 20, tgap = 4;
+  seg7Str(vb.x + VSZ + 8, vb.y + 16, tdh, b, cTEMP_ACC, tgap);
+  drawTxt(vb.x + VSZ + 8 + seg7W(b, tdh, tgap) + 3, vb.y + 26, "C", cMuted, cSurf, 1);
+  if (dayTSec) snprintf(b, sizeof(b), "СР %.1f", (float)(daySumT / dayTSec));
+  else         strcpy(b, "СР --");
+  drawTxt(vb.x + VSZ + 8, vb.y + 44, b, cMuted, cSurf, 1);
+  drawTxt(vb.x + VSZ + 8, vb.y + 56, "КОРПУС", cMuted, cSurf, 1);
 
   // ---- климат в комнате (AHT20 + BMP280) вместо температуры реле
   const Block& tb = BLOCKS[1];
