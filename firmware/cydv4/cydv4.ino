@@ -1073,7 +1073,7 @@ static void rangeReset(RngDay* a, int n) {
 
 // пройти файл месяца и накопить в buckets
 static void rangeScanFile(const char* path, long fromT, long toT, RngDay* b, int nb,
-                          size_t startOffset = 0) {
+                          size_t startOffset = 0, uint32_t minDay = 0) {
   File f = SD.open(path, FILE_READ);
   if (!f) return;
   if (startOffset) {
@@ -1097,6 +1097,7 @@ static void rangeScanFile(const char* path, long fromT, long toT, RngDay* b, int
     if (rt < fromT - 86400L || rt > toT + 86400L) { havePrev = false; return; }
     if (e <= 0) return;                       // импорт/GAPFILL с нулём — пропускаем
     uint32_t day = (uint32_t)(rt / 86400L);
+    if (minDay && day < minDay) { havePrev = false; return; }   // этот день уже в кэше
     int idx = dayIndexOf(b, nb, day);
     if (idx < 0) return;
     if (havePrev && (uint32_t)(pt / 86400L) != day) havePrev = false;   // не тянем через сутки
@@ -12581,9 +12582,9 @@ void webSetup() {
         File tf = SD.open("/energy.csv", FILE_READ);
         if (tf) {
           size_t sz = tf.size();
-          size_t off = (sz > 300UL * 1024UL) ? (sz - 300UL * 1024UL) : 0;
+          size_t off = (sz > 160UL * 1024UL) ? (sz - 160UL * 1024UL) : 0;
           tf.close();
-          rangeScanFile("/energy.csv", fE, tE + 86400L - 1, agg, n, off);
+          rangeScanFile("/energy.csv", fE, tE + 86400L - 1, agg, n, off, (uint32_t)todayDay);
         }
       }
       sy = ey + 1; sm = 1;        // общий цикл по месяцам пропускаем
@@ -12600,7 +12601,7 @@ void webSetup() {
     if (needScan) {
       for (int i = 0; i < n; i++) {
         if (todayDay && agg[i].day >= (uint32_t)todayDay) continue;
-        if (agg[i].rows > 0) dayCachePut(agg[i]);
+        dayCachePut(agg[i]);          // пустые дни тоже запоминаем: не сканируем их снова
       }
       dayCacheFlush(false);
     }

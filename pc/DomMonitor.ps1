@@ -5962,14 +5962,14 @@ function Show-Sounds {
                 for ($k = 0; $k -lt $script:sndPresets.Count; $k++) {
                     if ($script:sndPresets[$k].name -eq $pname) { $pid2 = $k; break }
                 }
-                Invoke-RestMethod ('http://' + $ip + '/beep?preset=' + $pid2) -TimeoutSec 10 | Out-Null
+                Invoke-RestUi ('http://' + $ip + '/beep?preset=' + $pid2) 10 | Out-Null
                 $st.Text = ('проиграл: ' + $pname)
             }
         } catch { $st.Text = 'ошибка прослушивания' }
     })
 
     $btnMute.Add_Click({
-        try { Invoke-RestMethod ('http://' + $ip + '/sound?mute=30') -TimeoutSec 10 | Out-Null; $st.Text = 'приглушено на 30 минут' }
+        try { Invoke-RestUi ('http://' + $ip + '/sound?mute=30') 10 | Out-Null; $st.Text = 'приглушено на 30 минут' }
         catch { $st.Text = 'ошибка' }
     })
 
@@ -5987,7 +5987,7 @@ function Show-Sounds {
                 }
                 $u += '&' + $key + '=' + $pid2
             }
-            Invoke-RestMethod $u -TimeoutSec 15 | Out-Null
+            Invoke-RestUi $u 20 | Out-Null
             $st.Text = 'сохранено в плате'
             Add-Log ('звуки: настройки сохранены (vol ' + [int]$numVol.Value + '%)') 'ok'
         } catch { $st.Text = 'ошибка сохранения: ' + $_.Exception.Message }
