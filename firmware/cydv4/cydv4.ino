@@ -6505,6 +6505,7 @@ void beepEvents() {
 // ============================================================================
 #define ENV_SDA   27
 #define ENV_SCL   22
+static int envSdaPin = ENV_SDA, envSclPin = ENV_SCL;
 #define AHT_ADDR  0x38
 #define BMP_ADDR  0x76
 static uint8_t bmpAddr = BMP_ADDR;   // 0x76 или 0x77 — определяем при старте
@@ -6516,7 +6517,7 @@ unsigned long envAt = 0;
 
 // --- BMP280: калибровка и компенсация (по даташиту, целочисленно)
 static uint16_t bmpT1, bmpT2, bmpT3;
-static int16_t  bmpP1;
+static uint16_t bmpP1;
 static int16_t  bmpP2, bmpP3, bmpP4, bmpP5, bmpP6, bmpP7, bmpP8, bmpP9;
 static int32_t  bmpTfine = 0;
 
@@ -6534,7 +6535,7 @@ static bool bmpBegin() {
   bmpT1 = (uint16_t)(c[0] | (c[1] << 8));
   bmpT2 = (int16_t)(c[2] | (c[3] << 8));
   bmpT3 = (int16_t)(c[4] | (c[5] << 8));
-  bmpP1 = (int16_t)(c[6] | (c[7] << 8));
+  bmpP1 = (uint16_t)(c[6] | (c[7] << 8));
   bmpP2 = (int16_t)(c[8] | (c[9] << 8));
   bmpP3 = (int16_t)(c[10] | (c[11] << 8));
   bmpP4 = (int16_t)(c[12] | (c[13] << 8));
@@ -6618,8 +6619,28 @@ static bool i2cPresent(uint8_t addr) {
   return Wire.endTransmission() == 0;
 }
 
+// пробуем оба порядка выводов: у модулей бывает и SCL/SDA, и наоборот
+static bool envTryPins(int sda, int scl) {
+  Wire.end();
+  Wire.begin(sda, scl, 100000UL);
+  delay(80);
+  Wire.beginTransmission(0x38);
+  if (Wire.endTransmission() == 0) return true;
+  Wire.beginTransmission(0x76);
+  if (Wire.endTransmission() == 0) return true;
+  Wire.beginTransmission(0x77);
+  return Wire.endTransmission() == 0;
+}
+
 void envBegin() {
-  Wire.begin(ENV_SDA, ENV_SCL, 100000UL);
+  if (!envTryPins(envSdaPin, envSclPin)) {
+    if (envTryPins(envSclPin, envSdaPin)) {
+      int tmp = envSdaPin; envSdaPin = envSclPin; envSclPin = tmp;
+      Serial.printf("датчики: выводы поменяны — SDA %d, SCL %d\n", envSdaPin, envSclPin);
+    }
+  }
+  Wire.end();
+  Wire.begin(envSdaPin, envSclPin, 100000UL);
   delay(120);
   // до трёх попыток: после включения модуль отвечает не сразу
   for (int k = 0; k < 3 && !envAht; k++) {
@@ -12904,9 +12925,9 @@ void webSetup() {
   gWeb.on("/i2c", []() {
     // скан шины: какие адреса отвечают (0x38 = AHT20, 0x76/0x77 = BMP280)
     // можно перепробовать пины: /i2c?sda=22&scl=27
-    int sda = gWeb.hasArg("sda") ? gWeb.arg("sda").toInt() : ENV_SDA;
-    int scl = gWeb.hasArg("scl") ? gWeb.arg("scl").toInt() : ENV_SCL;
-    if (sda != ENV_SDA || scl != ENV_SCL) {
+    int sda = gWeb.hasArg("sda") ? gWeb.arg("sda").toInt() : envSdaPin;
+    int scl = gWeb.hasArg("scl") ? gWeb.arg("scl").toInt() : envSclPin;
+    if (sda != envSdaPin || scl != envSclPin) {
       Wire.end();
       Wire.begin((int)sda, (int)scl, 100000UL);
       delay(40);
@@ -12920,6 +12941,26 @@ void webSetup() {
       String pj = "{\"sda\":" + String(sda) + ",\"scl\":" + String(scl);
       pj += ",\"sdaLevel\":" + String(ls) + ",\"sclLevel\":" + String(lc) + "}";
       gWeb.send(200, "application/json", pj);
+      return;
+    }
+    if (gWeb.hasArg("slow")) {
+      // медленный режим 10 кГц — помогает на длинных или плохих проводах
+      Wire.end();
+      pinMode(sda, INPUT_PULLUP);
+      pinMode(scl, INPUT_PULLUP);
+      delay(5);
+      int l1 = digitalRead(sda), l2 = digitalRead(scl);
+      Wire.begin((int)sda, (int)scl, 10000UL);
+      delay(80);
+      String sj = "{\"sda\":" + String((int)sda) + ",\"scl\":" + String((int)scl);
+      sj += ",\"levelSda\":" + String(l1) + ",\"levelScl\":" + String(l2) + ",\"found\":[";
+      int nn = 0;
+      for (uint8_t a = 1; a < 127; a++) {
+        Wire.beginTransmission(a);
+        if (Wire.endTransmission() == 0) { if (nn++) sj += ','; sj += String(a); }
+      }
+      sj += "]}";
+      gWeb.send(200, "application/json", sj);
       return;
     }
     if (gWeb.hasArg("init")) {
