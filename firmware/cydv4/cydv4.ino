@@ -13110,7 +13110,56 @@ void webSetup() {
     gWeb.send(200, "application/json", "{\"ok\":true,\"sound\":\"" + s + "\"}");
   });
 
-  gWeb.on("/i2c", []() {
+  gWeb.on("/climate", []() {
+    // ?clean=1 — почистить /climate.csv: одна строка на час, без мусорного давления
+    if (!gWeb.hasArg("clean")) {
+      File f = SD.open("/climate.csv", FILE_READ);
+      gWeb.send(200, "application/json", String("{\"ok\":true,\"size\":") + (f ? (unsigned long)f.size() : 0UL) + "}");
+      if (f) f.close();
+      return;
+    }
+    File in = SD.open("/climate.csv", FILE_READ);
+    if (!in) { gWeb.send(404, "application/json", "{\"ok\":false,\"err\":\"no file\"}"); return; }
+    File out = SD.open("/climate.new", FILE_WRITE);
+    if (!out) { in.close(); gWeb.send(500, "application/json", "{\"ok\":false,\"err\":\"sd\"}"); return; }
+    char lastKey[14] = "";
+    char line[128];
+    int len = 0, kept = 0, guard = 0;
+    while (in.available() && guard++ < 20000) {
+      int c = in.read();
+      if (c < 0) break;
+      if (c == '\n' || len >= (int)sizeof(line) - 1) {
+        line[len] = 0; len = 0;
+        if (strlen(line) > 18 && strchr(line, ',')) {
+          char key[14];
+          strncpy(key, line, 13); key[13] = 0;      // "ГГГГ-ММ-ДД,ЧЧ"
+          float pv = 0;
+          char* last = strrchr(line, ',');
+          if (last) pv = atof(last + 1);
+          bool badP = (pv != 0 && (pv < 300 || pv > 1100));
+          if (strcmp(key, lastKey) != 0 && !badP) {
+            strcpy(lastKey, key);
+            out.println(line);
+            kept++;
+          }
+        }
+        continue;
+      }
+      if (c != '\r') line[len++] = (char)c;
+    }
+    in.close(); out.close();
+    SD.remove("/climate.old");
+    if (SD.exists("/climate.csv")) SD.rename("/climate.csv", "/climate.old");
+    if (!SD.rename("/climate.new", "/climate.csv")) {
+      SD.rename("/climate.old", "/climate.csv");
+      gWeb.send(500, "application/json", "{\"ok\":false,\"err\":\"rename\"}");
+      return;
+    }
+    SD.remove("/climate.old");
+    gWeb.send(200, "application/json", String("{\"ok\":true,\"kept\":") + kept + "}");
+  });
+
+gWeb.on("/i2c", []() {
     // скан шины: какие адреса отвечают (0x38 = AHT20, 0x76/0x77 = BMP280)
     // можно перепробовать пины: /i2c?sda=22&scl=27
     int sda = gWeb.hasArg("sda") ? gWeb.arg("sda").toInt() : envSdaPin;
