@@ -5795,8 +5795,8 @@ const Block BLOCKS[5] = {
   // Зоны доведены ДО КРАЁВ экрана. Раньше касание у кромки (x=239 при крае
   // карточки 234) промахивалось мимо всех карточек — и «ничего не открывалось».
   {  0,  44, 240, 72, SCR_VOLT    },
-  {  0, 112, 116, 64, SCR_CLIMATE },   // климат в комнате
-  {116, 112, 124, 64, SCR_POWER   },   // примыкает к ТЕМП без щели
+  {  0, 112, 120, 64, SCR_CLIMATE },   // климат в комнате
+  {120, 112, 120, 64, SCR_POWER   },   // ровно половина, как и климат
   {  0, 174, 240, 72, SCR_TODAY   },
   {  0, 244, 240, 74, SCR_WEATHER },
 };
@@ -7293,7 +7293,9 @@ void drawMain() {
   uiFill(vb.x + VSZ, vb.y + 6, 1, vb.h - 12, cLine);   // разделитель
 
   drawTxt(vb.x + 7, vb.y + 4, "НАПРЯЖЕНИЕ", cMuted, cSurf, 1);
-  drawTxtR(vb.x + VSZ - 6, vb.y + 4, vok ? voltVerdict(gVoltage) : "НЕТ ДАННЫХ", vc, cSurf, 1);
+  uint16_t rc = gRelay ? cGood : cBadC;
+  drawTxtR(vb.x + VSZ - 6, vb.y + 4, gRelay ? "ВКЛ" : "ВЫКЛ", rc, cSurf, 1);
+  drawTxtR(vb.x + VSZ - 6, vb.y + 58, vok ? voltVerdict(gVoltage) : "НЕТ ДАННЫХ", vc, cSurf, 1);
 
   strcpy(b, vok ? "" : "---");
   if (vok) snprintf(b, sizeof(b), "%.0f", gVoltage);
@@ -7304,9 +7306,7 @@ void drawMain() {
 
   snprintf(b, sizeof(b), "МИН %.0f  МАКС %.0f", (dayMinV < 900) ? dayMinV : 0, dayMaxV);
   drawTxt(vb.x + 7, vb.y + 46, b, cMuted, cSurf, 1);
-  uint16_t rc = gRelay ? cGood : cBadC;
-  drawTxt(vb.x + 7, vb.y + 56, "РЕЛЕ", cMuted, cSurf, 1);
-  drawTxt(vb.x + 38, vb.y + 54, gRelay ? "ВКЛ" : "ВЫКЛ", rc, cSurf, 2);
+  drawTxt(vb.x + 7, vb.y + 56, "МИН-МАКС", cMuted, cSurf, 1);
 
   // ---- температура корпуса реле (правая половина карточки напряжения)
   drawTxt(vb.x + VSZ + 8, vb.y + 4, "ТЕМП РЕЛЕ", cMuted, cSurf, 1);
@@ -7497,65 +7497,46 @@ void drawTempScreen() {
 
   char b[40];
   snprintf(b, sizeof(b), "%.1f", gTemp);
-  int dh = 42, gap = 7;
+  int dh = 46, gap = 7;
   int tw = seg7W(b, dh, gap);
-  seg7Str(12, 52, dh, b, cTEMP_ACC, gap);
-  drawTxt(12 + tw + 8, 74, "C", cMuted, cBg, 2);
-  drawTxt(12, 96, "КОРПУС РЕЛЕ", cMuted, cBg, 1);
-
-  // ---- климат в комнате: AHT20 (темп/влажность) + BMP280 (давление)
-  if (envOk) {
-    char e[40];
-    float et = isnan(envT) ? 0.0f : envT;
-    float eh = isnan(envH) ? 0.0f : envH;
-    float ep = isnan(envP) ? 0.0f : envP;
-    uiFill(0, 108, 240, 34, cSurf);
-    drawTxt(8, 112, "ВОЗДУХ", cMuted, cSurf, 1);
-    snprintf(e, sizeof(e), "%.1fC", et);
-    drawTxt(8, 122, e, cTEMP_ACC, cSurf, 2);
-    drawTxt(92, 112, "ВЛАЖН", cMuted, cSurf, 1);
-    snprintf(e, sizeof(e), "%.0f%%", eh);
-    drawTxt(92, 122, e, cAccent, cSurf, 2);
-    drawTxt(152, 112, "ДАВЛ", cMuted, cSurf, 1);
-    snprintf(e, sizeof(e), "%.0f", ep * 0.75006f);
-    drawTxt(152, 122, e, cText, cSurf, 2);
-  } else {
-    drawTxt(8, 116, "КЛИМАТ: ДАТЧИК НЕ НАЙДЕН", cMuted, cBg, 1);
-  }
+  seg7Str(12, 54, dh, b, cTEMP_ACC, gap);
+  drawTxt(12 + tw + 8, 80, "C", cMuted, cBg, 2);
+  drawStamp(12, 104, gTempMs, cBg);
+  drawTxt(12, 116, "ТЕМПЕРАТУРА КОРПУСА РЕЛЕ", cMuted, cBg, 1);
 
   // Показатели — за ВЫБРАННЫЙ день (сегодня из day*, прошлый из dd*).
   bool past = (gDayOffset > 0);
   char lab[40];
   if (past) snprintf(lab, sizeof(lab), "МАКС ЗА %s", gDayLabel);
   else      snprintf(lab, sizeof(lab), "МАКС ЗА СУТКИ");
-  drawTxt(12, 148, lab, cMuted, cBg, 1);
+  drawTxt(12, 126, lab, cMuted, cBg, 1);
   float tMax = past ? ddMaxT : dayMaxT;
   if (past && ddSecT == 0) strcpy(b, "--");
   else                     snprintf(b, sizeof(b), "%.1f", (tMax > -100) ? tMax : gTemp);
-  drawTxt(12, 158, b, cTEMP_ACC, cBg, 3);
+  drawTxt(12, 136, b, cTEMP_ACC, cBg, 3);
   hhmm(past ? ddMaxTMin : dayMaxTMin, b, sizeof(b));
-  drawTxt(12, 178, b, cMuted, cBg, 1);
+  drawTxt(12, 160, b, cMuted, cBg, 1);
 
-  drawTxt(100, 148, "СРЕДНЯЯ", cMuted, cBg, 1);
+  drawTxt(100, 126, "СРЕДНЯЯ", cMuted, cBg, 1);
   if (past && ddSecT == 0) strcpy(b, "--");
   else snprintf(b, sizeof(b), "%.1f", past ? (ddSecT ? (float)(ddSumT / ddSecT) : gTemp)
                                            : (dayTSec ? (float)(daySumT / dayTSec) : gTemp));
-  drawTxt(100, 158, b, cText, cBg, 2);
+  drawTxt(100, 136, b, cText, cBg, 2);
 
-  drawTxt(178, 148, "МИН", cMuted, cBg, 1);
+  drawTxt(100, 162, "МИН", cMuted, cBg, 1);
   float tMin = past ? ddMinT : dayMinT;
   if (past && ddSecT == 0) strcpy(b, "--");
   else                     snprintf(b, sizeof(b), "%.1f", (tMin < 900) ? tMin : gTemp);
-  drawTxt(178, 158, b, cMuted, cBg, 2);
+  drawTxt(148, 162, b, cMuted, cBg, 1);
 
   const float* arrT = past ? dayT : h24T;
-  drawHourTitle(190, arrT, 2, "C", 1);
+  drawHourTitle(176, arrT, 2, "C", 1);
   if (!gSkipChart)
-    drawHourBars(10, 198, 220, 78, arrT, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
+    drawHourBars(10, 186, 220, 86, arrT, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
   char cap[80];
   if (past) snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА %s", gDayLabel);
   else      snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА КАЖДЫЙ ЧАС");
-  drawTxt(10, 288, cap, cMuted, cBg, 1);
+  drawTxt(10, 284, cap, cMuted, cBg, 1);
 }
 
 // ---------------------------------------------------------------- климат: данные выбранного дня
@@ -7648,9 +7629,9 @@ void drawClimateScreen() {
   drawTxt(12, 114, "ВЛАЖНОСТЬ", cMuted, cBg, 1);
   snprintf(b, sizeof(b), "%.0f %%", eh);
   drawTxt(12, 124, b, cAccent, cBg, 2);
-  drawTxt(130, 114, "ДАВЛЕНИЕ", cMuted, cBg, 1);
+  drawTxt(124, 114, "ДАВЛЕНИЕ", cMuted, cBg, 1);
   snprintf(b, sizeof(b), "%.0f мм", ep * 0.75006f);
-  drawTxt(130, 124, b, cText, cBg, 2);
+  drawTxt(124, 124, b, cText, cBg, 2);
 
   // строка с датой и стрелками — как на экранах напряжения/температуры
   drawHourTitle(150, envHourT, 2, "C", 1);

@@ -1706,6 +1706,22 @@ $lblFresh.Size = New-Object System.Drawing.Size(92, 26)
 
 $lblFresh.Location = New-Object System.Drawing.Point(456, 20)
 
+$script:lblClimate = New-Object System.Windows.Forms.Label
+
+$script:lblClimate.Text = 'климат —'
+
+$script:lblClimate.Font = Fnt 'Segoe UI' 8 $false
+
+$script:lblClimate.ForeColor = C $script:CLR.dim2
+
+$script:lblClimate.BackColor = C $script:CLR.card
+
+$script:lblClimate.AutoSize = $true
+
+$script:lblClimate.Location = New-Object System.Drawing.Point(14, 44)
+
+$top.Controls.Add($script:lblClimate)
+
 $top.Controls.Add($lblFresh)
 
 
@@ -1729,6 +1745,10 @@ $lblCom.Location = New-Object System.Drawing.Point(798, 20)
 $top.Controls.Add($lblCom)
 
 
+
+$btnSnd     = New-Btn $top 'Звуки' '#24405A' $script:CLR.text 92 32
+
+$btnSnd.Add_Click({ Show-Sounds })
 
 $btnPult    = New-Btn $top 'Экран платы' '#2A3240' $script:CLR.text 112 32
 
@@ -4475,6 +4495,40 @@ function Add-LogLine([string]$text) {
 
 function Update-Header {
 
+    if ($null -ne $script:lblClimate -and $null -ne $script:board) {
+
+        $eok = Field $script:board @('eok')
+
+        if ($null -ne $eok -and [int]$eok -eq 1) {
+
+            $et = Field $script:board @('et')
+
+            $eh = Field $script:board @('eh')
+
+            $ep = Field $script:board @('ep')
+
+            $txt = 'климат '
+
+            if ($null -ne $et) { $txt += (Num $et '0.0') + '°' }
+
+            if ($null -ne $eh) { $txt += ' · ' + (Num $eh '0') + '%' }
+
+            if ($null -ne $ep) { $txt += ' · ' + [Math]::Round([double]$ep * 0.75006) + ' мм' }
+
+            Set-Lbl $script:lblClimate $txt
+
+            $script:lblClimate.ForeColor = C $script:CLR.text
+
+        } else {
+
+            Set-Lbl $script:lblClimate 'климат: датчик не найден'
+
+            $script:lblClimate.ForeColor = C $script:CLR.dim2
+
+        }
+
+    }
+
     $age = Get-BoardAge
 
     $comOpen = ($null -ne $script:port -and $script:port.IsOpen)
@@ -5686,6 +5740,19 @@ function Log-Beats {
     $sd = Field $d @('sdRows')
 
     if ($null -ne $sd) { $parts += ('карта ' + [int]$sd + ' строк') }
+
+    # климат в комнате: AHT20 + BMP280
+    $eok = Field $d @('eok')
+    if ($null -ne $eok -and [int]$eok -eq 1) {
+        $et = Field $d @('et')
+        $eh = Field $d @('eh')
+        $ep = Field $d @('ep')
+        $cl = 'климат '
+        if ($null -ne $et) { $cl += (Num $et '0.0') + '°' }
+        if ($null -ne $eh) { $cl += ' ' + (Num $eh '0') + '%' }
+        if ($null -ne $ep) { $cl += ' ' + [Math]::Round([double]$ep * 0.75006) + ' мм' }
+        $parts += $cl
+    }
 
     # облако: cAge — когда был успешный обмен, cWhy — код причины, cFail — сбои
 
@@ -7123,7 +7190,15 @@ function Layout-Header {
 
     $btnPult.Location = New-Object System.Drawing.Point(($x - $btnPult.Width), 15)
 
-    $x -= $btnPult.Width + 12
+    $x -= $btnPult.Width + 8
+
+    if ($null -ne $btnSnd) {
+
+        $btnSnd.Location = New-Object System.Drawing.Point(($x - $btnSnd.Width), 15)
+
+        $x -= $btnSnd.Width + 12
+
+    }
 
     $lblCom.Location = New-Object System.Drawing.Point(($x - $lblCom.Width), 20)
 
