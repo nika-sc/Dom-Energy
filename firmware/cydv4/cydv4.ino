@@ -7570,7 +7570,7 @@ void drawClimateScreen() {
   int tw = seg7W(b, dh, gap);
   seg7Str(12, 54, dh, b, cTEMP_ACC, gap);
   drawTxt(12 + tw + 8, 80, "C", cMuted, cBg, 2);
-  drawTxt(12, 104, envOk ? "ВОЗДУХ У ПЛАТЫ" : "ДАТЧИК НЕ НАЙДЕН", cMuted, cBg, 1);
+  drawTxt(12, 104, envOk ? "ТЕМПЕРАТУРА ВОЗДУХА" : "ДАТЧИК НЕ НАЙДЕН", cMuted, cBg, 1);
 
   // влажность и давление
   float eh = isnan(envH) ? 0.0f : envH;
