@@ -4989,6 +4989,7 @@ static void weatherLogTouch() {
 // найти ПОСЛЕДНЮЮ строку погоды за день
 static bool weatherLogFind(const char* date, char* desc, size_t dn,
                            float* tmin, float* tmax, float* rmin, float* rmax) {
+  if (desc && dn) desc[0] = 0;
   File f = SD.open(WLOG_PATH, FILE_READ);
   if (!f) return false;
   bool found = false;
@@ -6070,7 +6071,7 @@ static const char* SND_NAMES[SND_N] PROGMEM = {
 // --- события ---
 enum { EV_BOOT, EV_REBOOT, EV_OTA, EV_ERROR, EV_ALARM, EV_RON, EV_ROFF, EV_HOUR, EV_TOUCH, EV_N };
 static const char* EV_KEYS[EV_N] PROGMEM = {
-  "boot", "reboot", "ota", "error", "alarm", "relay_on", "relay_off", "hour", "touch"
+  "boot", "reboot", "ota", "error", "alarm", "relay_on", "relay_off", "ev_hour", "ev_touch"
 };
 static const char* EV_NAMES[EV_N] PROGMEM = {
   "загрузка", "перезагрузка", "OTA завершена", "ошибка/защита", "авария U/I",
@@ -6215,8 +6216,10 @@ void beepTick() {
     if (now - bpAt >= bpOff) {
       bpStep++;
       if (bpStep >= bpSteps) { bpSteps = 0; bpStep = 0; return; }
-      SndStep s; memcpy_P(&s, &bpCur[bpStep], sizeof(s));
-      bpFreq = s.f; bpOn = s.on; bpOff = s.off;
+      if (bpCur) {
+        SndStep s; memcpy_P(&s, &bpCur[bpStep], sizeof(s));
+        bpFreq = s.f; bpOn = s.on; bpOff = s.off;
+      }
       bpSounding = true; bpAt = now;
       beepTone(true);
     }
@@ -6227,6 +6230,8 @@ void beepTick() {
 void beepPlay(uint8_t n, uint16_t freq, uint16_t onMs, uint16_t offMs) {
   bpVolNow = gBeepVol;
   bpFreq = freq; bpOn = onMs; bpOff = offMs;
+  bpCur = nullptr;                 // простой повтор одного тона, без таблицы
+  if (n > SND_STEPS) n = SND_STEPS;
   bpSteps = n; bpStep = 0;
   bpSounding = true; bpAt = millis();
   beepTone(true);
@@ -11091,10 +11096,18 @@ static void weatherCompact() {
   if (lastLine[0]) out.println(lastLine);
   in.close();
   out.close();
-  SD.remove("/weather.tmp.old");
-  if (SD.exists(WLOG_PATH)) SD.rename(WLOG_PATH, "/weather.tmp.old");
-  SD.rename("/weather.tmp", WLOG_PATH);
-  SD.remove("/weather.tmp.old");
+  // сначала отводим старый файл, только потом ставим новый;
+  // при любом сбое возвращаем старый на место — данные не теряем
+  bool moved = false;
+  if (SD.exists("/weather.old")) SD.remove("/weather.old");
+  if (SD.exists(WLOG_PATH)) moved = SD.rename(WLOG_PATH, "/weather.old");
+  bool put = SD.rename("/weather.tmp", WLOG_PATH);
+  if (!put) {
+    if (moved) SD.rename("/weather.old", WLOG_PATH);
+    Serial.println("погода: компактация не удалась, файл не тронут");
+    return;
+  }
+  SD.remove("/weather.old");
   Serial.println("погода: файл сжат до одной строки на день");
 }
 
@@ -12398,7 +12411,7 @@ void webSetup() {
     }
     static RngDay agg[RNG_MAX];
     // кэш: тот же диапазон и файл не вырос — отдаём без сканирования (скан дорогой)
-    static char cKey[40] = "";
+    static char cKey[64] = "";
     static String cJson;
     static unsigned long cSize = 0, cAt = 0;
     char kbuf[56];
