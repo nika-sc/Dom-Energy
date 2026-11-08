@@ -309,6 +309,16 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
 
 
 
+<h2 class="sect">Климат в комнате<span>датчик AHT20 + BMP280 на шине I2C</span></h2>
+<div class="cards" id="envCards">
+  <div class="card"><div class="k">ТЕМПЕРАТУРА</div><div class="v c4" id="envT">—</div>
+    <div class="s" id="envTS">датчик не найден</div></div>
+  <div class="card"><div class="k">ВЛАЖНОСТЬ</div><div class="v c1" id="envH">—</div>
+    <div class="s">относительная</div></div>
+  <div class="card"><div class="k">ДАВЛЕНИЕ</div><div class="v" id="envP">—</div>
+    <div class="s" id="envPS">—</div></div>
+</div>
+
 <h2 class="sect">Погода и тарифы</h2>
 
 <div class="two">
@@ -382,12 +392,32 @@ G("themeBtn").addEventListener("click",function(){
 try{var th=localStorage.getItem("dom.theme"); if(th) setTheme(th); else setTheme("dark");}catch(e){setTheme("dark")}
 
 /* ---------- живое состояние ---------- */
+function applyEnv(d){
+  try{
+    var et=document.getElementById('envT');
+    if(!et) return;
+    if(d.eok){
+      et.textContent=num(d.et,1)+'°';
+      document.getElementById('envTS').textContent='датчик подключён';
+      document.getElementById('envH').textContent=num(d.eh,0)+'%';
+      document.getElementById('envP').textContent=num((d.ep||0)*0.75006,0)+' мм';
+      document.getElementById('envPS').textContent=num(d.ep,0)+' гПа';
+    } else {
+      et.textContent='—';
+      document.getElementById('envTS').textContent='датчик не найден';
+      document.getElementById('envH').textContent='—';
+      document.getElementById('envP').textContent='—';
+      document.getElementById('envPS').textContent='проверь /i2c';
+    }
+  }catch(e){}
+}
 function apply(d){
   if(!d)return;
   S.data=d; S.last=Date.now();
   txt("mv",num(d.v)); txt("mp",num(d.p)); txt("ma",num(d.amp,2)); txt("mt",num(d.temp,1));
   txt("ptar",num(d.tariff,2)); txt("pe",num(d.e,2));
   txt("tkwh",num(d.tkwh,2)); txt("tcost",num(d.tcost,2));
+  applyEnv(d);
   txt("ykwh",num(d.ykwh,2)); txt("ykost",num(d.ykost,2));
   txt("mkwh",num(d.mkwh,2)); txt("mcost",num(d.mcost,2));
   txt("cRssi",num(d.rssi)+" дБм");

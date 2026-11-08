@@ -23,6 +23,7 @@
 #include <Update.h>
 #include <SPI.h>
 #include <SD.h>
+#include <Wire.h>
 
 static void tarForEpoch(long a, float* day, float* night, uint8_t* h1, uint8_t* h2);
 
@@ -6498,6 +6499,200 @@ void beepEvents() {
   }
 }
 
+// ============================================================================
+//  ДАТЧИКИ I2C: AHT20 (температура, влажность) + BMP280 (давление)
+//  Разъём «Расширение 02»: 3.3V, GND, IO22 = SCL, IO27 = SDA
+// ============================================================================
+#define ENV_SDA   27
+#define ENV_SCL   22
+#define AHT_ADDR  0x38
+#define BMP_ADDR  0x76
+static uint8_t bmpAddr = BMP_ADDR;   // 0x76 или 0x77 — определяем при старте
+
+bool  envOk = false;          // хотя бы один датчик найден
+bool  envAht = false, envBmp = false;
+float envT = NAN, envH = NAN, envP = NAN;
+unsigned long envAt = 0;
+
+// --- BMP280: калибровка и компенсация (по даташиту, целочисленно)
+static uint16_t bmpT1, bmpT2, bmpT3;
+static int16_t  bmpP1;
+static int16_t  bmpP2, bmpP3, bmpP4, bmpP5, bmpP6, bmpP7, bmpP8, bmpP9;
+static int32_t  bmpTfine = 0;
+
+static bool bmpRead(uint8_t reg, uint8_t* buf, uint8_t n) {
+  Wire.beginTransmission(bmpAddr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(bmpAddr, n) != n) return false;
+  for (uint8_t i = 0; i < n; i++) buf[i] = Wire.read();
+  return true;
+}
+static bool bmpBegin() {
+  uint8_t c[24];
+  if (!bmpRead(0x88, c, 24)) return false;
+  bmpT1 = (uint16_t)(c[0] | (c[1] << 8));
+  bmpT2 = (int16_t)(c[2] | (c[3] << 8));
+  bmpT3 = (int16_t)(c[4] | (c[5] << 8));
+  bmpP1 = (int16_t)(c[6] | (c[7] << 8));
+  bmpP2 = (int16_t)(c[8] | (c[9] << 8));
+  bmpP3 = (int16_t)(c[10] | (c[11] << 8));
+  bmpP4 = (int16_t)(c[12] | (c[13] << 8));
+  bmpP5 = (int16_t)(c[14] | (c[15] << 8));
+  bmpP6 = (int16_t)(c[16] | (c[17] << 8));
+  bmpP7 = (int16_t)(c[18] | (c[19] << 8));
+  bmpP8 = (int16_t)(c[20] | (c[21] << 8));
+  bmpP9 = (int16_t)(c[22] | (c[23] << 8));
+  Wire.beginTransmission(bmpAddr);
+  Wire.write(0xF4); Wire.write(0x27);      // x1 oversampling, normal mode
+  if (Wire.endTransmission() != 0) return false;
+  Wire.beginTransmission(bmpAddr);
+  Wire.write(0xF5); Wire.write(0xA0);      // standby 1000 ms
+  Wire.endTransmission();
+  return true;
+}
+static bool bmpReadTempPress(float* tOut, float* pOut) {
+  uint8_t d[6];
+  if (!bmpRead(0xF7, d, 6)) return false;
+  int32_t adcP = ((int32_t)d[0] << 12) | ((int32_t)d[1] << 4) | (d[2] >> 4);
+  int32_t adcT = ((int32_t)d[3] << 12) | ((int32_t)d[4] << 4) | (d[5] >> 4);
+  // температура
+  int32_t v1 = ((((adcT >> 3) - ((int32_t)bmpT1 << 1))) * (int32_t)bmpT2) >> 11;
+  int32_t v2 = (((((adcT >> 4) - (int32_t)bmpT1) * ((adcT >> 4) - (int32_t)bmpT1)) >> 12) * (int32_t)bmpT3) >> 14;
+  bmpTfine = v1 + v2;
+  int32_t T = (bmpTfine * 5 + 128) >> 8;
+  *tOut = T / 100.0f;
+  // давление
+  int64_t p1 = (int64_t)bmpTfine - 128000;
+  int64_t p2 = p1 * p1 * (int64_t)bmpP6;
+  p2 = p2 + ((p1 * (int64_t)bmpP5) << 17);
+  p2 = p2 + (((int64_t)bmpP4) << 35);
+  p1 = ((p1 * p1 * (int64_t)bmpP3) >> 8) + ((p1 * (int64_t)bmpP2) << 12);
+  p1 = (((((int64_t)1) << 47) + p1)) * ((int64_t)bmpP1) >> 33;
+  if (p1 == 0) return false;
+  int64_t p = 1048576 - adcP;
+  p = (((p << 31) - p2) * 3125) / p1;
+  p1 = (((int64_t)bmpP9) * (p >> 13) * (p >> 13)) >> 25;
+  p2 = (((int64_t)bmpP8) * p) >> 19;
+  p = ((p + p1 + p2) >> 8) + (((int64_t)bmpP7) << 4);
+  *pOut = (float)p / 25600.0f;             // гектопаскали
+  return true;
+}
+
+// --- AHT20
+static bool ahtRead(float* tOut, float* hOut) {
+  Wire.beginTransmission(AHT_ADDR);
+  Wire.write(0xAC); Wire.write(0x33); Wire.write(0x00);
+  if (Wire.endTransmission() != 0) return false;
+  delay(80);
+  if (Wire.requestFrom((uint8_t)AHT_ADDR, (uint8_t)7) != 7) return false;
+  uint8_t b[7];
+  for (int i = 0; i < 7; i++) b[i] = Wire.read();
+  if (b[0] & 0x80) return false;                    // занят
+  uint32_t rawH = ((uint32_t)b[1] << 12) | ((uint32_t)b[2] << 4) | (b[3] >> 4);
+  uint32_t rawT = ((uint32_t)(b[3] & 0x0F) << 16) | ((uint32_t)b[4] << 8) | b[5];
+  *hOut = rawH * 100.0f / 1048576.0f;
+  *tOut = rawT * 200.0f / 1048576.0f - 50.0f;
+  return true;
+}
+
+// Если шина залипла ( slave держит SDA ), прогоняем 9 тактов SCL и STOP
+static void i2cRecover() {
+  pinMode(ENV_SCL, OUTPUT);
+  pinMode(ENV_SDA, INPUT_PULLUP);
+  digitalWrite(ENV_SCL, HIGH);
+  delayMicroseconds(10);
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(ENV_SCL, LOW);  delayMicroseconds(10);
+    digitalWrite(ENV_SCL, HIGH); delayMicroseconds(10);
+  }
+  pinMode(ENV_SDA, OUTPUT);
+  digitalWrite(ENV_SDA, LOW);  delayMicroseconds(10);
+  digitalWrite(ENV_SCL, HIGH); delayMicroseconds(10);
+  digitalWrite(ENV_SDA, HIGH); delayMicroseconds(10);
+  pinMode(ENV_SDA, INPUT_PULLUP);
+}
+
+static bool i2cPresent(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission() == 0;
+}
+
+void envBegin() {
+  Wire.begin(ENV_SDA, ENV_SCL, 100000UL);
+  delay(120);
+  // до трёх попыток: после включения модуль отвечает не сразу
+  for (int k = 0; k < 3 && !envAht; k++) {
+    envAht = i2cPresent(AHT_ADDR);
+    if (!envAht) delay(60);
+  }
+  if (envAht) {
+    Wire.beginTransmission(AHT_ADDR);               // калибровка AHT20
+    Wire.write(0xBE); Wire.write(0x08); Wire.write(0x00);
+    Wire.endTransmission();
+    delay(20);
+  }
+  envBmp = false;
+  bmpAddr = 0x77;
+  if (!i2cPresent(0x77)) {                       // часть модулей на 0x76
+    bmpAddr = BMP_ADDR;
+    if (!i2cPresent(BMP_ADDR)) bmpAddr = 0x77;
+  }
+  if (i2cPresent(bmpAddr)) envBmp = bmpBegin();
+  Serial.printf("BMP280: адрес 0x%02X, найден=%d\n", bmpAddr, envBmp ? 1 : 0);
+  envOk = envAht || envBmp;
+  Serial.printf("датчики: AHT20=%d BMP280=%d\n", envAht ? 1 : 0, envBmp ? 1 : 0);
+}
+
+// --- почасовая запись климата: /climate.csv (дата, время, t, h, p)
+static void climateLogTick() {
+  if (!envOk || !gSdOk) return;
+  struct tm ti;
+  if (!getLocalTime(&ti, 10)) return;
+  static int lastHour = -1, lastDay = -1;
+  if (ti.tm_hour == lastHour && ti.tm_mday == lastDay) return;
+  lastHour = ti.tm_hour; lastDay = ti.tm_mday;
+  char line[96];
+  snprintf(line, sizeof(line), "%04d-%02d-%02d,%02d:00,%.1f,%.1f,%.1f\n",
+           ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday, ti.tm_hour,
+           isnan(envT) ? 0.0f : envT, isnan(envH) ? 0.0f : envH, isnan(envP) ? 0.0f : envP);
+  File f = SD.open("/climate.csv", FILE_APPEND);
+  if (!f) return;
+  f.print(line);
+  f.close();
+  Serial.printf("климат: записан час %02d:%02d\n", ti.tm_hour, ti.tm_mday);
+}
+
+void envTick() {
+  // датчик могли подключить позже — раз в минуту пробуем найти заново
+  static unsigned long lastProbe = 0;
+  if (!envOk) {
+    if (!lastProbe || millis() - lastProbe > 60000UL) {
+      lastProbe = millis();
+      envBegin();
+    }
+    return;
+  }
+  if (envAt && millis() - envAt < 30000UL) return;
+  envAt = millis();
+  float t1 = NAN, h = NAN, t2 = NAN, p = NAN;
+  if (envAht) {
+    if (ahtRead(&t1, &h)) { envT = t1; envH = h; }
+  }
+  if (envBmp) {
+    if (bmpReadTempPress(&t2, &p)) { if (!envAht || isnan(envT)) envT = t2; envP = p; }
+  }
+  esp_task_wdt_reset();
+}
+
+String envJson() {
+  char b[96];
+  snprintf(b, sizeof(b), "\"eok\":%d,\"et\":%.1f,\"eh\":%.1f,\"ep\":%.1f",
+           envOk ? 1 : 0, isnan(envT) ? 0.0f : envT, isnan(envH) ? 0.0f : envH,
+           isnan(envP) ? 0.0f : envP);
+  return String(b);
+}
+
 //  RGB-СВЕТОДИОД — 4 (R), 16 (G), 17 (B), горят при НИЗКОМ уровне.
 // ============================================================================
 // v4.4: светодиод показывает состояние платы, яркость — ШИМ (каналы 2,3,4),
@@ -7218,50 +7413,69 @@ void drawVoltScreen() {
 // ---------------------------------------------------------------- окно температуры
 void drawTempScreen() {
   uiScreen(cBg);
-  drawDetailHeader("ТЕМП РЕЛЕ");    // ясно, что это датчик реле, а не воздух
+  drawDetailHeader("ТЕМП РЕЛЕ");
 
   char b[40];
   snprintf(b, sizeof(b), "%.1f", gTemp);
-  int dh = 46, gap = 7;
+  int dh = 42, gap = 7;
   int tw = seg7W(b, dh, gap);
-  seg7Str(12, 54, dh, b, cTEMP_ACC, gap);
-  drawTxt(12 + tw + 8, 80, "C", cMuted, cBg, 2);
-  drawStamp(12, 104, gTempMs, cBg);         // когда температура реально пришла
-  drawTxt(12, 116, "ТЕМПЕРАТУРА КОРПУСА РЕЛЕ", cMuted, cBg, 1);
+  seg7Str(12, 52, dh, b, cTEMP_ACC, gap);
+  drawTxt(12 + tw + 8, 74, "C", cMuted, cBg, 2);
+  drawTxt(12, 96, "КОРПУС РЕЛЕ", cMuted, cBg, 1);
+
+  // ---- климат в комнате: AHT20 (темп/влажность) + BMP280 (давление)
+  if (envOk) {
+    char e[40];
+    float et = isnan(envT) ? 0.0f : envT;
+    float eh = isnan(envH) ? 0.0f : envH;
+    float ep = isnan(envP) ? 0.0f : envP;
+    uiFill(0, 108, 240, 34, cSurf);
+    drawTxt(8, 112, "ВОЗДУХ", cMuted, cSurf, 1);
+    snprintf(e, sizeof(e), "%.1fC", et);
+    drawTxt(8, 122, e, cTEMP_ACC, cSurf, 2);
+    drawTxt(92, 112, "ВЛАЖН", cMuted, cSurf, 1);
+    snprintf(e, sizeof(e), "%.0f%%", eh);
+    drawTxt(92, 122, e, cAccent, cSurf, 2);
+    drawTxt(152, 112, "ДАВЛ", cMuted, cSurf, 1);
+    snprintf(e, sizeof(e), "%.0f", ep * 0.75006f);
+    drawTxt(152, 122, e, cText, cSurf, 2);
+  } else {
+    drawTxt(8, 116, "КЛИМАТ: ДАТЧИК НЕ НАЙДЕН", cMuted, cBg, 1);
+  }
 
   // Показатели — за ВЫБРАННЫЙ день (сегодня из day*, прошлый из dd*).
   bool past = (gDayOffset > 0);
   char lab[40];
   if (past) snprintf(lab, sizeof(lab), "МАКС ЗА %s", gDayLabel);
   else      snprintf(lab, sizeof(lab), "МАКС ЗА СУТКИ");
-  drawTxt(12, 126, lab, cMuted, cBg, 1);
+  drawTxt(12, 148, lab, cMuted, cBg, 1);
   float tMax = past ? ddMaxT : dayMaxT;
   if (past && ddSecT == 0) strcpy(b, "--");
   else                     snprintf(b, sizeof(b), "%.1f", (tMax > -100) ? tMax : gTemp);
-  drawTxt(12, 136, b, cTEMP_ACC, cBg, 3);
+  drawTxt(12, 158, b, cTEMP_ACC, cBg, 3);
   hhmm(past ? ddMaxTMin : dayMaxTMin, b, sizeof(b));
-  drawTxt(12, 160, b, cMuted, cBg, 1);
+  drawTxt(12, 178, b, cMuted, cBg, 1);
 
-  drawTxt(100, 126, "СРЕДНЯЯ", cMuted, cBg, 1);
+  drawTxt(100, 148, "СРЕДНЯЯ", cMuted, cBg, 1);
   if (past && ddSecT == 0) strcpy(b, "--");
   else snprintf(b, sizeof(b), "%.1f", past ? (ddSecT ? (float)(ddSumT / ddSecT) : gTemp)
                                            : (dayTSec ? (float)(daySumT / dayTSec) : gTemp));
-  drawTxt(100, 136, b, cText, cBg, 2);
+  drawTxt(100, 158, b, cText, cBg, 2);
 
-  drawTxt(100, 162, "МИН", cMuted, cBg, 1);
+  drawTxt(178, 148, "МИН", cMuted, cBg, 1);
   float tMin = past ? ddMinT : dayMinT;
   if (past && ddSecT == 0) strcpy(b, "--");
   else                     snprintf(b, sizeof(b), "%.1f", (tMin < 900) ? tMin : gTemp);
-  drawTxt(148, 162, b, cMuted, cBg, 1);
+  drawTxt(178, 158, b, cMuted, cBg, 2);
 
   const float* arrT = past ? dayT : h24T;
-  drawHourTitle(176, arrT, 2, "C", 1);
+  drawHourTitle(190, arrT, 2, "C", 1);
   if (!gSkipChart)
-    drawHourBars(10, 186, 220, 86, arrT, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
+    drawHourBars(10, 198, 220, 78, arrT, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
   char cap[80];
   if (past) snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА %s", gDayLabel);
   else      snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА КАЖДЫЙ ЧАС");
-  drawTxt(10, 284, cap, cMuted, cBg, 1);
+  drawTxt(10, 288, cap, cMuted, cBg, 1);
 }
 
 // ---------------------------------------------------------------- окно мощности
@@ -11600,7 +11814,11 @@ void webSetup() {
       wOk ? 1 : 0, wTemp, wHum, wWind, wCode, wCodeTom, wHeap, wDescRu.c_str(),
       wPopNow, wPopTom, wTminTom, wTmaxTom, wDescTom.c_str(), wRainTom, wfHeap,
       nows);
-    gWeb.send(200, "application/json", String(b));
+    // датчики I2C добавляем после snprintf: формат не разрастается
+    String dj = String(b);
+    dj.remove(dj.length() - 1);          // убираем закрывающую }
+    dj += "," + envJson() + "}";
+    gWeb.send(200, "application/json", dj);
   });
 
   // /mqtt — состояние MQTT: сервер, подключение, счётчики, последняя публикация.
@@ -12683,7 +12901,52 @@ void webSetup() {
     gWeb.send(200, "application/json", "{\"ok\":true,\"sound\":\"" + s + "\"}");
   });
 
-  gWeb.on("/weather", []() {
+  gWeb.on("/i2c", []() {
+    // скан шины: какие адреса отвечают (0x38 = AHT20, 0x76/0x77 = BMP280)
+    // можно перепробовать пины: /i2c?sda=22&scl=27
+    int sda = gWeb.hasArg("sda") ? gWeb.arg("sda").toInt() : ENV_SDA;
+    int scl = gWeb.hasArg("scl") ? gWeb.arg("scl").toInt() : ENV_SCL;
+    if (sda != ENV_SDA || scl != ENV_SCL) {
+      Wire.end();
+      Wire.begin((int)sda, (int)scl, 100000UL);
+      delay(40);
+    }
+    // probe=1: показываем уровни на линиях — видно, есть ли питание на модуле
+    if (gWeb.hasArg("probe")) {
+      pinMode(sda, INPUT_PULLUP);
+      pinMode(scl, INPUT_PULLUP);
+      delay(5);
+      int ls = digitalRead(sda), lc = digitalRead(scl);
+      String pj = "{\"sda\":" + String(sda) + ",\"scl\":" + String(scl);
+      pj += ",\"sdaLevel\":" + String(ls) + ",\"sclLevel\":" + String(lc) + "}";
+      gWeb.send(200, "application/json", pj);
+      return;
+    }
+    if (gWeb.hasArg("init")) {
+      envBegin();
+      envAt = 0;                 // прочитать сразу
+      String ij = String("{\"aht\":") + (envAht ? 1 : 0) + ",\"bmp\":" + (envBmp ? 1 : 0);
+      ij += ",\"addr\":" + String(bmpAddr) + "}";
+      gWeb.send(200, "application/json", ij);
+      return;
+    }
+    String out = "{\"sda\":" + String(sda) + ",\"scl\":" + String(scl) + ",\"found\":[";
+    int n = 0;
+    for (uint8_t a = 1; a < 127; a++) {
+      Wire.beginTransmission(a);
+      if (Wire.endTransmission() == 0) {
+        if (n++) out += ',';
+        out += String(a);
+      }
+    }
+    out += "],\"aht\":" + String(envAht ? 1 : 0) + ",\"bmp\":" + String(envBmp ? 1 : 0);
+    out += ",\"t\":" + String(isnan(envT) ? 0 : envT, 1);
+    out += ",\"h\":" + String(isnan(envH) ? 0 : envH, 1);
+    out += ",\"p\":" + String(isnan(envP) ? 0 : envP, 1) + "}";
+    gWeb.send(200, "application/json; charset=utf-8", out);
+  });
+
+gWeb.on("/weather", []() {
     if (!gWeb.hasArg("compact")) {
       File f = SD.open(WLOG_PATH, FILE_READ);
       gWeb.send(200, "application/json", String("{\"ok\":true,\"size\":") + (f ? (unsigned long)f.size() : 0UL) + "}");
@@ -12959,6 +13222,7 @@ void setup() {
   dispPwmBegin();      // ШИМ подсветки до tft.init()
   ledInit();           // синий на время загрузки
   gLedBootUntil = millis() + 3000;
+  envBegin();               // I2C: AHT20 + BMP280 на IO27/IO22
   beepInit();
   beepBoot();          // короткий тихий сигнал загрузки          // динамик: тишина (звук по умолчанию выключен)
 
@@ -13074,6 +13338,8 @@ void loop() {
   dispIdleTick();           // энергосбережение: автогашение по бездействию
   ledTick();                // светодиод: цвет по состоянию + мигание 1 Гц
   beepTick();               // проигрывание пиков
+  envTick();                // датчики I2C: температура, влажность, давление
+  climateLogTick();         // раз в час пишем климат в /climate.csv
   beepEvents();             // тревоги: напряжение, перегрев, карта, час
   wifiSetTick();            // WIFISET: смена сети шаг за шагом, без delay 20 с
   // ОБЛАКО — ПЕРВЫМ, до любых дозаполнений: свежее напряжение важнее

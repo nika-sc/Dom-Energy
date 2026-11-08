@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="880" viewBox="0 0 1120 880">
+  <defs>
+    <style>
+      .bg   { fill:#0b111b; }
+      .card { fill:#141c29; stroke:#243044; stroke-width:2; }
+      .board{ fill:#c8892f; stroke:#8a5c1c; stroke-width:3; }
+      .mod  { fill:#1d4d3a; stroke:#2f7a5c; stroke-width:3; }
+      .conn { fill:#f2f4f8; stroke:#9aa7bb; stroke-width:2; }
+      .hl   { fill:none; stroke:#22d3ee; stroke-width:4; }
+      .t    { font-family:'Segoe UI',Arial,sans-serif; fill:#e8eefc; }
+      .d    { font-family:'Segoe UI',Arial,sans-serif; fill:#93a4be; }
+      .b    { font-family:'Segoe UI',Arial,sans-serif; fill:#0b111b; font-weight:700; }
+      .pin  { font-family:Consolas,monospace; fill:#dfe8f7; font-size:14px; }
+      .hdr  { font-family:'Segoe UI',Arial,sans-serif; fill:#93a4be; font-size:12px; letter-spacing:1.5px; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1120" height="880"/>
+  <text class="t" x="34" y="50" font-size="29" font-weight="700">Куда подключить AHT20 + BMP280</text>
+  <text class="d" x="34" y="78" font-size="16">Плата ESP32-2432S028 (CYD, 2.8") · I2C: SDA = IO27, SCL = IO22, питание 3.3 В</text>
+
+  <!-- ================= ПЛАТА ================= -->
+  <rect class="board" x="60" y="112" width="230" height="360" rx="14"/>
+  <text class="b" x="175" y="140" font-size="13" text-anchor="middle">ESP32-2432S028</text>
+  <rect x="105" y="158" width="140" height="84" rx="6" fill="#2b2f36" stroke="#4a505a"/>
+  <text x="175" y="205" font-size="12" fill="#9aa7bb" font-family="Segoe UI" text-anchor="middle">экран 2.8"</text>
+
+  <!-- правое расширение 02 -->
+  <rect class="conn" x="290" y="266" width="34" height="96" rx="5"/>
+  <rect class="hl" x="282" y="258" width="50" height="112" rx="9"/>
+  <circle cx="307" cy="280" r="7" fill="#111"/>
+  <circle cx="307" cy="306" r="7" fill="#fbbf24"/>
+  <circle cx="307" cy="332" r="7" fill="#34d399"/>
+  <circle cx="307" cy="358" r="7" fill="#f87171"/>
+
+  <text class="t" x="60" y="502" font-size="15" font-weight="700">Расширение 02</text>
+  <text class="d" x="60" y="522" font-size="12">правый нижний разъём, 4 pin 1.25 мм</text>
+
+  <!-- ================= ТАБЛИЦА ================= -->
+  <rect class="card" x="380" y="112" width="700" height="180" rx="12"/>
+  <text class="hdr" x="404" y="140">ПОРЯДОК КОНТАКТОВ НА РАЗЪЁМЕ 02</text>
+
+  <text class="pin" x="404" y="172" fill="#93a4be">№</text>
+  <text class="pin" x="446" y="172" fill="#93a4be">КОНТАКТ ПЛАТЫ</text>
+  <text class="pin" x="640" y="172" fill="#93a4be">ПРОВОД</text>
+  <text class="pin" x="810" y="172" fill="#93a4be">КОНТАКТ МОДУЛЯ</text>
+
+  <circle cx="410" cy="200" r="6" fill="#111"/>
+  <text class="pin" x="426" y="205" fill="#93a4be">1</text>
+  <text class="pin" x="446" y="205">GND</text>
+  <text class="pin" x="640" y="205">чёрный</text>
+  <text class="pin" x="810" y="205">GND</text>
+
+  <circle cx="410" cy="228" r="6" fill="#fbbf24"/>
+  <text class="pin" x="426" y="233" fill="#93a4be">2</text>
+  <text class="pin" x="446" y="233">IO22 · SCL</text>
+  <text class="pin" x="640" y="233" fill="#fbbf24">жёлтый</text>
+  <text class="pin" x="810" y="233">SCL</text>
+
+  <circle cx="410" cy="256" r="6" fill="#34d399"/>
+  <text class="pin" x="426" y="261" fill="#93a4be">3</text>
+  <text class="pin" x="446" y="261">IO27 · SDA</text>
+  <text class="pin" x="640" y="261" fill="#34d399">зелёный</text>
+  <text class="pin" x="810" y="261">SDA</text>
+
+  <circle cx="410" cy="284" r="6" fill="#f87171"/>
+  <text class="pin" x="426" y="289" fill="#93a4be">4</text>
+  <text class="pin" x="446" y="289">3.3V</text>
+  <text class="pin" x="640" y="289" fill="#f87171">красный</text>
+  <text class="pin" x="810" y="289">VCC</text>
+
+  <!-- ================= МОДУЛЬ ================= -->
+  <rect class="mod" x="380" y="312" width="700" height="196" rx="14"/>
+  <text class="t" x="730" y="344" font-size="18" font-weight="700" text-anchor="middle">AHT20 + BMP280</text>
+  <text class="d" x="730" y="366" font-size="12" text-anchor="middle">температура · влажность · давление · 3.3 В · около 1 мА</text>
+
+  <circle cx="408" cy="392" r="7" fill="#111"/><text class="pin" x="426" y="397">GND</text>
+  <circle cx="408" cy="420" r="7" fill="#fbbf24"/><text class="pin" x="426" y="425">SCL</text>
+  <circle cx="408" cy="448" r="7" fill="#34d399"/><text class="pin" x="426" y="453">SDA</text>
+  <circle cx="408" cy="476" r="7" fill="#f87171"/><text class="pin" x="426" y="481">VCC · 3.3 В</text>
+
+  <text class="d" x="620" y="396" font-size="13">AHT20 — адрес 0x38</text>
+  <text class="d" x="620" y="420" font-size="13">BMP280 — адрес 0x76 (реже 0x77)</text>
+  <text class="d" x="620" y="444" font-size="12">на модуле бывают подписи VDD / G / SDI / SCK</text>
+
+  <!-- VCC отдельной строкой справа, чтобы не наезжать -->
+  <circle cx="620" cy="468" r="0" fill="none"/>
+
+  <!-- ================= СОВЕТЫ ================= -->
+  <rect class="card" x="34" y="540" width="1052" height="300" rx="12"/>
+  <text class="hdr" x="58" y="572">ЧТО ВАЖНО</text>
+
+  <text class="t" x="58" y="604" font-size="14" font-weight="700">Подходит только CN1 (он же «Расширение 02»)</text>
+  <text class="d" x="58" y="626" font-size="13">P3 (сбоку, 4 pin) — это GND, IO35, IO22, IO21: питания 3.3 В нет, а IO21 занят подсветкой. Не подойдёт.</text>
+  <text class="d" x="58" y="646" font-size="13">«Расширение 01» — слева: GND, IO35, IO22, IO21, тоже без 3.3 В.</text>
+
+  <text class="t" x="58" y="686" font-size="14" font-weight="700">Если не заработает</text>
+  <text class="d" x="58" y="708" font-size="13">1. Померь мультиметром между красным и чёрным на модуле — должно быть 3,3 В.</text>
+  <text class="d" x="58" y="728" font-size="13">2. Поменяй жёлтый и зелёный местами (SDA ↔ SCL) — шина это переживёт.</text>
+  <text class="d" x="58" y="748" font-size="13">3. Проверь, что провода до конца сидят в разъёме 1.25 мм.</text>
+
+  <text class="t" x="58" y="784" font-size="14" font-weight="700">Проверка без меня</text>
+  <text class="d" x="58" y="806" font-size="13">открыть  http://192.168.0.51/i2c  →  ждём {"found":[56,118]}  (56 = 0x38 AHT20, 118 = 0x76 BMP280)</text>
+</svg>
