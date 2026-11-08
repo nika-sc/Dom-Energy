@@ -4937,7 +4937,8 @@ static void weatherDesc(char* out, size_t n, int maxChars) {
 //  Нужна, чтобы в статистике за период была погода за каждый день.
 // ============================================================================
 #define WLOG_PATH "/weather.csv"
-static float    wLogTMin = 999, wLogTMax = -999;   // фактические мин/макс за сегодня
+static float    wLogTMin = 999, wLogTMax = -999;   // улица: мин/макс за сегодня
+static float    wLogRMin = 999, wLogRMax = -999;   // реле:  мин/макс за сегодня
 static uint32_t wLogDay = 0;                        // день, к которому относятся
 
 static uint32_t wDayKey(int y, int mo, int d) {
@@ -4954,11 +4955,19 @@ static void weatherLogTouch() {
   if (!getLocalTime(&ti, 10)) return;
   int y = ti.tm_year + 1900, mo = ti.tm_mon + 1, d = ti.tm_mday;
   uint32_t key = wDayKey(y, mo, d);
-  if (key != wLogDay) { wLogDay = key; wLogTMin = 999; wLogTMax = -999; }
-  if (gTempValid && gTemp > -60 && gTemp < 80) {
-    if (gTemp < wLogTMin) wLogTMin = gTemp;
-    if (gTemp > wLogTMax) wLogTMax = gTemp;
+  if (key != wLogDay) { wLogDay = key; wLogTMin = 999; wLogTMax = -999; wLogRMin = 999; wLogRMax = -999; }
+
+  // улица — из OpenWeatherMap, реле — из датчика Tuya. Раньше сюда попадало
+  // только реле, и в статистике погода показывала 18 °C вместо +4.
+  if (wOk && wTemp > -60 && wTemp < 60) {
+    if (wTemp < wLogTMin) wLogTMin = wTemp;
+    if (wTemp > wLogTMax) wLogTMax = wTemp;
   }
+  if (gTempValid && gTemp > -60 && gTemp < 80) {
+    if (gTemp < wLogRMin) wLogRMin = gTemp;
+    if (gTemp > wLogRMax) wLogRMax = gTemp;
+  }
+
   if (wLogAt && millis() - wLogAt < 3600000UL) return;
   wLogAt = millis();
 
@@ -4966,45 +4975,69 @@ static void weatherLogTouch() {
   bool wxExists = SD.exists(WLOG_PATH);
   File f = SD.open(WLOG_PATH, wxExists ? FILE_APPEND : FILE_WRITE);
   if (!f) { Serial.println("погода: не открылся weather.csv"); return; }
-  f.printf("%04d-%02d-%02d,%.1f,%.1f,%s,%.0f\n",
+  f.printf("%04d-%02d-%02d,%.1f,%.1f,%.1f,%.1f,%s,%.0f\n",
            y, mo, d,
            (wLogTMin == 999 ? 0.0f : wLogTMin),
            (wLogTMax == -999 ? 0.0f : wLogTMax),
+           (wLogRMin == 999 ? 0.0f : wLogRMin),
+           (wLogRMax == -999 ? 0.0f : wLogRMax),
            desc, wPopNow);
   f.close();
   Serial.printf("погода: записано за %04d-%02d-%02d\n", y, mo, d);
 }
 
 // найти ПОСЛЕДНЮЮ строку погоды за день
-static bool weatherLogFind(const char* date, char* desc, size_t dn, float* tmin, float* tmax) {
+static bool weatherLogFind(const char* date, char* desc, size_t dn,
+                           float* tmin, float* tmax, float* rmin, float* rmax) {
   File f = SD.open(WLOG_PATH, FILE_READ);
   if (!f) return false;
   bool found = false;
   int guard = 0;
-  while (f.available() && guard++ < 4000) {
+  while (f.available() && guard++ < 6000) {
     String l = f.readStringUntil('\n');
     l.trim();
     if (!l.startsWith(date)) continue;
-    int c1 = l.indexOf(',');
-    int c2 = l.indexOf(',', c1 + 1);
-    int c3 = l.indexOf(',', c2 + 1);
-    int c4 = l.indexOf(',', c3 + 1);
-    if (c1 > 0 && c2 > c1 && c3 > c2) {
-      *tmin = l.substring(c1 + 1, c2).toFloat();
-      *tmax = l.substring(c2 + 1, c3).toFloat();
-      if (c4 > c3) {
-        String d = l.substring(c3 + 1, c4);
-        d.trim();
-        strncpy(desc, d.c_str(), dn - 1);
-        desc[dn - 1] = 0;
-        // откатываемся, если обрезали посреди UTF-8: иначе JSON становится битым
-        int k = (int)strlen(desc);
-        while (k > 0 && ((unsigned char)desc[k] & 0xC0) == 0x80) k--;
-        while (k > 0 && ((unsigned char)desc[k - 1] & 0xC0) == 0xC0) k--;
-        desc[k] = 0;
-      }
-      found = true;
+    // поля: дата, t_улица_min, t_улица_max, [t_реле_min, t_реле_max,] описание, дождь
+    int p1 = l.indexOf(',');
+    int p2 = l.indexOf(',', p1 + 1);
+    int p3 = l.indexOf(',', p2 + 1);
+    int p4 = l.indexOf(',', p3 + 1);
+    if (p1 < 0 || p2 < 0 || p3 < 0) continue;
+    *tmin = l.substring(p1 + 1, p2).toFloat();
+    *tmax = l.substring(p2 + 1, p3).toFloat();
+    int descStart = p3 + 1, descEnd = p4;
+    if (rmin && rmax) { *rmin = 0; *rmax = 0; }
+    // если 4-е поле — число, значит это новый формат с температурой реле
+    String f4 = (p4 > 0) ? l.substring(p3 + 1, p4) : String("");
+    bool f4num = f4.length() > 0;
+    for (int i = 0; i < (int)f4.length() && f4num; i++) {
+      char c = f4[i];
+      if (!(isdigit(c) || c == '-' || c == '.')) f4num = false;
     }
+    if (f4num && p4 > 0) {
+      if (rmin && rmax) { *rmin = f4.toFloat(); }
+      int p5 = l.indexOf(',', p4 + 1);
+      if (p5 > 0) {
+        if (rmin && rmax) { *rmax = l.substring(p4 + 1, p5).toFloat(); }
+        descStart = p5 + 1;
+        int p6 = l.indexOf(',', p5 + 1);
+        descEnd = (p6 > 0) ? p6 : (int)l.length();
+      } else {
+        descStart = p4 + 1;
+        descEnd = (int)l.length();
+      }
+    }
+    if (descEnd > descStart) {
+      String d = l.substring(descStart, descEnd);
+      d.trim();
+      strncpy(desc, d.c_str(), dn - 1);
+      desc[dn - 1] = 0;
+      int k = (int)strlen(desc);
+      while (k > 0 && ((unsigned char)desc[k] & 0xC0) == 0x80) k--;
+      while (k > 0 && ((unsigned char)desc[k - 1] & 0xC0) == 0xC0) k--;
+      desc[k] = 0;
+    }
+    found = true;
   }
   f.close();
   return found;
@@ -6004,68 +6037,198 @@ void dispCommand(const String& up) {
 }
 
 // ============================================================================
-//  ДИНАМИК — GPIO 26 (DAC2), ШИМ-тон (канал 1). Команда BEEP.
+//  ЗВУК — GPIO 26, ШИМ-тон. Пресеты, события, громкость и тихие часы.
 // ============================================================================
-// Подключение: GPIO 26 -> «+» динамика, GND -> «−». Пьезоизлучатель или
-// маленький динамик 8 Ом; громкость маленькая (не более 50 % ШИМ).
-// По умолчанию звук ВЫКЛЮЧЕН: включается командой BEEP ON.
 #define BEEP_PIN   26
 #define BEEP_CH    1
+#define BEEP_SYS_MAX 40            // жёсткий потолок громкости, %
 
-bool     gBeepOn    = false;
-uint8_t  gBeepVol   = 50;        // 0..100
-bool     gBeepTouch = true;      // пик при касании
-bool     gBeepHour  = false;     // пик в начале часа (по умолчанию нет)
+// --- пресеты: до 4 шагов, каждый «частота, длительность, пауза после» ---
+struct SndStep { uint16_t f; uint16_t on; uint16_t off; };
+#define SND_N 12
+#define SND_STEPS 4
+static const SndStep SND[SND_N][SND_STEPS] PROGMEM = {
+  /* 0 тишина     */ {{0,0,0},{0,0,0},{0,0,0},{0,0,0}},
+  /* 1 тик        */ {{600,25,0},{0,0,0},{0,0,0},{0,0,0}},
+  /* 2 двойной тик*/ {{600,25,40},{700,25,0},{0,0,0},{0,0,0}},
+  /* 3 гонг       */ {{420,120,0},{0,0,0},{0,0,0},{0,0,0}},
+  /* 4 восходящий */ {{500,45,30},{650,45,30},{800,60,0},{0,0,0}},
+  /* 5 нисходящий */ {{800,45,30},{650,45,30},{500,70,0},{0,0,0}},
+  /* 6 динь-дон   */ {{900,70,40},{700,120,0},{0,0,0},{0,0,0}},
+  /* 7 три коротк.*/ {{480,40,50},{480,40,50},{480,40,0},{0,0,0}},
+  /* 8 щелчок     */ {{700,15,0},{0,0,0},{0,0,0},{0,0,0}},
+  /* 9 предупр.   */ {{550,60,60},{550,60,0},{0,0,0},{0,0,0}},
+  /*10 тревога    */ {{400,80,60},{400,80,60},{400,90,0},{0,0,0}},
+  /*11 готово     */ {{700,40,40},{900,70,0},{0,0,0},{0,0,0}},
+};
 
-static uint8_t  bpLeft = 0;      // сколько пиков ещё осталось
-static uint16_t bpFreq = 2200, bpOn = 40, bpOff = 60;
+static const char* SND_NAMES[SND_N] PROGMEM = {
+  "тишина", "тик", "двойной тик", "гонг", "восходящий", "нисходящий",
+  "динь-дон", "три коротких", "щелчок", "предупреждение", "тревога", "готово"
+};
+
+// --- события ---
+enum { EV_BOOT, EV_REBOOT, EV_OTA, EV_ERROR, EV_ALARM, EV_RON, EV_ROFF, EV_HOUR, EV_TOUCH, EV_N };
+static const char* EV_KEYS[EV_N] PROGMEM = {
+  "boot", "reboot", "ota", "error", "alarm", "relay_on", "relay_off", "hour", "touch"
+};
+static const char* EV_NAMES[EV_N] PROGMEM = {
+  "загрузка", "перезагрузка", "OTA завершена", "ошибка/защита", "авария U/I",
+  "реле включилось", "реле выключилось", "начало часа", "касание экрана"
+};
+static const uint8_t EV_DEFAULT[EV_N] = { 11, 5, 6, 10, 10, 1, 2, 0, 0 };
+
+// --- настройки ---
+bool     gBeepOn    = true;       // общий выключатель звука
+uint8_t  gBeepVol   = 10;         // громкость днём, %
+bool     gBeepTouch = false;      // пик при касании
+bool     gBeepHour  = false;      // пик в начале часа
+uint8_t  sndNight   = 5;          // громкость в тихие часы, %
+bool     sndQuiet   = true;       // тихие часы 22:00-08:00
+uint32_t sndMuteUntil = 0;        // epoch, до какого времени молчать
+uint8_t  sndEv[EV_N];             // пресет на событие
+
+static uint8_t  bpStep = 0, bpSteps = 0, bpVolNow = 10;
+static const SndStep* bpCur = nullptr;
 static bool     bpSounding = false;
 static unsigned long bpAt = 0;
-
-// Предел громкости для системных звуков (загрузка/перезагрузка/ошибка):
-// динамик подключён напрямую к GPIO, поэтому держим не громче 40 %.
-#define BEEP_SYS_MAX 40
+static uint16_t bpFreq = 600, bpOn = 40, bpOff = 60;
 
 void beepTone(bool on) {
   if (on) {
     ledcWriteTone(BEEP_CH, bpFreq);
-    uint8_t v = gBeepVol;
+    uint8_t v = bpVolNow;
     if (v > BEEP_SYS_MAX) v = BEEP_SYS_MAX;
-    uint16_t duty = (uint16_t)((uint32_t)v * 127 / 100);  // 127 = 50 % ШИМ
+    uint16_t duty = (uint16_t)((uint32_t)v * 127 / 100);
     ledcWrite(BEEP_CH, duty);
   } else {
     ledcWriteTone(BEEP_CH, 0);
     ledcWrite(BEEP_CH, 0);
   }
 }
-void beepStop() { bpLeft = 0; bpSounding = false; beepTone(false); }
+void beepStop() { bpSteps = 0; bpSounding = false; beepTone(false); }
+
 void beepInit() {
   ledcSetup(BEEP_CH, 2000, 8);
   ledcAttachPin(BEEP_PIN, BEEP_CH);
   beepTone(false);
+  for (int i = 0; i < EV_N; i++) sndEv[i] = EV_DEFAULT[i];
   Preferences p;
-  if (!p.begin("beep", true)) return;
-  gBeepOn    = p.getBool("on", false);
-  gBeepVol   = p.getUChar("vol", 50);
-  gBeepTouch = p.getBool("touch", true);
+  if (!p.begin("snd", true)) return;
+  gBeepOn    = p.getBool("on", true);
+  gBeepVol   = p.getUChar("vol", 10);
+  sndNight   = p.getUChar("nvol", 5);
+  sndQuiet   = p.getBool("quiet", true);
+  sndMuteUntil = p.getULong("mute", 0);
+  gBeepTouch = p.getBool("touch", false);
   gBeepHour  = p.getBool("hour", false);
+  for (int i = 0; i < EV_N; i++) {
+    char k[4]; snprintf(k, sizeof(k), "e%d", i);
+    sndEv[i] = p.getUChar(k, EV_DEFAULT[i]);
+    if (sndEv[i] >= SND_N) sndEv[i] = EV_DEFAULT[i];
+  }
   p.end();
   if (gBeepVol > 100) gBeepVol = 100;
+  if (sndNight > 100) sndNight = 100;
+  // миграция со старого namespace "beep"
+  Preferences po;
+  if (po.begin("beep", true)) {
+    if (po.isKey("vol")) { /* старые настройки игнорируем: громкость теперь 10 % */ }
+    po.end();
+  }
 }
 void beepSave() {
   Preferences p;
-  if (!p.begin("beep", false)) return;
+  if (!p.begin("snd", false)) return;
   p.putBool("on", gBeepOn);
   p.putUChar("vol", gBeepVol);
+  p.putUChar("nvol", sndNight);
+  p.putBool("quiet", sndQuiet);
+  p.putULong("mute", sndMuteUntil);
   p.putBool("touch", gBeepTouch);
   p.putBool("hour", gBeepHour);
+  for (int i = 0; i < EV_N; i++) {
+    char k[4]; snprintf(k, sizeof(k), "e%d", i);
+    p.putUChar(k, sndEv[i]);
+  }
   p.end();
 }
-void beepPlay(uint8_t n, uint16_t freq, uint16_t onMs, uint16_t offMs) {
-  if (gBeepVol == 0 || n == 0) return;
-  bpLeft = n; bpFreq = freq; bpOn = onMs; bpOff = offMs;
+
+// тихие часы: 22:00-08:00 местного времени
+static bool sndIsQuietNow() {
+  if (!sndQuiet) return false;
+  struct tm ti;
+  if (!getLocalTime(&ti, 5)) return false;
+  return (ti.tm_hour >= 22 || ti.tm_hour < 8);
+}
+static uint8_t sndVolumeFor(bool alarm) {
+  if (alarm) return gBeepVol;                 // авария звучит всегда и в полную
+  if (sndIsQuietNow()) return sndNight;
+  return gBeepVol;
+}
+
+// проиграть пресет (alarm = игнорировать тишину и приглушение)
+void sndPlayPreset(uint8_t id, bool alarm) {
+  if (id == 0 || id >= SND_N) return;
+  if (!gBeepOn) return;
+  if (!alarm) {
+    if (sndMuteUntil && (uint32_t)time(nullptr) < sndMuteUntil) return;
+  }
+  uint8_t v = sndVolumeFor(alarm);
+  if (v == 0) return;
+  bpVolNow = v;
+  bpCur = SND[id];
+  bpSteps = 0;
+  for (int i = 0; i < SND_STEPS; i++) {
+    SndStep s;
+    memcpy_P(&s, &bpCur[i], sizeof(s));
+    if (s.f == 0) break;
+    bpSteps++;
+  }
+  if (!bpSteps) return;
+  bpStep = 0;
+  SndStep s0; memcpy_P(&s0, &bpCur[0], sizeof(s0));
+  bpFreq = s0.f; bpOn = s0.on; bpOff = s0.off;
   bpSounding = true; bpAt = millis();
-  bpLeft--;                       // первый пик пошёл сразу
+  beepTone(true);
+}
+
+// событие → пресет
+void sndEvent(uint8_t ev) {
+  if (ev >= EV_N) return;
+  if (ev == EV_TOUCH && !gBeepTouch) return;
+  if (ev == EV_HOUR && !gBeepHour) return;
+  bool alarm = (ev == EV_ALARM);
+  sndPlayPreset(sndEv[ev], alarm);
+}
+
+void beepTick() {
+  if (!bpSounding && bpStep + 1 >= bpSteps) return;
+  unsigned long now = millis();
+  if (bpSounding) {
+    if (now - bpAt >= bpOn) {
+      beepTone(false);
+      bpSounding = false;
+      bpAt = now;
+    }
+  } else {
+    if (now - bpAt >= bpOff) {
+      bpStep++;
+      if (bpStep >= bpSteps) { bpSteps = 0; bpStep = 0; return; }
+      SndStep s; memcpy_P(&s, &bpCur[bpStep], sizeof(s));
+      bpFreq = s.f; bpOn = s.on; bpOff = s.off;
+      bpSounding = true; bpAt = now;
+      beepTone(true);
+    }
+  }
+}
+
+// старое API оставляем: им пользуются BEEP-команда и тесты
+void beepPlay(uint8_t n, uint16_t freq, uint16_t onMs, uint16_t offMs) {
+  bpVolNow = gBeepVol;
+  bpFreq = freq; bpOn = onMs; bpOff = offMs;
+  bpSteps = n; bpStep = 0;
+  bpSounding = true; bpAt = millis();
   beepTone(true);
 }
 void beepStart(uint8_t n, uint16_t freq, uint16_t onMs, uint16_t offMs) {
@@ -6073,28 +6236,19 @@ void beepStart(uint8_t n, uint16_t freq, uint16_t onMs, uint16_t offMs) {
   beepPlay(n, freq, onMs, offMs);
 }
 void beepStartForce(uint8_t n, uint16_t freq, uint16_t onMs, uint16_t offMs) {
-  beepPlay(n, freq, onMs, offMs);   // BEEP TEST — даже при выключенном звуке
+  beepPlay(n, freq, onMs, offMs);
 }
-// ---- системные звуки: короткие и тихие ----
-void beepBoot()    { beepStartForce(2, 1200, 45, 70); }   // включились
-void beepReboot()  { beepStartForce(1, 800, 140, 0); }    // уходим на перезагрузку
-void beepError()   { beepStartForce(3, 480, 60, 70); }    // ошибка/срабатывание защиты
-void beepOk()      { beepStartForce(1, 1600, 40, 0); }    // короткое «ок»
 
-void beepTick() {
-  if (!bpSounding && bpLeft == 0) return;
-  unsigned long now = millis();
-  if (bpSounding) {
-    if (now - bpAt >= bpOn) { beepTone(false); bpSounding = false; bpAt = now; }
-  } else if (bpLeft > 0 && now - bpAt >= bpOff) {
-    bpLeft--; bpSounding = true; bpAt = now; beepTone(true);
-  }
-}
+void beepBoot()   { sndEvent(EV_BOOT); }
+void beepReboot() { sndEvent(EV_REBOOT); }
+void beepError()  { sndEvent(EV_ERROR); }
+void beepOk()     { sndPlayPreset(11, true); }
+
 String beepState() {
-  char b[64];
-  snprintf(b, sizeof(b), "BEEP: on=%d vol=%u touch=%d hour=%d",
-           gBeepOn ? 1 : 0, (unsigned)gBeepVol,
-           gBeepTouch ? 1 : 0, gBeepHour ? 1 : 0);
+  char b[128];
+  snprintf(b, sizeof(b), "BEEP: on=%d vol=%u nvol=%u quiet=%d mute=%lu",
+           gBeepOn ? 1 : 0, (unsigned)gBeepVol, (unsigned)sndNight,
+           sndQuiet ? 1 : 0, (unsigned long)sndMuteUntil);
   return String(b);
 }
 void beepCommand(const String& up) {
@@ -6102,28 +6256,94 @@ void beepCommand(const String& up) {
   if (a.length() == 0) { Serial.println(beepState()); return; }
   if (a == "ON")   { gBeepOn = true;  beepSave(); Serial.println("BEEP: OK on"); }
   else if (a == "OFF") { gBeepOn = false; beepStop(); beepSave(); Serial.println("BEEP: OK off"); }
-  else if (a == "TEST") { Serial.println("BEEP: OK test"); beepStartForce(1, 2200, 80, 0); }
+  else if (a == "TEST") { Serial.println("BEEP: OK test"); beepOk(); }
   else if (a.startsWith("VOL")) {
     int v = a.substring(3).toInt();
     if (v < 0) v = 0;
     if (v > 100) v = 100;
     gBeepVol = (uint8_t)v;
     beepSave();
-    char o[32];
-    snprintf(o, sizeof(o), "BEEP: OK vol=%d", v);
-    Serial.println(o);
-    beepStartForce(1, 2200, 60, 0);
+    Serial.println(beepState());
+    beepOk();
   }
-  else if (a == "TOUCH") { gBeepTouch = !gBeepTouch; beepSave();
-    Serial.printf("BEEP: OK touch=%d\n", gBeepTouch ? 1 : 0); }
-  else if (a == "HOUR")  { gBeepHour = !gBeepHour; beepSave();
-    Serial.printf("BEEP: OK hour=%d\n", gBeepHour ? 1 : 0); }
-  else Serial.println("BEEP: ON|OFF|TEST|VOL n|TOUCH|HOUR");
+  else if (a == "TOUCH") { gBeepTouch = !gBeepTouch; beepSave(); Serial.println(beepState()); }
+  else if (a == "HOUR")  { gBeepHour = !gBeepHour; beepSave(); Serial.println(beepState()); }
+  else if (a.startsWith("PLAY")) { sndPlayPreset((uint8_t)a.substring(4).toInt(), true); Serial.println("BEEP: OK play"); }
+  else Serial.println("BEEP: команды ON/OFF/TEST/VOL n/TOUCH/HOUR/PLAY n");
 }
 
-// Сигналы тревоги: напряжение вне 207..253 В дольше 10 с — три пика;
-// перегрев реле > 55 °C — длинный пик раз в 5 минут; пропала карта — два пика;
-// начало часа — один пик (если BEEP HOUR).
+// --- страница настройки звука ---
+static const char SOUND_HTML[] PROGMEM = R"HTML(<!DOCTYPE html><html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Звуки · Дом — энергия</title><style>
+:root{--bg:#0a0f1a;--card:#141b28;--ln:#1e293b;--ink:#e8eefc;--mut:#7f8ea8;--c1:#22d3ee}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
+font:14px/1.5 system-ui,'Segoe UI',sans-serif}.w{max-width:760px;margin:0 auto;padding:20px 14px 50px}
+h1{font-size:20px;margin:0 0 4px}.s{color:var(--mut);font-size:12px;margin-bottom:16px}
+.c{background:var(--card);border:1px solid var(--ln);border-radius:14px;padding:14px;margin-bottom:12px}
+.r{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--ln);flex-wrap:wrap}
+.r:last-child{border-bottom:none}.r .n{min-width:170px}.r .e{margin-left:auto;display:flex;gap:8px;align-items:center}
+select,button,input[type=range]{font:inherit}
+select{background:#0f1622;color:var(--ink);border:1px solid var(--ln);border-radius:8px;padding:5px 8px}
+button{background:#1d2a3d;color:var(--ink);border:1px solid var(--ln);border-radius:8px;padding:5px 10px;cursor:pointer}
+button:hover{border-color:var(--c1)}button.p{background:var(--c1);color:#04202a;font-weight:700}
+.v{font-weight:700;color:var(--c1);min-width:42px;text-align:right}
+</style></head><body><div class="w">
+<h1>Звуки</h1><div class="s">Плата CYD · настройки хранятся в её памяти</div>
+
+<div class="c"><div class="r"><span class="n">Звук включён</span>
+<div class="e"><input type="checkbox" id="on"><label for="on">вкл</label></div></div>
+<div class="r"><span class="n">Громкость днём</span>
+<div class="e"><input type="range" id="vol" min="0" max="40" step="1"><span class="v" id="volv">10%</span></div></div>
+<div class="r"><span class="n">Громкость ночью</span>
+<div class="e"><input type="range" id="nvol" min="0" max="40" step="1"><span class="v" id="nvolv">5%</span></div></div>
+<div class="r"><span class="n">Тихие часы 22:00–08:00</span>
+<div class="e"><input type="checkbox" id="quiet"><label for="quiet">вкл</label></div></div>
+<div class="r"><span class="n">Приглушить</span><div class="e">
+<button onclick="mute(10)">10 мин</button><button onclick="mute(30)">30 мин</button>
+<button onclick="mute(60)">60 мин</button><button onclick="mute(0)">снять</button>
+<span class="v" id="mutev"></span></div></div></div>
+
+<div class="c" id="evs"><div class="s">Событие → звук</div></div>
+<div class="c"><button class="p" onclick="save()">Сохранить</button>
+<span class="s" id="st" style="margin-left:10px"></span></div>
+</div><script>
+var S=null;
+function q(i){return document.getElementById(i)}
+function pv(){return fetch('/sound').then(function(r){return r.json()})}
+function load(){pv().then(function(j){S=j;
+  q('on').checked=!!j.on; q('quiet').checked=!!j.quiet;
+  q('vol').value=j.vol; q('volv').textContent=j.vol+'%';
+  q('nvol').value=j.nvol; q('nvolv').textContent=j.nvol+'%';
+  var m=j.muteLeft||0; q('mutev').textContent=m>0?('ещё '+Math.round(m/60)+' мин'):'';
+  var h='<div class="s">Событие → звук</div>';
+  j.events.forEach(function(e){
+    h+='<div class="r"><span class="n">'+e.name+'</span><div class="e"><select data-ev="'+e.key+'">';
+    j.presets.forEach(function(p){h+='<option value="'+p.id+'"'+(p.id==e.preset?' selected':'')+'>'+p.name+'</option>'});
+    h+='</select><button onclick="test(this)">▶</button></div></div>';
+  });
+  q('evs').innerHTML=h;
+})}
+function test(b){var s=b.parentNode.querySelector('select');
+  fetch('/beep?preset='+s.value).then(function(){b.textContent='✓';setTimeout(function(){b.textContent='▶'},600)})}
+function save(){
+  var u='/sound?on='+(q('on').checked?1:0)+'&quiet='+(q('quiet').checked?1:0)+
+        '&vol='+q('vol').value+'&nvol='+q('nvol').value;
+  var ss=document.querySelectorAll('select[data-ev]');
+  for(var i=0;i<ss.length;i++){ u+='&'+ss[i].getAttribute('data-ev')+'='+ss[i].value; }
+  fetch(u).then(function(r){return r.json()}).then(function(j){
+    q('st').textContent=j.ok?'сохранено':'ошибка'; setTimeout(function(){q('st').textContent=''},2000);
+    load();
+  });
+}
+function mute(m){fetch('/sound?mute='+m).then(function(){load()})}
+q('vol').oninput=function(){q('volv').textContent=this.value+'%'};
+q('nvol').oninput=function(){q('nvolv').textContent=this.value+'%'};
+load();
+</script></body></html>)HTML";
+
+// ============================================================================
+// --- тревоги и события: авария звучит даже в тихие часы ---
 void beepEvents() {
   static unsigned long last = 0;
   static unsigned long badSince = 0, alarmAt = 0, tempAt = 0;
@@ -6132,9 +6352,17 @@ void beepEvents() {
   if (millis() - last < 500UL) return;
   last = millis();
 
-  if (!gSdOk && sdWas) beepStart(2, 1200, 100, 90);   // карта только что пропала
+  if (!gSdOk && sdWas) sndPlayPreset(sndEv[EV_ALARM], true);   // карта пропала
   sdWas = gSdOk;
-  if (!gBeepOn) return;
+
+  // реле включилось/выключилось — короткий тихий сигнал
+  static bool relayWas = false;
+  static bool relayFirst = true;
+  if (relayFirst) { relayWas = gRelay; relayFirst = false; }
+  if (gRelay != relayWas) {
+    relayWas = gRelay;
+    sndEvent(gRelay ? EV_RON : EV_ROFF);
+  }
 
   bool fresh = gPhaseMs && (millis() - gPhaseMs < 30000UL);
   bool bad = fresh && (gVoltage < V_NORM_LO || gVoltage > V_NORM_HI);
@@ -6142,22 +6370,22 @@ void beepEvents() {
   else badSince = 0;
   if (badSince && millis() - badSince > 10000UL && millis() - alarmAt > 300000UL) {
     alarmAt = millis();
-    beepStart(3, 1800, 120, 100);
+    sndPlayPreset(sndEv[EV_ALARM], true);      // авария — игнорирует тишину
   }
   if (gTempValid && gTemp > 55.0f && millis() - tempAt > 300000UL) {
     tempAt = millis();
-    beepStart(1, 1500, 600, 0);
+    sndPlayPreset(sndEv[EV_ALARM], true);
   }
+
   struct tm ti;
   if (getLocalTime(&ti, 10)) {
     if (lastHour != ti.tm_hour) {
-      if (gBeepHour && lastHour >= 0 && ti.tm_min < 2) beepStart(1, 2400, 50, 0);
+      if (lastHour >= 0 && ti.tm_min < 2) sndEvent(EV_HOUR);
       lastHour = ti.tm_hour;
     }
   }
 }
 
-// ============================================================================
 //  RGB-СВЕТОДИОД — 4 (R), 16 (G), 17 (B), горят при НИЗКОМ уровне.
 // ============================================================================
 // v4.4: светодиод показывает состояние платы, яркость — ШИМ (каналы 2,3,4),
@@ -10836,6 +11064,40 @@ static uint32_t gapDayStamp(const struct tm& t) {
          (uint32_t)(t.tm_mon + 1) * 100UL + (uint32_t)t.tm_mday;
 }
 
+// Раз в сутки оставляем в weather.csv по одной (последней) строке на день,
+// остальное уходит в weather.bak — иначе файл растёт без предела.
+static void weatherCompact() {
+  if (!gSdOk) return;
+  File in = SD.open(WLOG_PATH, FILE_READ);
+  if (!in) return;
+  File out = SD.open("/weather.tmp", FILE_WRITE);
+  if (!out) { in.close(); return; }
+  // собираем последнюю строку для каждой даты (в памяти держим только текущую)
+  char lastLine[160] = "";
+  char curDate[11] = "";
+  int guard = 0;
+  while (in.available() && guard++ < 20000) {
+    String l = in.readStringUntil('\n');
+    l.trim();
+    if (l.length() < 12) continue;
+    String d = l.substring(0, 10);
+    if (d != curDate) {
+      if (lastLine[0]) out.println(lastLine);
+      strncpy(curDate, d.c_str(), 10); curDate[10] = 0;
+    }
+    strncpy(lastLine, l.c_str(), sizeof(lastLine) - 1);
+    lastLine[sizeof(lastLine) - 1] = 0;
+  }
+  if (lastLine[0]) out.println(lastLine);
+  in.close();
+  out.close();
+  SD.remove("/weather.tmp.old");
+  if (SD.exists(WLOG_PATH)) SD.rename(WLOG_PATH, "/weather.tmp.old");
+  SD.rename("/weather.tmp", WLOG_PATH);
+  SD.remove("/weather.tmp.old");
+  Serial.println("погода: файл сжат до одной строки на день");
+}
+
 void gapDailyTick() {
   if (sGF.pending || sGF.phase != GF_IDLE) return;   // уже что-то идёт
   if (pwrHistActive() || gHistStep != 0) return;
@@ -10844,6 +11106,8 @@ void gapDailyTick() {
   struct tm ti;
   if (!getLocalTime(&ti, 20)) return;                // часы не выставлены
   if (ti.tm_hour != GAP_HOUR) return;                // не наш час
+  static int sWeatherDay = -1;
+  if (ti.tm_mday != sWeatherDay) { sWeatherDay = ti.tm_mday; weatherCompact(); }
   gapDayNvsLoad();
   uint32_t today = gapDayStamp(ti);
   if (sGapDayRtc == today) return;                   // сегодня уже запускали
@@ -12137,8 +12401,12 @@ void webSetup() {
     static char cKey[40] = "";
     static String cJson;
     static unsigned long cSize = 0, cAt = 0;
-    char kbuf[40];
-    snprintf(kbuf, sizeof(kbuf), "%s|%s", f.c_str(), tt.c_str());
+    char kbuf[56];
+    // в ключ входит ещё и тариф с погодой: при их смене суммы нужно пересчитать
+    File wprobe = SD.open("/weather.csv", FILE_READ);
+    unsigned long wSize = wprobe ? (unsigned long)wprobe.size() : 0;
+    if (wprobe) wprobe.close();
+    snprintf(kbuf, sizeof(kbuf), "%s|%s|%u|%lu", f.c_str(), tt.c_str(), (unsigned)sTarCnt, wSize);
     File probe = SD.open("/energy.csv", FILE_READ);
     unsigned long curSize = probe ? (unsigned long)probe.size() : 0;
     if (probe) probe.close();
@@ -12208,11 +12476,13 @@ void webSetup() {
       out += ",\"tmin\":" + String(agg[i].tmin == 999 ? 0 : agg[i].tmin / 10.0f, 1);
       out += ",\"tmax\":" + String(agg[i].tmax == -999 ? 0 : agg[i].tmax / 10.0f, 1);
       {
-        char wdesc[72]; float wtmin = 0, wtmax = 0;
-        bool okw = weatherLogFind(dateFromEpoch((long)agg[i].day * 86400L).c_str(), wdesc, sizeof(wdesc), &wtmin, &wtmax);
+        char wdesc[72]; float wtmin = 0, wtmax = 0, rtmin = 0, rtmax = 0;
+        bool okw = weatherLogFind(dateFromEpoch((long)agg[i].day * 86400L).c_str(), wdesc, sizeof(wdesc),
+                                  &wtmin, &wtmax, &rtmin, &rtmax);
         out += ",\"w\":\"";
         if (okw) { for (char* c = wdesc; *c; c++) { if (*c == '"') *c = '\''; } out += wdesc; }
         out += "\",\"wtmin\":" + String(okw ? wtmin : 0, 1) + ",\"wtmax\":" + String(okw ? wtmax : 0, 1);
+        out += ",\"rtmin\":" + String(okw ? rtmin : 0, 1) + ",\"rtmax\":" + String(okw ? rtmax : 0, 1);
       }
       out += ",\"rows\":" + String(agg[i].rows) + "}";
     }
@@ -12226,15 +12496,73 @@ void webSetup() {
   });
 
   gWeb.on("/beep", []() {
+    // /beep?preset=N — прослушать пресет; /beep?sound=boot|error|ok — старое поведение
+    if (gWeb.hasArg("preset")) {
+      int id = gWeb.arg("preset").toInt();
+      if (id < 0 || id >= SND_N) { gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"preset\"}"); return; }
+      sndPlayPreset((uint8_t)id, true);
+      gWeb.send(200, "application/json", "{\"ok\":true,\"preset\":" + String(id) + "}");
+      return;
+    }
     String s = gWeb.hasArg("sound") ? gWeb.arg("sound") : "test";
     s.toLowerCase();
     if (s == "boot") beepBoot();
     else if (s == "reboot") beepReboot();
     else if (s == "error") beepError();
+    else if (s == "alarm") { sndPlayPreset(sndEv[EV_ALARM], true); }
     else if (s == "ok") beepOk();
-    else beepStartForce(1, 2200, 80, 0);
-    String out = "{\"ok\":true,\"sound\":\"" + s + "\",\"vol\":" + String(gBeepVol) + "}";
-    gWeb.send(200, "application/json", out);
+    else beepOk();
+    gWeb.send(200, "application/json", "{\"ok\":true,\"sound\":\"" + s + "\"}");
+  });
+
+  gWeb.on("/sound", []() {
+    bool changed = false;
+    if (gWeb.hasArg("on"))    { gBeepOn  = (gWeb.arg("on") == "1"); changed = true; }
+    if (gWeb.hasArg("quiet")) { sndQuiet = (gWeb.arg("quiet") == "1"); changed = true; }
+    if (gWeb.hasArg("vol"))   { int v = gWeb.arg("vol").toInt(); gBeepVol = (uint8_t)constrain(v, 0, 100); changed = true; }
+    if (gWeb.hasArg("nvol"))  { int v = gWeb.arg("nvol").toInt(); sndNight = (uint8_t)constrain(v, 0, 100); changed = true; }
+    if (gWeb.hasArg("mute")) {
+      int m = gWeb.arg("mute").toInt();
+      sndMuteUntil = (m > 0) ? (uint32_t)(time(nullptr) + m * 60) : 0;
+      changed = true;
+    }
+    if (gWeb.hasArg("touch")) { gBeepTouch = (gWeb.arg("touch") == "1"); changed = true; }
+    if (gWeb.hasArg("hour"))  { gBeepHour  = (gWeb.arg("hour") == "1"); changed = true; }
+    // назначение пресета событию: /sound?boot=11&error=10...
+    for (int i = 0; i < EV_N; i++) {
+      String key = EV_KEYS[i];
+      if (gWeb.hasArg(key)) {
+        int p = gWeb.arg(key).toInt();
+        if (p >= 0 && p < SND_N) { sndEv[i] = (uint8_t)p; changed = true; }
+      }
+    }
+    if (changed) beepSave();
+
+    String out = "{\"ok\":true,\"on\":";
+    out += gBeepOn ? "1" : "0";
+    out += ",\"quiet\":"; out += sndQuiet ? "1" : "0";
+    out += ",\"vol\":" + String(gBeepVol);
+    out += ",\"nvol\":" + String(sndNight);
+    out += ",\"touch\":"; out += gBeepTouch ? "1" : "0";
+    out += ",\"hour\":"; out += gBeepHour ? "1" : "0";
+    long left = (sndMuteUntil > (uint32_t)time(nullptr)) ? (long)(sndMuteUntil - (uint32_t)time(nullptr)) : 0;
+    out += ",\"muteLeft\":" + String(left);
+    out += ",\"presets\":[";
+    for (int i = 0; i < SND_N; i++) {
+      if (i) out += ',';
+      out += "{\"id\":" + String(i) + ",\"name\":\"" + String(SND_NAMES[i]) + "\"}";
+    }
+    out += "],\"events\":[";
+    for (int i = 0; i < EV_N; i++) {
+      if (i) out += ',';
+      out += "{\"key\":\"" + String(EV_KEYS[i]) + "\",\"name\":\"" + String(EV_NAMES[i]) + "\",\"preset\":" + String(sndEv[i]) + "}";
+    }
+    out += "]}";
+    gWeb.send(200, "application/json; charset=utf-8", out);
+  });
+
+  gWeb.on("/sound.html", []() {
+    gWeb.send_P(200, "text/html; charset=utf-8", SOUND_HTML);
   });
 
 gWeb.on("/tariff", []() {

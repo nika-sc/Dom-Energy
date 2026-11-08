@@ -5720,6 +5720,7 @@ function Log-Beats {
 
 
 $script:tray = $null
+$script:exiting = $false
 $script:trayAt = [datetime]::MinValue
 $script:discovered = @()
 $script:alertLast = @{}
@@ -5791,6 +5792,189 @@ function Update-RangeGrid($grid, $sum, $ip, $from, $to) {
         Add-Log ('период: ошибка ' + $_.Exception.Message)
         return $null
     }
+}
+
+function Show-Sounds {
+    $ip = [string]$script:cfg.boardIp
+    if (-not $ip) { $ip = '192.168.0.51' }
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'Звуки платы — ' + $ip
+    $f.Size = New-Object System.Drawing.Size(640, 620)
+    $f.StartPosition = 'CenterParent'
+    $f.BackColor = C $script:CLR.bg
+    $f.ForeColor = C $script:CLR.text
+    $font = New-Object System.Drawing.Font('Segoe UI', 9)
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = 'Событие → звук. Кнопка ▶ проигрывает выбранный пресет на плате.'
+    $lbl.Location = New-Object System.Drawing.Point(14, 10)
+    $lbl.Size = New-Object System.Drawing.Size(600, 20)
+    $lbl.ForeColor = C $script:CLR.dim2
+    $f.Controls.Add($lbl)
+
+    $grid = New-Object System.Windows.Forms.DataGridView
+    $grid.Location = New-Object System.Drawing.Point(14, 36)
+    $grid.Size = New-Object System.Drawing.Size(600, 300)
+    $grid.BackgroundColor = C '#0F1218'
+    $grid.GridColor = C '#232B39'
+    $grid.BorderStyle = 'None'
+    $grid.EnableHeadersVisualStyles = $false
+    $grid.ColumnHeadersDefaultCellStyle.BackColor = C '#151B26'
+    $grid.ColumnHeadersDefaultCellStyle.ForeColor = C '#8FA3BF'
+    $grid.DefaultCellStyle.BackColor = C '#0F1218'
+    $grid.DefaultCellStyle.ForeColor = C '#D6E2F5'
+    $grid.RowHeadersVisible = $false
+    $grid.AllowUserToAddRows = $false
+    $grid.AutoSizeColumnsMode = 'Fill'
+    $grid.Font = $font
+    $null = $grid.Columns.Add('name', 'Событие')
+    $null = $grid.Columns.Add('key', 'ключ')
+    $grid.Columns['key'].Visible = $false
+    $null = $grid.Columns.Add('preset', 'звук')
+    $grid.Columns['name'].FillWeight = 140
+    $grid.Columns['preset'].FillWeight = 160
+    $f.Controls.Add($grid)
+
+    $btnTest = New-Object System.Windows.Forms.Button
+    $btnTest.Text = '▶ прослушать'
+    $btnTest.Location = New-Object System.Drawing.Point(14, 344)
+    $btnTest.Size = New-Object System.Drawing.Size(130, 28)
+    $btnTest.FlatStyle = 'Flat'
+    $btnTest.BackColor = C '#24405A'
+    $btnTest.ForeColor = C $script:CLR.text
+    $f.Controls.Add($btnTest)
+
+    $lblVol = New-Object System.Windows.Forms.Label
+    $lblVol.Text = 'Громкость днём, %:'
+    $lblVol.Location = New-Object System.Drawing.Point(160, 350)
+    $lblVol.Size = New-Object System.Drawing.Size(130, 20)
+    $f.Controls.Add($lblVol)
+
+    $numVol = New-Object System.Windows.Forms.NumericUpDown
+    $numVol.Location = New-Object System.Drawing.Point(292, 346)
+    $numVol.Size = New-Object System.Drawing.Size(60, 24)
+    $numVol.Minimum = 0; $numVol.Maximum = 40; $numVol.Value = 10
+    $f.Controls.Add($numVol)
+
+    $lblN = New-Object System.Windows.Forms.Label
+    $lblN.Text = 'ночью:'
+    $lblN.Location = New-Object System.Drawing.Point(360, 350)
+    $lblN.Size = New-Object System.Drawing.Size(60, 20)
+    $f.Controls.Add($lblN)
+
+    $numNight = New-Object System.Windows.Forms.NumericUpDown
+    $numNight.Location = New-Object System.Drawing.Point(412, 346)
+    $numNight.Size = New-Object System.Drawing.Size(60, 24)
+    $numNight.Minimum = 0; $numNight.Maximum = 40; $numNight.Value = 5
+    $f.Controls.Add($numNight)
+
+    $chkQuiet = New-Object System.Windows.Forms.CheckBox
+    $chkQuiet.Text = 'тихие часы 22:00–08:00'
+    $chkQuiet.Location = New-Object System.Drawing.Point(14, 380)
+    $chkQuiet.Size = New-Object System.Drawing.Size(240, 24)
+    $f.Controls.Add($chkQuiet)
+
+    $chkOn = New-Object System.Windows.Forms.CheckBox
+    $chkOn.Text = 'звук включён'
+    $chkOn.Location = New-Object System.Drawing.Point(270, 380)
+    $chkOn.Size = New-Object System.Drawing.Size(140, 24)
+    $f.Controls.Add($chkOn)
+
+    $btnMute = New-Object System.Windows.Forms.Button
+    $btnMute.Text = 'приглушить 30 мин'
+    $btnMute.Location = New-Object System.Drawing.Point(420, 378)
+    $btnMute.Size = New-Object System.Drawing.Size(150, 26)
+    $btnMute.FlatStyle = 'Flat'
+    $btnMute.BackColor = C '#2A3240'
+    $btnMute.ForeColor = C $script:CLR.text
+    $f.Controls.Add($btnMute)
+
+    $st = New-Object System.Windows.Forms.Label
+    $st.Text = ''
+    $st.Location = New-Object System.Drawing.Point(14, 412)
+    $st.Size = New-Object System.Drawing.Size(600, 20)
+    $st.ForeColor = C $script:CLR.dim2
+    $f.Controls.Add($st)
+
+    $btnSave = New-Object System.Windows.Forms.Button
+    $btnSave.Text = 'Сохранить в плату'
+    $btnSave.Location = New-Object System.Drawing.Point(14, 440)
+    $btnSave.Size = New-Object System.Drawing.Size(170, 30)
+    $btnSave.FlatStyle = 'Flat'
+    $btnSave.BackColor = C '#24405A'
+    $btnSave.ForeColor = C $script:CLR.text
+    $f.Controls.Add($btnSave)
+
+    $script:sndPresets = @()
+    $script:sndEvents = @()
+
+    $load = {
+        try {
+            $s = Invoke-RestMethod ('http://' + $ip + '/sound') -TimeoutSec 15
+            $script:sndPresets = @($s.presets)
+            $script:sndEvents = @($s.events)
+            $chkOn.Checked = ([int]$s.on -eq 1)
+            $chkQuiet.Checked = ([int]$s.quiet -eq 1)
+            $numVol.Value = [Math]::Min(40, [Math]::Max(0, [int]$s.vol))
+            $numNight.Value = [Math]::Min(40, [Math]::Max(0, [int]$s.nvol))
+            $grid.Rows.Clear()
+            foreach ($ev in $s.events) {
+                $i = $grid.Rows.Add($ev.name, $ev.key, '')
+                $cell = New-Object System.Windows.Forms.DataGridViewComboBoxCell
+                foreach ($p in $s.presets) { [void]$cell.Items.Add($p.name) }
+                $cell.Value = $s.presets[[int]$ev.preset].name
+                $grid.Rows[$i].Cells[2] = $cell
+            }
+            $st.Text = 'загружено с платы'
+        } catch {
+            $st.Text = 'ошибка: ' + $_.Exception.Message
+        }
+    }
+
+    $btnTest.Add_Click({
+        try {
+            if ($grid.CurrentRow) {
+                $idx = $grid.CurrentRow.Index
+                $cell = $grid.Rows[$idx].Cells[2]
+                $pname = [string]$cell.Value
+                $pid2 = 0
+                for ($k = 0; $k -lt $script:sndPresets.Count; $k++) {
+                    if ($script:sndPresets[$k].name -eq $pname) { $pid2 = $k; break }
+                }
+                Invoke-RestMethod ('http://' + $ip + '/beep?preset=' + $pid2) -TimeoutSec 10 | Out-Null
+                $st.Text = ('проиграл: ' + $pname)
+            }
+        } catch { $st.Text = 'ошибка прослушивания' }
+    })
+
+    $btnMute.Add_Click({
+        try { Invoke-RestMethod ('http://' + $ip + '/sound?mute=30') -TimeoutSec 10 | Out-Null; $st.Text = 'приглушено на 30 минут' }
+        catch { $st.Text = 'ошибка' }
+    })
+
+    $btnSave.Add_Click({
+        try {
+            $u = 'http://' + $ip + '/sound?on=' + $(if ($chkOn.Checked) { 1 } else { 0 }) +
+                 '&quiet=' + $(if ($chkQuiet.Checked) { 1 } else { 0 }) +
+                 '&vol=' + [int]$numVol.Value + '&nvol=' + [int]$numNight.Value
+            foreach ($row in $grid.Rows) {
+                $key = [string]$row.Cells[1].Value
+                $pname = [string]$row.Cells[2].Value
+                $pid2 = 0
+                for ($k = 0; $k -lt $script:sndPresets.Count; $k++) {
+                    if ($script:sndPresets[$k].name -eq $pname) { $pid2 = $k; break }
+                }
+                $u += '&' + $key + '=' + $pid2
+            }
+            Invoke-RestMethod $u -TimeoutSec 15 | Out-Null
+            $st.Text = 'сохранено в плате'
+            Add-Log ('звуки: настройки сохранены (vol ' + [int]$numVol.Value + '%)') 'ok'
+        } catch { $st.Text = 'ошибка сохранения: ' + $_.Exception.Message }
+    })
+
+    $f.Add_Shown({ & $load })
+    [void]$f.ShowDialog()
+    $f.Dispose()
 }
 
 function Show-Range {
@@ -6125,7 +6309,9 @@ function Ensure-Tray {
         $miFind.Add_Click({ try { Find-Board -Quiet:$false } catch { } })
         $menu.Items.Add('-') | Out-Null
         $miExit = $menu.Items.Add('Выход')
-        $miExit.Add_Click({ try { $form.Close() } catch { } })
+        $miExit.Add_Click({ try { $script:exiting = $true; $form.Close() } catch { } })
+        $miSound = $menu.Items.Add('Звуки платы')
+        $miSound.Add_Click({ try { Show-Sounds } catch { } })
         $script:tray.ContextMenuStrip = $menu
         $script:tray.Add_MouseDoubleClick({ try { $form.Show(); $form.WindowState = 'Normal'; $form.Activate() } catch { } })
         Add-Log 'трей: значок создан' 'ok'
@@ -6449,11 +6635,18 @@ function Check-Alerts {
 
     if ($v -gt 0) {
 
-        # Гистерезис 3 В: иначе на границе порога приходят пары «в норме / высокое»
-        Alert-State 'vlow' ($v -lt $vmin) 'Низкое напряжение' ($v.ToString('0') + ' В · порог ' + $vmin + ' В') 'warn' 'Напряжение в норме' ($v.ToString('0') + ' В')
-        if ($v -gt ($vmin + 3)) { Alert-State 'vlow' $false '' '' 'warn' }
-        Alert-State 'vhigh' ($v -gt $vmax) 'Высокое напряжение' ($v.ToString('0') + ' В · порог ' + $vmax + ' В') 'warn' 'Напряжение в норме' ($v.ToString('0') + ' В')
-        if ($v -lt ($vmax - 3)) { Alert-State 'vhigh' $false '' '' 'warn' }
+        # Гистерезис: вошли в «плохо» за порогом, выходим только вернувшись на 3 В назад.
+        # Так на самой границе нет пар «в норме / высокое».
+        $wasLow  = [bool]$script:alertState['vlow']
+        $wasHigh = [bool]$script:alertState['vhigh']
+        $badLow  = if ($wasLow)  { $v -lt ($vmin + 3) } else { $v -lt $vmin }
+        $badHigh = if ($wasHigh) { $v -gt ($vmax - 3) } else { $v -gt $vmax }
+        if (-not $badHigh) {
+            Alert-State 'vlow' $badLow 'Низкое напряжение' ($v.ToString('0') + ' В · порог ' + $vmin + ' В') 'warn' 'Напряжение в норме' ($v.ToString('0') + ' В')
+        }
+        if (-not $badLow) {
+            Alert-State 'vhigh' $badHigh 'Высокое напряжение' ($v.ToString('0') + ' В · порог ' + $vmax + ' В') 'warn' 'Напряжение в норме' ($v.ToString('0') + ' В')
+        }
 
         $script:alertSeen['v'] = $v
 
@@ -6466,8 +6659,9 @@ function Check-Alerts {
     $tp = 0.0; try { $tp = [double]$d.temp } catch { }
 
     if ($tp -gt 0) {
-        Alert-State 'temp' ($tp -ge $tmax) 'Перегрев реле' ($tp.ToString('0.0') + ' °C · порог ' + $tmax + ' °C') 'err' 'Реле остыло' ($tp.ToString('0.0') + ' °C')
-        if ($tp -lt ($tmax - 2)) { Alert-State 'temp' $false '' '' 'err' }
+        $wasTemp = [bool]$script:alertState['temp']
+        $badTemp = if ($wasTemp) { $tp -ge ($tmax - 2) } else { $tp -ge $tmax }
+        Alert-State 'temp' $badTemp 'Перегрев реле' ($tp.ToString('0.0') + ' °C · порог ' + $tmax + ' °C') 'err' 'Реле остыло' ($tp.ToString('0.0') + ' °C')
     }
 
 
@@ -10217,6 +10411,21 @@ $form.Add_Resize({
 
 
 $form.Add_FormClosing({
+
+    param($s, $e)
+
+    # Крестик = свернуться в трей (чтобы не терять связь с платой).
+    # Полный выход — через меню значка в трее.
+    if (-not $script:exiting) {
+        $e.Cancel = $true
+        $form.Hide()
+        try {
+            $script:tray.Visible = $true
+            $script:tray.ShowBalloonTip(2000, 'DOM MONITOR', 'Программа свернулась в трей и продолжает опрос платы', 'Info')
+        } catch { }
+        Write-AppLog 'свернулось в трей (выход — через меню значка)'
+        return
+    }
 
     Write-AppLog 'форма закрывается'
 

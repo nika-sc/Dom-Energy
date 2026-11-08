@@ -163,6 +163,7 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
     <span class="chip" id="cNet"><i class="dot __NETCLS__"></i><span>__NETTXT__</span></span>
     <span class="chip" id="cRssi">__RSSI__ дБм</span><span class="chip" id="cUpd">обновлено 0 с</span>
     <button class="iconbtn" id="themeBtn" type="button">☀ Светлая</button>
+    <a class="iconbtn" href="/sound.html" target="_blank" title="настройка звуков">♪ Звуки</a>
   </span>
 </div>
 
@@ -282,8 +283,8 @@ html[data-theme="light"] .daybar{background:rgba(255,255,255,.94)}
     <div class="t"><div class="k">В среднем в сутки</div><div class="v c3" id="rAvg">—</div><div class="s" id="rAvgS">—</div></div>
   </div>
   <div class="rtwrap"><table class="rt" id="rngTbl"><thead><tr>
-    <th>День</th><th>кВт·ч</th><th>₽</th><th>день</th><th>ночь</th><th>U мин–макс</th><th>t мин–макс</th><th>пик</th><th>погода</th>
-  </tr></thead><tbody><tr><td colspan="9" class="mut">нет данных</td></tr></tbody></table></div>
+    <th>День</th><th>кВт·ч</th><th>₽</th><th>день</th><th>ночь</th><th>U мин–макс</th><th>t реле</th><th>пик</th><th>погода</th><th>t улицы</th>
+  </tr></thead><tbody><tr><td colspan="10" class="mut">нет данных</td></tr></tbody></table></div>
 </div>
 
 <h2 class="sect">Качество и защита<span>ГОСТ 32144 и пороги автомата</span></h2>
@@ -925,11 +926,13 @@ function rngRender(j){
     var r=RNG.rows[i];
     h+="<tr><td>"+fmtDate(r.d)+"</td><td>"+num(r.kwh,2)+"</td><td>"+num(r.cost,2)+"</td>"
       +"<td class='mut'>"+num(r.dayKwh,2)+"</td><td class='mut'>"+num(r.nightKwh,2)+"</td>"
-      +"<td>"+r.vmin+"–"+r.vmax+"</td><td>"+(r.tmin?num(r.tmin,1)+"–"+num(r.tmax,1):"—")+"</td>"
+      +"<td>"+r.vmin+"–"+r.vmax+"</td>"
+      +"<td>"+((r.rtmin||r.rtmax)? num(r.rtmin,1)+"–"+num(r.rtmax,1) : (r.tmin?num(r.tmin,1)+"–"+num(r.tmax,1):"—"))+"</td>"
       +"<td class='mut'>"+r.pmax+"</td>"
-      +"<td class='mut' title='"+(r.w||"")+"'>"+(r.w? r.w+(r.wtmin? ' · '+num(r.wtmin,0)+'…'+num(r.wtmax,0)+'°':'') : '—')+"</td></tr>";
+      +"<td class='mut'>"+(r.w||"—")+"</td>"
+      +"<td class='mut'>"+((r.wtmin||r.wtmax)? num(r.wtmin,1)+"–"+num(r.wtmax,1)+"°" : "—")+"</td></tr>";
   }
-  if(!h) h="<tr><td colspan='9' class='mut'>нет данных за период</td></tr>";
+  if(!h) h="<tr><td colspan='10' class='mut'>нет данных за период</td></tr>";
   tb.innerHTML=h;
 }
 var GAP_BUSY=false;
