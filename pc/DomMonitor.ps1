@@ -1738,7 +1738,9 @@ $lblCom.BackColor = C $script:CLR.card
 
 $lblCom.TextAlign = 'MiddleCenter'
 
-$lblCom.Size = New-Object System.Drawing.Size(195, 26)
+$lblCom.Size = New-Object System.Drawing.Size(150, 26)
+
+$lblCom.AutoEllipsis = $true
 
 $lblCom.Location = New-Object System.Drawing.Point(798, 20)
 
@@ -4855,7 +4857,14 @@ function Update-Cards {
 
         if ($tf -ge 60) { $tc = '#E85D5D' } elseif ($tf -ge 45) { $tc = '#F2B44B' }
 
-        Set-Card 't' ((Num $tf '0.0') + ' °C') 'корпус реле' $tc $txtSub
+        $subT = 'корпус реле'
+        $eokC = Field $d @('eok')
+        if ($null -ne $eokC -and [int]$eokC -eq 1) {
+            $etC = Field $d @('et'); $ehC = Field $d @('eh'); $epC = Field $d @('ep')
+            $subT = 'воздух ' + (Num $etC '0.0') + '° · ' + (Num $ehC '0') + '%'
+            if ($null -ne $epC) { $subT += ' · ' + [Math]::Round([double]$epC * 0.75006) + ' мм' }
+        }
+        Set-Card 't' ((Num $tf '0.0') + ' °C') $subT $tc $txtSub
 
     } else {
 

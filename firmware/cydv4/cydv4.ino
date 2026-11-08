@@ -5795,10 +5795,10 @@ const Block BLOCKS[5] = {
   // Зоны доведены ДО КРАЁВ экрана. Раньше касание у кромки (x=239 при крае
   // карточки 234) промахивалось мимо всех карточек — и «ничего не открывалось».
   {  0,  44, 240, 72, SCR_VOLT    },
-  {  0, 112, 120, 64, SCR_CLIMATE },   // климат в комнате
-  {120, 112, 120, 64, SCR_POWER   },   // ровно половина, как и климат
-  {  0, 174, 240, 72, SCR_TODAY   },
-  {  0, 244, 240, 74, SCR_WEATHER },
+  {  0, 116, 120, 60, SCR_CLIMATE },   // климат в комнате
+  {120, 116, 120, 60, SCR_POWER   },   // ровно половина, как и климат
+  {  0, 176, 240, 70, SCR_TODAY   },
+  {  0, 246, 240, 74, SCR_WEATHER },
 };
 // Экран сторожа оставлен в коде, но недоступен: вернём, когда будет
 // большой экран. Пока вместо него на нижней полосе сеть/карта/сигнал.
@@ -6517,9 +6517,11 @@ bool  envOk = false;          // хотя бы один датчик найде�
 bool  envAht = false, envBmp = false;
 float envT = NAN, envH = NAN, envP = NAN;
 unsigned long envAt = 0;
+unsigned long envReadAt = 0;   // когда реально прочитали значения
 
 // --- BMP280: калибровка и компенсация (по даташиту, целочисленно)
-static uint16_t bmpT1, bmpT2, bmpT3;
+static uint16_t bmpT1;
+static int16_t  bmpT2, bmpT3;
 static uint16_t bmpP1;
 static int16_t  bmpP2, bmpP3, bmpP4, bmpP5, bmpP6, bmpP7, bmpP8, bmpP9;
 static int32_t  bmpTfine = 0;
@@ -6705,11 +6707,30 @@ static void climateLogTick() {
   if (!getLocalTime(&ti, 10)) return;
   static int lastHour = -1, lastDay = -1;
   if (ti.tm_hour == lastHour && ti.tm_mday == lastDay) return;
+
+  // уже есть строка за этот час (например, после перезагрузки) — не дублируем
+  {
+    File rf = SD.open("/climate.csv", FILE_READ);
+    if (rf) {
+      size_t sz = rf.size();
+      size_t back = (sz > 120) ? 120 : sz;
+      rf.seek(sz - back);
+      String tail = rf.readString();
+      rf.close();
+      char want[20];
+      snprintf(want, sizeof(want), "%04d-%02d-%02d,%02d:",
+               ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday, ti.tm_hour);
+      int pos = tail.lastIndexOf(want);
+      if (pos >= 0) { lastHour = ti.tm_hour; lastDay = ti.tm_mday; return; }
+    }
+  }
   lastHour = ti.tm_hour; lastDay = ti.tm_mday;
   char line[96];
+  float pp = isnan(envP) ? 0.0f : envP;
+  if (pp < 300 || pp > 1100) pp = 0.0f;      // датчик не откалиброван — не пишем мусор
   snprintf(line, sizeof(line), "%04d-%02d-%02d,%02d:00,%.1f,%.1f,%.1f\n",
            ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday, ti.tm_hour,
-           isnan(envT) ? 0.0f : envT, isnan(envH) ? 0.0f : envH, isnan(envP) ? 0.0f : envP);
+           isnan(envT) ? 0.0f : envT, isnan(envH) ? 0.0f : envH, pp);
   File f = SD.open("/climate.csv", FILE_APPEND);
   if (!f) return;
   f.print(line);
@@ -6731,19 +6752,22 @@ void envTick() {
   envAt = millis();
   float t1 = NAN, h = NAN, t2 = NAN, p = NAN;
   if (envAht) {
-    if (ahtRead(&t1, &h)) { envT = t1; envH = h; }
+    if (ahtRead(&t1, &h)) { envT = t1; envH = h; envReadAt = millis(); }
   }
   if (envBmp) {
-    if (bmpReadTempPress(&t2, &p)) { if (!envAht || isnan(envT)) envT = t2; envP = p; }
+    if (bmpReadTempPress(&t2, &p)) { if (!envAht || isnan(envT)) envT = t2; envP = p; envReadAt = millis(); }
   }
   esp_task_wdt_reset();
 }
 
 String envJson() {
-  char b[96];
-  snprintf(b, sizeof(b), "\"eok\":%d,\"et\":%.1f,\"eh\":%.1f,\"ep\":%.1f",
-           envOk ? 1 : 0, isnan(envT) ? 0.0f : envT, isnan(envH) ? 0.0f : envH,
-           isnan(envP) ? 0.0f : envP);
+  char b[128];
+  // данные считаем живыми, только если читали их недавно (5 минут)
+  bool fresh = envOk && envReadAt && (millis() - envReadAt < 300000UL);
+  long age = envReadAt ? (long)((millis() - envReadAt) / 1000UL) : -1;
+  snprintf(b, sizeof(b), "\"eok\":%d,\"et\":%.1f,\"eh\":%.1f,\"ep\":%.1f,\"eage\":%ld",
+           fresh ? 1 : 0, isnan(envT) ? 0.0f : envT, isnan(envH) ? 0.0f : envH,
+           isnan(envP) ? 0.0f : envP, age);
   return String(b);
 }
 
@@ -7633,8 +7657,20 @@ void drawClimateScreen() {
   snprintf(b, sizeof(b), "%.0f мм", ep * 0.75006f);
   drawTxt(124, 124, b, cText, cBg, 2);
 
-  // строка с датой и стрелками — как на экранах напряжения/температуры
-  drawHourTitle(150, envHourT, 2, "C", 1);
+  // строка с датой и стрелками (hourAverage сюда нельзя: массив 24, а он ждёт 288)
+  uiFill(0, 149, 240, 11, cBg);
+  drawChevron(16, 154, true,  (gDayOffset < gDayMaxOffset) ? cAccent : cLine);
+  drawChevron(126, 154, false, (gDayOffset > 0) ? cAccent : cLine);
+  drawTxtC(80, 150, (gDayOffset == 0) ? "СЕГОДНЯ" : gDayLabel,
+           (gDayOffset == 0) ? cGood : cText, cBg, 1);
+  {
+    float sum = 0; int cnt = 0;
+    for (int i = 0; i < 24; i++) if (cliOk[i]) { sum += cliT[i]; cnt++; }
+    char sb[24];
+    if (cnt) snprintf(sb, sizeof(sb), "СР %.1f C", sum / cnt);
+    else     strcpy(sb, "--");
+    drawTxtR(234, 150, sb, cMuted, cBg, 1);
+  }
   if (!gSkipChart) climateDrawBars(10, 166, 220, 108);
   char cap[80];
   if (gDayOffset) snprintf(cap, sizeof(cap), "ТЕМПЕРАТУРА ЗА %s", gDayLabel);
@@ -8160,6 +8196,9 @@ void refreshWindow() {
     case SCR_POWER:
       uiFill(10,  50, 214, 60, cBg);    // цифры и метка получения
       if (gDayOffset == 0) uiFill(10, 116, 216, 88, cBg);  // средняя / пик / ток / U*I
+      break;
+    case SCR_CLIMATE:
+      uiFill(10,  48, 220, 100, cBg);   // температура, влажность, давление
       break;
     default:
       uiFill(10, 50, 220, 244, cBg);    // «ИТОГИ» и «ПОГОДА»
@@ -12506,6 +12545,8 @@ void webSetup() {
       // energy.peak / energy.bak / boots.log — чтобы полный архив снимался по HTTP
       if (a == "weather.csv") {
         fname = "/weather.csv"; explicitFile = true;
+      } else if (a == "climate.csv" || a == "rangecache.bin") {
+        fname = "/" + a; explicitFile = true;
       } else if (a == "energy.csv" || a == "energy.peak" || a == "energy.bak" ||
           a == "boots.log" ||
           (a.startsWith("energy-") && a.endsWith(".csv") && a.length() == 18)) {
@@ -12737,7 +12778,7 @@ void webSetup() {
           int slash = n.lastIndexOf('/');
           if (slash >= 0) n = n.substring(slash + 1);
           if (n == "energy.csv" || n == "energy.bak" || n == "energy.peak" ||
-              n == "weather.csv" ||
+              n == "weather.csv" || n == "climate.csv" || n == "rangecache.bin" ||
               n == "boots.log" || n == "boots.1.log" ||
               (n.startsWith("energy-") && n.endsWith(".csv") && n.length() == 18)) {
             if (!first) out += ",";
@@ -13076,6 +13117,8 @@ void webSetup() {
     int scl = gWeb.hasArg("scl") ? gWeb.arg("scl").toInt() : envSclPin;
     if (sda != envSdaPin || scl != envSclPin) {
       Wire.end();
+      envSdaPin = sda;
+      envSclPin = scl;
       Wire.begin((int)sda, (int)scl, 100000UL);
       delay(40);
     }
@@ -13085,6 +13128,8 @@ void webSetup() {
       pinMode(scl, INPUT_PULLUP);
       delay(5);
       int ls = digitalRead(sda), lc = digitalRead(scl);
+      // возвращаем шину в рабочее состояние, иначе I2C «умирает» до /i2c?init
+      Wire.begin(envSdaPin, envSclPin, 100000UL);
       String pj = "{\"sda\":" + String(sda) + ",\"scl\":" + String(scl);
       pj += ",\"sdaLevel\":" + String(ls) + ",\"sclLevel\":" + String(lc) + "}";
       gWeb.send(200, "application/json", pj);
