@@ -147,16 +147,16 @@ python web\build_page.py
 $cli = "C:\Program Files\Arduino CLI\arduino-cli.exe"
 
 & $cli compile `
-  --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" `
+  --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" `
   --libraries "$env:USERPROFILE\Documents\Arduino\libraries" `
   --build-path "build" `
   "firmware\cydv4"
 ```
 
-Почему `PartitionScheme=huge_app`:
+Почему `PartitionScheme=min_spiffs`:
 
 - прошивка занимает около **1,09 МБ** (1 142 313 байт);
-- в `huge_app` раздел приложения — **3 МБ**, занято **36 %**;
+- в `min_spiffs` раздел приложения — **3 МБ**, занято **36 %**;
 - в стандартном `default` раздел 1,3 МБ, занято ~87 % — запаса почти нет,
   следующая правка может не влезть.
 
@@ -167,7 +167,7 @@ $cli = "C:\Program Files\Arduino CLI\arduino-cli.exe"
 Глобальные переменные используют 72928 байт (22%) динамической памяти, оставляя 254752 байт для локальных переменных. Максимум: 327680 байт.
 ```
 
-(Точная цифра зависит от версии библиотек; главное — `huge_app` и отсутствие
+(Точная цифра зависит от версии библиотек; главное — `min_spiffs` и отсутствие
 `Sketch too big`.)
 
 ## 7. Прошивка
@@ -177,7 +177,7 @@ $cli = "C:\Program Files\Arduino CLI\arduino-cli.exe"
 ```powershell
 & $cli upload `
   -p COM5 `
-  --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" `
+  --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" `
   --upload-property "upload.speed=921600" `
   --input-dir "build" `
   "firmware\cydv4"
@@ -226,7 +226,7 @@ curl http://192.168.1.50/data
 | Ошибка | Причина | Решение |
 |---|---|---|
 | `secrets.h: No such file` | не скопирован шаблон | `Copy-Item secrets.example.h secrets.h` |
-| `Sketch too big` | собрано без `huge_app` | добавить `PartitionScheme=huge_app` |
+| `Sketch too big` | собрано без `min_spiffs` | добавить `PartitionScheme=min_spiffs` |
 | `TFT_eSPI` ошибки `_spi_cmd` | не тот `User_Setup.h` | скопировать из `firmware/hw/` |
 | Экран чёрный, но serial работает | `User_Setup.h` / подсветка | проверить пины, `TFT_BL 21`, clean build |
 | `Failed to connect` | скорость/порт/BOOT | 921600, COM5, BOOT+RST |
@@ -248,12 +248,12 @@ curl http://192.168.1.50/data
 | Параметр | Значение |
 |---|---|
 | Размер `.bin` | ~1,15 МБ (1 148 064 байт; код — 1 142 313 байт) |
-| Раздел `huge_app` | 3 МБ (3 145 728 байт) |
+| Раздел `min_spiffs` | 3 МБ (3 145 728 байт) |
 | Занято | 36 % |
 | Свободно | ~1,9 МБ |
 | Раздел `default` | 1,3 МБ (1 310 720 байт), занято ~87 % |
 
-Запас в `huge_app` нужен для строковых ресурсов, шрифтов и будущих правок.
+Запас в `min_spiffs` нужен для строковых ресурсов, шрифтов и будущих правок.
 
 ## Страница платы: `page_html.h`
 
@@ -349,7 +349,7 @@ DomMonitor -> tg-relay.ps1 -> GitHub API (repository_dispatch)
 ## Прошивка 4.11: схема разделов и OTA
 
 С 4.11.0 используется **`PartitionScheme=min_spiffs`** — два слота приложения
-по 1.875 МБ. Только с ней работает обновление по Wi-Fi: в `huge_app` второй слот
+по 1.875 МБ. Только с ней работает обновление по Wi-Fi: в `min_spiffs` второй слот
 отсутствует, и `Update.begin()` падает (в `boots.log` это выглядело как `rr=PANIC`).
 
 ```bash

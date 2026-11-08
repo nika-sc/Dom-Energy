@@ -104,7 +104,7 @@ cd ..\..
 # 2) сборка
 Remove-Item build -Recurse -Force -ErrorAction SilentlyContinue
 & $cli compile `
-  --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" `
+  --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" `
   --libraries "$env:USERPROFILE\Documents\Arduino\libraries" `
   --build-path "build" `
   "firmware\cydv4"
@@ -112,7 +112,7 @@ Remove-Item build -Recurse -Force -ErrorAction SilentlyContinue
 # 3) заливка
 & $cli upload `
   -p COM5 `
-  --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" `
+  --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" `
   --upload-property "upload.speed=921600" `
   --input-dir "build" `
   "firmware\cydv4"
@@ -302,7 +302,7 @@ esptool --port COM5 erase_flash
 [ ] User_Setup.h скопирован в библиотеку
 [ ] secrets.h создан и заполнен
 [ ] page.html → build_page.py (если правили)
-[ ] compile с huge_app
+[ ] compile с min_spiffs
 [ ] upload COM5 921600
 [ ] serial 115200: SD ok, веб: http://...
 [ ] CALTOUCH, 4 угла

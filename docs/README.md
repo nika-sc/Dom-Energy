@@ -17,3 +17,5 @@
 - [BUILD.md](../BUILD.md) — сборка и прошивка;
 - [RESTORE.md](../RESTORE.md) — восстановление устройства;
 - [tests/README.md](../tests/README.md) — тесты.
+
+- [RELEASE-CHECKLIST.md](RELEASE-CHECKLIST.md) — обязательный чек-лист каждого релиза

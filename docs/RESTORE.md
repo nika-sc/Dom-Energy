@@ -8,7 +8,7 @@
 2. Взять исходник из git или `python pc/backup-firmware.py --restore ...`.
 3. Вернуть `User_Setup.h` в библиотеку `TFT_eSPI` (не в папку скетча!).
 4. Создать `secrets.h` из `secrets.example.h`.
-5. Собрать с `PartitionScheme=huge_app`, прошить COM5 на 921600.
+5. Собрать с `PartitionScheme=min_spiffs`, прошить COM5 на 921600.
 6. `CALTOUCH` → 4 угла; `CAL` — проверить; `CALRESET` — сбросить.
 7. Вернуть историю: `energy-latest.csv` → `/energy.csv` на карте,
    либо `IMP` … `IMPEND`; затем `PERIODRESET`.
