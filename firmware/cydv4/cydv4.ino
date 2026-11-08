@@ -36,6 +36,20 @@ struct RngDay {
   uint16_t rows;
 };
 
+// --- кэш посчитанных суток: прошедшие дни /range больше не сканирует
+#define DAYC_N 384
+struct DayCache {
+  uint32_t day;
+  float kwh, cost, dayKwh, nightKwh;
+  uint16_t vmin, vmax, pmax, rows;
+  int16_t tmin, tmax;
+  bool valid;
+};
+static DayCache* sDayCache = nullptr;   // в куче: 12 КБ статически не влезают в DRAM
+static bool sDayCacheInit = false;
+static bool sDayCacheDirty = false;
+static unsigned long sDayCacheSaved = 0;
+
 #include <time.h>
 #include <ArduinoJson.h>
 
@@ -990,6 +1004,65 @@ static int dayIndexOf(RngDay* arr, int n, uint32_t d) {
   return -1;
 }
 
+// --- кэш суток (типы объявлены в начале файла) ---
+
+static void dayCacheInit() {
+  if (sDayCacheInit) return;
+  size_t bytes = sizeof(DayCache) * DAYC_N;
+  sDayCache = (DayCache*)malloc(bytes);
+  if (!sDayCache) { Serial.println("кэш суток: нет памяти"); return; }
+  memset(sDayCache, 0, bytes);
+  sDayCacheInit = true;
+  File f = SD.open("/rangecache.bin", FILE_READ);
+  if (!f) { Serial.println("кэш суток: пусто"); return; }
+  uint32_t hdr[2] = {0, 0};
+  f.read((uint8_t*)hdr, sizeof(hdr));
+  if (hdr[0] != 0x44434831UL || hdr[1] != (uint32_t)DAYC_N) {
+    f.close();
+    memset(sDayCache, 0, bytes);
+    Serial.println("кэш суток: версия не совпала — считаем заново");
+    return;
+  }
+  size_t got = f.readBytes((char*)sDayCache, bytes);
+  f.close();
+  if (got != bytes) { memset(sDayCache, 0, bytes); Serial.println("кэш суток: битый"); }
+  else Serial.println("кэш суток: загружен");
+}
+
+static DayCache* dayCacheGet(uint32_t day) {
+  dayCacheInit();
+  if (!sDayCache) return nullptr;
+  DayCache* c = &sDayCache[day % DAYC_N];
+  return (c->valid && c->day == day) ? c : nullptr;
+}
+
+static void dayCachePut(const RngDay& a) {
+  dayCacheInit();
+  if (!sDayCache) return;
+  DayCache* c = &sDayCache[a.day % DAYC_N];
+  c->day = a.day;
+  c->kwh = a.kwh; c->cost = a.cost;
+  c->dayKwh = a.dayKwh; c->nightKwh = a.nightKwh;
+  c->vmin = a.vmin; c->vmax = a.vmax; c->pmax = a.pmax;
+  c->tmin = a.tmin; c->tmax = a.tmax; c->rows = a.rows;
+  c->valid = true;
+  sDayCacheDirty = true;
+}
+
+static void dayCacheFlush(bool force) {
+  if (!sDayCacheDirty || !sDayCache) return;
+  if (!force && millis() - sDayCacheSaved < 300000UL) return;
+  sDayCacheSaved = millis();
+  File f = SD.open("/rangecache.bin", FILE_WRITE);
+  if (!f) return;
+  uint32_t hdr[2] = {0x44434831UL, (uint32_t)DAYC_N};   // магия + размер, чтобы старый файл не читался
+  f.write((const uint8_t*)hdr, sizeof(hdr));
+  f.write((const uint8_t*)sDayCache, sizeof(DayCache) * DAYC_N);
+  f.close();
+  sDayCacheDirty = false;
+  Serial.println("кэш суток: сохранён");
+}
+
 static void rangeReset(RngDay* a, int n) {
   for (int i = 0; i < n; i++) {
     a[i].kwh = a[i].cost = a[i].dayKwh = a[i].nightKwh = 0;
@@ -999,9 +1072,14 @@ static void rangeReset(RngDay* a, int n) {
 }
 
 // пройти файл месяца и накопить в buckets
-static void rangeScanFile(const char* path, long fromT, long toT, RngDay* b, int nb) {
+static void rangeScanFile(const char* path, long fromT, long toT, RngDay* b, int nb,
+                          size_t startOffset = 0) {
   File f = SD.open(path, FILE_READ);
   if (!f) return;
+  if (startOffset) {
+    f.seek(startOffset);
+    while (f.available() && f.read() != '\n') { }   // не разбираем обрывок строки
+  }
   // читаем БЛОКАМИ и режем на строки: readStringUntil() читает по байту и на 9000
   // строк уходило 15 секунд, из-за чего страница ждала период целую вечность
   static char buf[1400];
@@ -12463,6 +12541,30 @@ void webSetup() {
     for (int i = 0; i < n; i++) { agg[i].day = (uint32_t)((fE / 86400L) + i); }
     rangeReset(agg, n);
 
+    // Сначала считаем, все ли прошедшие дни есть в кэше.
+    // Важно: при неполном кэше данные НЕ подмешиваем — иначе скан добавит
+    // их второй раз (было двойное суммирование).
+    long todayE2 = nowLocalEpoch();
+    long todayDay = (todayE2 > 0) ? (todayE2 / 86400L) : 0;
+    bool needScan = false;
+    int needFull = 0;
+    for (int i = 0; i < n; i++) {
+      if (todayDay && agg[i].day >= (uint32_t)todayDay) { needScan = true; continue; }
+      if (!dayCacheGet(agg[i].day)) { needScan = true; needFull++; }
+    }
+    if (needFull == 0) {
+      // весь период в кэше — заполняем из него, сегодня доберём хвостом файла
+      for (int i = 0; i < n; i++) {
+        if (todayDay && agg[i].day >= (uint32_t)todayDay) continue;
+        DayCache* dc = dayCacheGet(agg[i].day);
+        if (!dc) continue;
+        agg[i].kwh = dc->kwh; agg[i].cost = dc->cost;
+        agg[i].dayKwh = dc->dayKwh; agg[i].nightKwh = dc->nightKwh;
+        agg[i].vmin = dc->vmin; agg[i].vmax = dc->vmax; agg[i].pmax = dc->pmax;
+        agg[i].tmin = dc->tmin; agg[i].tmax = dc->tmax; agg[i].rows = dc->rows;
+      }
+    }
+
     // проходим по месяцам: текущий файл + архивы
     int y1, m1, d1, y2, m2, d2;
     sscanf(f.c_str(), "%4d-%2d-%2d", &y1, &m1, &d1);
@@ -12473,7 +12575,20 @@ void webSetup() {
     if (getLocalTime(&nowTi, 20)) curStamp = (nowTi.tm_year + 1900) * 100 + nowTi.tm_mon + 1;
     int sy = stamp / 100, sm = stamp % 100;
     int ey = stampEnd / 100, em = stampEnd % 100;
-    while (sy < ey || (sy == ey && sm <= em)) {
+    if (needScan && needFull == 0) {
+      // все прошедшие дни в кэше — читаем только последние 300 КБ файла
+      if (SD.exists("/energy.csv")) {
+        File tf = SD.open("/energy.csv", FILE_READ);
+        if (tf) {
+          size_t sz = tf.size();
+          size_t off = (sz > 300UL * 1024UL) ? (sz - 300UL * 1024UL) : 0;
+          tf.close();
+          rangeScanFile("/energy.csv", fE, tE + 86400L - 1, agg, n, off);
+        }
+      }
+      sy = ey + 1; sm = 1;        // общий цикл по месяцам пропускаем
+    }
+    while (needScan && (sy < ey || (sy == ey && sm <= em))) {
       int s = sy * 100 + sm;
       char path[40];
       if (s == curStamp) strcpy(path, "/energy.csv");
@@ -12481,6 +12596,13 @@ void webSetup() {
       if (SD.exists(path)) rangeScanFile(path, fE, tE + 86400L - 1, agg, n);
       sm++;
       if (sm > 12) { sm = 1; sy++; }
+    }
+    if (needScan) {
+      for (int i = 0; i < n; i++) {
+        if (todayDay && agg[i].day >= (uint32_t)todayDay) continue;
+        if (agg[i].rows > 0) dayCachePut(agg[i]);
+      }
+      dayCacheFlush(false);
     }
 
     String out = "{\"from\":\"" + f + "\",\"to\":\"" + tt + "\",\"days\":" + String(n);

@@ -5750,7 +5750,8 @@ function Update-RangeGrid($grid, $sum, $ip, $from, $to) {
             if ($chunkEnd -gt $dB) { $chunkEnd = $dB }
             $ca = $dA.ToString('yyyy-MM-dd')
             $cb = $chunkEnd.ToString('yyyy-MM-dd')
-            $part = Invoke-RestMethod ("http://" + $ip + "/range?from=" + $ca + "&to=" + $cb) -TimeoutSec 120
+            $part = Invoke-RestUi ("http://" + $ip + "/range?from=" + $ca + "&to=" + $cb) 180
+            if ($null -eq $part) { throw ('плата не ответила за период ' + $ca) }
             $allRows += @($part.rows)
             $ct = $part.totals
             $sumK += [double]$ct.kwh; $sumC += [double]$ct.cost
@@ -5792,6 +5793,24 @@ function Update-RangeGrid($grid, $sum, $ip, $from, $to) {
         Add-Log ('период: ошибка ' + $_.Exception.Message)
         return $null
     }
+}
+
+# Запрос к плате без заморозки окна: работа идёт в фоновом задании,
+# а UI продолжает перерисовываться (Application.DoEvents).
+function Invoke-RestUi([string]$url, [int]$timeoutSec = 120) {
+    $job = Start-Job -ScriptBlock {
+        param($u)
+        try { Invoke-RestMethod $u -TimeoutSec 120 } catch { $null }
+    } -ArgumentList $url
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($job.State -eq 'Running' -and $sw.Elapsed.TotalSeconds -lt $timeoutSec) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 40
+    }
+    $out = $null
+    try { $out = Receive-Job $job -ErrorAction SilentlyContinue } catch { }
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    return $out
 }
 
 function Show-Sounds {
@@ -5910,7 +5929,9 @@ function Show-Sounds {
 
     $load = {
         try {
-            $s = Invoke-RestMethod ('http://' + $ip + '/sound') -TimeoutSec 15
+            $st.Text = 'загружаю с платы…'
+            $s = Invoke-RestUi ('http://' + $ip + '/sound') 20
+            if ($null -eq $s) { throw 'плата не ответила' }
             $script:sndPresets = @($s.presets)
             $script:sndEvents = @($s.events)
             $chkOn.Checked = ([int]$s.on -eq 1)
