@@ -186,7 +186,7 @@ const char* FORECAST_URL =
 TFT_eSPI tft = TFT_eSPI();
 
 // ---------------------------------------------------------------- экран
-enum { SCR_MAIN = 0, SCR_VOLT, SCR_TEMP, SCR_POWER, SCR_TODAY, SCR_WEATHER, SCR_WATCH };
+enum { SCR_MAIN = 0, SCR_VOLT, SCR_TEMP, SCR_POWER, SCR_TODAY, SCR_WEATHER, SCR_WATCH, SCR_CLIMATE };
 int gScreen = SCR_MAIN;
 int gChartHour = -1;
 int gCalStep = 0;
@@ -5795,7 +5795,7 @@ const Block BLOCKS[5] = {
   // Зоны доведены ДО КРАЁВ экрана. Раньше касание у кромки (x=239 при крае
   // карточки 234) промахивалось мимо всех карточек — и «ничего не открывалось».
   {  0,  44, 240, 72, SCR_VOLT    },
-  {  0, 112, 116, 64, SCR_TEMP    },
+  {  0, 112, 116, 64, SCR_CLIMATE },   // климат в комнате
   {116, 112, 124, 64, SCR_POWER   },   // примыкает к ТЕМП без щели
   {  0, 174, 240, 72, SCR_TODAY   },
   {  0, 244, 240, 74, SCR_WEATHER },
@@ -6665,6 +6665,36 @@ void envBegin() {
   Serial.printf("датчики: AHT20=%d BMP280=%d\n", envAht ? 1 : 0, envBmp ? 1 : 0);
 }
 
+// --- история климата в памяти: 24 часа + мин/макс за сутки
+static float envHourT[24] = {0}, envHourH[24] = {0}, envHourP[24] = {0};
+static bool  envHourOk[24] = {0};
+static int   envHourDay = -1;
+static float envMinT = 999, envMaxT = -999, envMinH = 999, envMaxH = -999;
+
+static void climateHistTick() {
+  if (!envOk) return;
+  struct tm ti;
+  if (!getLocalTime(&ti, 10)) return;
+  if (ti.tm_mday != envHourDay) {
+    envHourDay = ti.tm_mday;
+    envMinT = 999; envMaxT = -999; envMinH = 999; envMaxH = -999;
+    for (int i = 0; i < 24; i++) envHourOk[i] = false;
+  }
+  int h = ti.tm_hour;
+  if (h < 0 || h > 23) return;
+  if (!isnan(envT)) {
+    envHourT[h] = envT; envHourOk[h] = true;
+    if (envT < envMinT) envMinT = envT;
+    if (envT > envMaxT) envMaxT = envT;
+  }
+  if (!isnan(envH)) {
+    envHourH[h] = envH;
+    if (envH < envMinH) envMinH = envH;
+    if (envH > envMaxH) envMaxH = envH;
+  }
+  if (!isnan(envP)) envHourP[h] = envP;
+}
+
 // --- почасовая запись климата: /climate.csv (дата, время, t, h, p)
 static void climateLogTick() {
   if (!envOk || !gSdOk) return;
@@ -7256,7 +7286,7 @@ void drawMain() {
   const Block& vb = BLOCKS[0];
   drawBlockFrame(vb.x, vb.y, vb.w, vb.h);
 
-  const int VSZ = 132;                       // граница: слева напряжение, справа реле
+  const int VSZ = 120;                       // ровно середина карточки
   uiFill(vb.x + VSZ, vb.y + 6, 1, vb.h - 12, cLine);   // разделитель
 
   drawTxt(vb.x + 7, vb.y + 4, "НАПРЯЖЕНИЕ", cMuted, cSurf, 1);
@@ -7269,11 +7299,11 @@ void drawMain() {
   int vw = seg7W(b, vdh, vgap);
   drawTxt(vb.x + 7 + vw + 5, vb.y + 26, "В", cMuted, cSurf, 1);
 
-  snprintf(b, sizeof(b), "МИН %.0f  МАКС %.0f", (dayMinV < 900) ? dayMinV : 0, dayMaxV);
-  drawTxt(vb.x + 7, vb.y + 46, b, cMuted, cSurf, 1);
+  snprintf(b, sizeof(b), "%.0f-%.0f В", (dayMinV < 900) ? dayMinV : 0, dayMaxV);
+  drawTxt(vb.x + 7, vb.y + 44, b, cMuted, cSurf, 1);
+  drawTxt(vb.x + 7, vb.y + 56, "МИН-МАКС", cMuted, cSurf, 1);
   uint16_t rc = gRelay ? cGood : cBadC;
-  drawTxt(vb.x + 7, vb.y + 57, "РЕЛЕ:", cMuted, cSurf, 1);
-  drawTxt(vb.x + 44, vb.y + 55, gRelay ? "ВКЛ" : "ВЫКЛ", rc, cSurf, 2);
+  drawTxt(vb.x + 78, vb.y + 46, gRelay ? "ВКЛ" : "ВЫКЛ", rc, cSurf, 1);
 
   // ---- температура корпуса реле (правая половина карточки напряжения)
   drawTxt(vb.x + VSZ + 8, vb.y + 4, "ТЕМП РЕЛЕ", cMuted, cSurf, 1);
@@ -7523,6 +7553,46 @@ void drawTempScreen() {
   if (past) snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА %s", gDayLabel);
   else      snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА КАЖДЫЙ ЧАС");
   drawTxt(10, 288, cap, cMuted, cBg, 1);
+}
+
+// ---------------------------------------------------------------- окно климата
+void drawClimateScreen() {
+  uiScreen(cBg);
+  drawDetailHeader("КЛИМАТ В КОМНАТЕ");
+
+  char b[40];
+  float et = isnan(envT) ? 0.0f : envT;
+  snprintf(b, sizeof(b), "%.1f", et);
+  int dh = 46, gap = 7;
+  int tw = seg7W(b, dh, gap);
+  seg7Str(12, 54, dh, b, cTEMP_ACC, gap);
+  drawTxt(12 + tw + 8, 80, "C", cMuted, cBg, 2);
+  drawTxt(12, 104, envOk ? "ВОЗДУХ У ПЛАТЫ" : "ДАТЧИК НЕ НАЙДЕН", cMuted, cBg, 1);
+
+  // влажность и давление
+  float eh = isnan(envH) ? 0.0f : envH;
+  float ep = isnan(envP) ? 0.0f : envP;
+  drawTxt(12, 120, "ВЛАЖНОСТЬ", cMuted, cBg, 1);
+  snprintf(b, sizeof(b), "%.0f %%", eh);
+  drawTxt(12, 130, b, cAccent, cBg, 2);
+  drawTxt(130, 120, "ДАВЛЕНИЕ", cMuted, cBg, 1);
+  snprintf(b, sizeof(b), "%.0f мм", ep * 0.75006f);
+  drawTxt(130, 130, b, cText, cBg, 2);
+
+  // мин/макс за сутки
+  drawTxt(12, 152, "МИН", cMuted, cBg, 1);
+  snprintf(b, sizeof(b), "%.1f", (envMinT < 900) ? envMinT : et);
+  drawTxt(44, 152, b, cMuted, cBg, 1);
+  drawTxt(96, 152, "МАКС", cMuted, cBg, 1);
+  snprintf(b, sizeof(b), "%.1f", (envMaxT > -900) ? envMaxT : et);
+  drawTxt(136, 152, b, cMuted, cBg, 1);
+  drawTxt(186, 152, "C", cMuted, cBg, 1);
+
+  // график по часам
+  drawHourTitle(170, envHourT, 2, "C", 1);
+  if (!gSkipChart)
+    drawHourBars(10, 170, 220, 106, envHourT, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
+  drawTxt(10, 288, "ТЕМПЕРАТУРА ВОЗДУХА ПО ЧАСАМ", cMuted, cBg, 1);
 }
 
 // ---------------------------------------------------------------- окно мощности
@@ -7882,6 +7952,7 @@ void drawScreen() {
     case SCR_TODAY:   drawTodayScreen();   break;
     case SCR_WEATHER: drawWeatherScreen(); break;
     case SCR_WATCH:   drawWatchScreen();   break;
+    case SCR_CLIMATE: drawClimateScreen(); break;
     default:          drawMain();          break;
   }
 }
@@ -8183,7 +8254,9 @@ void handleTapAt(int x, int y) {
     }
   }
   if (best >= 0) {
-    gScreen = BLOCKS[best].scr;
+    // правая половина карточки напряжения — это температура реле
+    if (best == 0 && x >= 120) gScreen = SCR_TEMP;
+    else                       gScreen = BLOCKS[best].scr;
     drawScreen();
     gLastDraw = millis();
     gLastSig = screenSig();
@@ -13407,6 +13480,7 @@ void loop() {
   beepTick();               // проигрывание пиков
   envTick();                // датчики I2C: температура, влажность, давление
   climateLogTick();         // раз в час пишем климат в /climate.csv
+  climateHistTick();        // история климата по часам для экрана
   beepEvents();             // тревоги: напряжение, перегрев, карта, час
   wifiSetTick();            // WIFISET: смена сети шаг за шагом, без delay 20 с
   // ОБЛАКО — ПЕРВЫМ, до любых дозаполнений: свежее напряжение важнее
