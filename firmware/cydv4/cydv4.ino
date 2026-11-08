@@ -7302,11 +7302,11 @@ void drawMain() {
   int vw = seg7W(b, vdh, vgap);
   drawTxt(vb.x + 7 + vw + 5, vb.y + 26, "В", cMuted, cSurf, 1);
 
-  snprintf(b, sizeof(b), "%.0f-%.0f В", (dayMinV < 900) ? dayMinV : 0, dayMaxV);
-  drawTxt(vb.x + 7, vb.y + 44, b, cMuted, cSurf, 1);
-  drawTxt(vb.x + 7, vb.y + 56, "МИН-МАКС", cMuted, cSurf, 1);
+  snprintf(b, sizeof(b), "МИН %.0f  МАКС %.0f", (dayMinV < 900) ? dayMinV : 0, dayMaxV);
+  drawTxt(vb.x + 7, vb.y + 46, b, cMuted, cSurf, 1);
   uint16_t rc = gRelay ? cGood : cBadC;
-  drawTxt(vb.x + 78, vb.y + 46, gRelay ? "ВКЛ" : "ВЫКЛ", rc, cSurf, 1);
+  drawTxt(vb.x + 7, vb.y + 56, "РЕЛЕ", cMuted, cSurf, 1);
+  drawTxt(vb.x + 38, vb.y + 54, gRelay ? "ВКЛ" : "ВЫКЛ", rc, cSurf, 2);
 
   // ---- температура корпуса реле (правая половина карточки напряжения)
   drawTxt(vb.x + VSZ + 8, vb.y + 4, "ТЕМП РЕЛЕ", cMuted, cSurf, 1);
@@ -7558,44 +7558,107 @@ void drawTempScreen() {
   drawTxt(10, 288, cap, cMuted, cBg, 1);
 }
 
+// ---------------------------------------------------------------- климат: данные выбранного дня
+static float cliT[24];
+static bool  cliOk[24];
+static int   cliLoadedOff = -1;
+
+static void climateLoadDay(int off) {
+  for (int i = 0; i < 24; i++) { cliT[i] = 0; cliOk[i] = false; }
+  if (!envOk) return;
+  if (off == 0) {
+    for (int i = 0; i < 24; i++) { cliT[i] = envHourT[i]; cliOk[i] = envHourOk[i]; }
+    cliLoadedOff = 0;
+    return;
+  }
+  long nowE = nowLocalEpoch();
+  if (nowE <= 0) { cliLoadedOff = -1; return; }
+  String want = dateFromEpoch(nowE - (long)off * 86400L);
+  File f = SD.open("/climate.csv", FILE_READ);
+  if (!f) { cliLoadedOff = -1; return; }
+  int guard = 0;
+  while (f.available() && guard++ < 4000) {
+    String l = f.readStringUntil('\n');
+    l.trim();
+    if (l.length() < 20 || !l.startsWith(want)) continue;
+    int c1 = l.indexOf(',');            // дата
+    int c2 = l.indexOf(',', c1 + 1);    // время
+    int c3 = l.indexOf(',', c2 + 1);    // t
+    if (c1 < 0 || c2 < 0 || c3 < 0) continue;
+    int hh = l.substring(c1 + 1, c2).toInt();
+    float v = l.substring(c2 + 1, c3).toFloat();
+    if (hh >= 0 && hh < 24) { cliT[hh] = v; cliOk[hh] = true; }
+  }
+  f.close();
+  cliLoadedOff = off;
+}
+
+// столбики по часам: простые, без общих массивов h24*
+static void climateDrawBars(int x, int y, int w, int h) {
+  uiFill(x, y, w, h, cBg);
+  float lo = 999, hi = -999;
+  bool any = false;
+  for (int i = 0; i < 24; i++) {
+    if (!cliOk[i]) continue;
+    if (!any) { lo = hi = cliT[i]; any = true; }
+    else { if (cliT[i] < lo) lo = cliT[i]; if (cliT[i] > hi) hi = cliT[i]; }
+  }
+  if (!any) { drawTxtC(x + w / 2, y + h / 2 - 4, "НЕТ ДАННЫХ", cMuted, cBg, 1); return; }
+  if (hi - lo < 2.0f) { hi = lo + 2.0f; }
+  const int PITCH = 9, BW = 7;
+  int base = y + h - 14;
+  struct tm ti;
+  int nowH = getLocalTime(&ti, 5) ? ti.tm_hour : -1;
+  for (int i = 0; i < 24; i++) {
+    int bh = 0;
+    if (cliOk[i]) {
+      float k = (cliT[i] - lo) / (hi - lo);
+      bh = 6 + (int)(k * (h - 24));
+    }
+    int bx = x + i * PITCH;
+    if (i == nowH && gDayOffset == 0) uiFill(bx, base - bh, BW, bh, cTEMP_ACC);
+    else if (bh > 0)                  uiFill(bx, base - bh, BW, bh, cAccent);
+    else                              uiFill(bx, base - 2, BW, 2, cLine);
+  }
+  uiFill(x, base + 1, w, 1, cLine);
+  // подписи часов
+  drawTxt(x, base + 4, "00", cMuted, cBg, 1);
+  drawTxtC(x + w / 2, base + 4, "12", cMuted, cBg, 1);
+  drawTxtR(x + w, base + 4, "23", cMuted, cBg, 1);
+}
+
 // ---------------------------------------------------------------- окно климата
 void drawClimateScreen() {
   uiScreen(cBg);
-  drawDetailHeader("КЛИМАТ В КОМНАТЕ");
+  drawDetailHeader("КЛИМАТ");
+
+  if (cliLoadedOff != gDayOffset) climateLoadDay(gDayOffset);
 
   char b[40];
   float et = isnan(envT) ? 0.0f : envT;
   snprintf(b, sizeof(b), "%.1f", et);
-  int dh = 46, gap = 7;
+  int dh = 42, gap = 7;
   int tw = seg7W(b, dh, gap);
-  seg7Str(12, 54, dh, b, cTEMP_ACC, gap);
-  drawTxt(12 + tw + 8, 80, "C", cMuted, cBg, 2);
-  drawTxt(12, 104, envOk ? "ТЕМПЕРАТУРА ВОЗДУХА" : "ДАТЧИК НЕ НАЙДЕН", cMuted, cBg, 1);
+  seg7Str(12, 50, dh, b, cTEMP_ACC, gap);
+  drawTxt(12 + tw + 8, 74, "C", cMuted, cBg, 2);
+  drawTxt(12, 98, envOk ? "ТЕМПЕРАТУРА ВОЗДУХА" : "ДАТЧИК НЕ НАЙДЕН", cMuted, cBg, 1);
 
-  // влажность и давление
   float eh = isnan(envH) ? 0.0f : envH;
   float ep = isnan(envP) ? 0.0f : envP;
-  drawTxt(12, 120, "ВЛАЖНОСТЬ", cMuted, cBg, 1);
+  drawTxt(12, 114, "ВЛАЖНОСТЬ", cMuted, cBg, 1);
   snprintf(b, sizeof(b), "%.0f %%", eh);
-  drawTxt(12, 130, b, cAccent, cBg, 2);
-  drawTxt(130, 120, "ДАВЛЕНИЕ", cMuted, cBg, 1);
+  drawTxt(12, 124, b, cAccent, cBg, 2);
+  drawTxt(130, 114, "ДАВЛЕНИЕ", cMuted, cBg, 1);
   snprintf(b, sizeof(b), "%.0f мм", ep * 0.75006f);
-  drawTxt(130, 130, b, cText, cBg, 2);
+  drawTxt(130, 124, b, cText, cBg, 2);
 
-  // мин/макс за сутки
-  drawTxt(12, 152, "МИН", cMuted, cBg, 1);
-  snprintf(b, sizeof(b), "%.1f", (envMinT < 900) ? envMinT : et);
-  drawTxt(44, 152, b, cMuted, cBg, 1);
-  drawTxt(96, 152, "МАКС", cMuted, cBg, 1);
-  snprintf(b, sizeof(b), "%.1f", (envMaxT > -900) ? envMaxT : et);
-  drawTxt(136, 152, b, cMuted, cBg, 1);
-  drawTxt(186, 152, "C", cMuted, cBg, 1);
-
-  // график по часам
-  drawHourTitle(170, envHourT, 2, "C", 1);
-  if (!gSkipChart)
-    drawHourBars(10, 170, 220, 106, envHourT, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
-  drawTxt(10, 288, "ТЕМПЕРАТУРА ВОЗДУХА ПО ЧАСАМ", cMuted, cBg, 1);
+  // строка с датой и стрелками — как на экранах напряжения/температуры
+  drawHourTitle(150, envHourT, 2, "C", 1);
+  if (!gSkipChart) climateDrawBars(10, 166, 220, 108);
+  char cap[80];
+  if (gDayOffset) snprintf(cap, sizeof(cap), "ТЕМПЕРАТУРА ЗА %s", gDayLabel);
+  else            snprintf(cap, sizeof(cap), "ТЕМПЕРАТУРА ПО ЧАСАМ");
+  drawTxt(10, 288, cap, cMuted, cBg, 1);
 }
 
 // ---------------------------------------------------------------- окно мощности
@@ -8144,6 +8207,7 @@ static int chartTitleY() {
   if (gScreen == SCR_VOLT)  return 192;
   if (gScreen == SCR_TEMP)  return 176;
   if (gScreen == SCR_POWER) return 204;
+  if (gScreen == SCR_CLIMATE) return 150;
   return -1;
 }
 static const int* chartRect() {
