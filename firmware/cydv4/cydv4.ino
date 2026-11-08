@@ -6077,7 +6077,7 @@ static const char* EV_NAMES[EV_N] PROGMEM = {
   "загрузка", "перезагрузка", "OTA завершена", "ошибка/защита", "авария U/I",
   "реле включилось", "реле выключилось", "начало часа", "касание экрана"
 };
-static const uint8_t EV_DEFAULT[EV_N] = { 11, 5, 6, 10, 10, 1, 2, 0, 0 };
+static const uint8_t EV_DEFAULT[EV_N] = { 3, 5, 6, 10, 10, 1, 2, 0, 1 };
 
 // --- настройки ---
 bool     gBeepOn    = true;       // общий выключатель звука
@@ -6164,7 +6164,7 @@ static bool sndIsQuietNow() {
 }
 static uint8_t sndVolumeFor(bool alarm) {
   if (alarm) return gBeepVol;                 // авария звучит всегда и в полную
-  if (sndIsQuietNow()) return sndNight;
+  if (sndIsQuietNow()) return (sndNight < gBeepVol ? sndNight : gBeepVol);  // ночью не громче дня
   return gBeepVol;
 }
 
@@ -6197,7 +6197,7 @@ void sndPlayPreset(uint8_t id, bool alarm) {
 // событие → пресет
 void sndEvent(uint8_t ev) {
   if (ev >= EV_N) return;
-  if (ev == EV_TOUCH && !gBeepTouch) return;
+  if (ev == EV_TOUCH && sndEv[EV_TOUCH] == 0) return;
   if (ev == EV_HOUR && !gBeepHour) return;
   bool alarm = (ev == EV_ALARM);
   sndPlayPreset(sndEv[ev], alarm);
@@ -6244,7 +6244,14 @@ void beepStartForce(uint8_t n, uint16_t freq, uint16_t onMs, uint16_t offMs) {
   beepPlay(n, freq, onMs, offMs);
 }
 
-void beepBoot()   { sndEvent(EV_BOOT); }
+void beepBoot() {
+  // загрузка — самый тихий сигнал: половина обычной громкости
+  uint8_t v = gBeepVol;
+  uint8_t half = (v > 6) ? (uint8_t)(v / 2) : v;
+  gBeepVol = half;
+  sndPlayPreset(sndEv[EV_BOOT], false);
+  gBeepVol = v;
+}
 void beepReboot() { sndEvent(EV_REBOOT); }
 void beepError()  { sndEvent(EV_ERROR); }
 void beepOk()     { sndPlayPreset(11, true); }
@@ -7862,7 +7869,7 @@ void handleTouch() {
   Serial.printf("TAP %d %d\n", x, y);
   gTouchMs = millis();
   gTouchSkip = millis() + 1200;      // 1.2 с не начинаем тяжёлые сетевые дела
-  if (gBeepOn && gBeepTouch) beepStart(1, 2600, 25, 0);   // тихий пик подтверждения
+  if (gBeepOn) sndEvent(EV_TOUCH);   // выбранный пресет, а не 2600 Гц
   handleTapAt(x, y);
 }
 

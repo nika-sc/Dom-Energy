@@ -10172,6 +10172,12 @@ $script:btnWizard.Location = New-Object System.Drawing.Point(600, 500)
 
 $script:btnWizard.Add_Click({ Show-SetupWizard 0 })
 
+$script:btnSounds = New-Btn $pgDev 'Звуки платы' '#24405A' $script:CLR.text 176 28
+
+$script:btnSounds.Location = New-Object System.Drawing.Point(440, 500)
+
+$script:btnSounds.Add_Click({ Show-Sounds })
+
 
 
 # --------------------------------------------------------------- конфиг при старте
