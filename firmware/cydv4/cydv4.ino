@@ -7521,39 +7521,40 @@ void drawTempScreen() {
 
   char b[40];
   snprintf(b, sizeof(b), "%.1f", gTemp);
-  int dh = 58, gap = 8;                 // крупнее: было 46
+  int dh = 64, gap = 7;                     // было 46 → 64
   int tw = seg7W(b, dh, gap);
-  if (tw > 168) { dh = 52; gap = 7; tw = seg7W(b, dh, gap); }
-  seg7Str(12, 56, dh, b, cTEMP_ACC, gap);
-  drawTxt(12 + tw + 8, 56 + dh - 24, "C", cMuted, cBg, 2);
+  while (tw > 170 && dh > 44) { dh -= 4; tw = seg7W(b, dh, gap); }
+  seg7Str(12, 52, dh, b, cTEMP_ACC, gap);
+  drawTxt(12 + tw + 8, 52 + dh - 22, "C", cMuted, cBg, 2);
 
-  drawTxt(12, 120, "КОРПУС РЕЛЕ", cMuted, cBg, 1);
-  drawStamp(120, 120, gTempMs, cBg);
+  drawTxt(12, 52 + dh + 4, "КОРПУС РЕЛЕ", cMuted, cBg, 1);
+  drawStamp(120, 52 + dh + 4, gTempMs, cBg);
 
   // Показатели — за ВЫБРАННЫЙ день (сегодня из day*, прошлый из dd*).
   bool past = (gDayOffset > 0);
+  int y0 = 52 + dh + 18;
   char lab[40];
   if (past) snprintf(lab, sizeof(lab), "МАКС ЗА %s", gDayLabel);
   else      snprintf(lab, sizeof(lab), "МАКС ЗА СУТКИ");
-  drawTxt(12, 134, lab, cMuted, cBg, 1);
+  drawTxt(12, y0, lab, cMuted, cBg, 1);
   float tMax = past ? ddMaxT : dayMaxT;
   if (past && ddSecT == 0) strcpy(b, "--");
   else                     snprintf(b, sizeof(b), "%.1f", (tMax > -100) ? tMax : gTemp);
-  drawTxt(12, 144, b, cTEMP_ACC, cBg, 3);
+  drawTxt(12, y0 + 10, b, cTEMP_ACC, cBg, 3);
   hhmm(past ? ddMaxTMin : dayMaxTMin, b, sizeof(b));
-  drawTxt(12, 168, b, cMuted, cBg, 1);
+  drawTxt(12, y0 + 34, b, cMuted, cBg, 1);
 
-  drawTxt(100, 134, "СРЕДНЯЯ", cMuted, cBg, 1);
+  drawTxt(100, y0, "СРЕДНЯЯ", cMuted, cBg, 1);
   if (past && ddSecT == 0) strcpy(b, "--");
   else snprintf(b, sizeof(b), "%.1f", past ? (ddSecT ? (float)(ddSumT / ddSecT) : gTemp)
                                            : (dayTSec ? (float)(daySumT / dayTSec) : gTemp));
-  drawTxt(100, 144, b, cText, cBg, 2);
+  drawTxt(100, y0 + 10, b, cText, cBg, 2);
 
-  drawTxt(178, 134, "МИН", cMuted, cBg, 1);
+  drawTxt(178, y0, "МИН", cMuted, cBg, 1);
   float tMin = past ? ddMinT : dayMinT;
   if (past && ddSecT == 0) strcpy(b, "--");
   else                     snprintf(b, sizeof(b), "%.1f", (tMin < 900) ? tMin : gTemp);
-  drawTxt(178, 144, b, cMuted, cBg, 2);
+  drawTxt(178, y0 + 10, b, cMuted, cBg, 2);
 
   const float* arrT = past ? dayT : h24T;
   drawHourTitle(176, arrT, 2, "C", 1);
@@ -7634,12 +7635,33 @@ static void climateDrawBars(int x, int y, int w, int h) {
   drawTxtR(x + w, base + 4, "23", cMuted, cBg, 1);
 }
 
+static bool climateAnyData() {
+  for (int i = 0; i < 24; i++) if (cliOk[i]) return true;
+  return false;
+}
+
 // ---------------------------------------------------------------- окно климата
 void drawClimateScreen() {
   uiScreen(cBg);
   drawDetailHeader("КЛИМАТ");
 
   if (cliLoadedOff != gDayOffset) climateLoadDay(gDayOffset);
+  // если за выбранный день истории климата нет — откатываемся к более свежему
+  {
+    int guard = 0;
+    bool moved = false;
+    while (gDayOffset > 0 && !climateAnyData() && guard++ < 30) {
+      gDayOffset--;
+      moved = true;
+      climateLoadDay(gDayOffset);
+    }
+    if (moved) {
+      // подпись дня должна соответствовать данным, иначе в шапке чужая дата
+      char ddate[12], dlabel[8];
+      if (dayDate(gDayOffset, ddate, sizeof(ddate), dlabel, sizeof(dlabel)))
+        memcpy(gDayLabel, dlabel, sizeof(gDayLabel));
+    }
+  }
 
   char b[40];
   float et = isnan(envT) ? 0.0f : envT;
@@ -8196,8 +8218,8 @@ void refreshWindow() {
       }
       break;
     case SCR_TEMP:
-      uiFill(10,  50, 214, 60, cBg);    // цифры и метка получения
-      if (gDayOffset == 0) uiFill(10, 116, 216, 56, cBg);  // макс / средняя / мин
+      uiFill(10,  50, 214, 68, cBg);    // цифры 52..116 — чистим с запасом
+      if (gDayOffset == 0) uiFill(10, 118, 216, 56, cBg);  // макс / средняя / мин
       break;
     case SCR_POWER:
       uiFill(10,  50, 214, 60, cBg);    // цифры и метка получения
@@ -12032,7 +12054,7 @@ void webSetup() {
     // датчики I2C добавляем после snprintf: формат не разрастается
     String dj = String(b);
     dj.remove(dj.length() - 1);          // убираем закрывающую }
-    dj += "," + envJson() + "}";
+    dj += "," + envJson() + ",\"ui\":3}";
     gWeb.send(200, "application/json", dj);
   });
 
