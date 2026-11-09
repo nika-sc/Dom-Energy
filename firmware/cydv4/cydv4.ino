@@ -7375,10 +7375,10 @@ void drawMain() {
   else                snprintf(b, sizeof(b), "%.1f", gPower);
   int pdh = 21, pgap = 9;
   int pw = seg7W(b, pdh, pgap);
-  seg7Str(pb.x + pb.w - 8 - pw, pb.y + 17, pdh, b, cPOWER_ACC, pgap);
+  seg7Str(pb.x + 6, pb.y + 17, pdh, b, cPOWER_ACC, pgap);
+  drawTxt(pb.x + 6 + pw + 4, pb.y + 26, "ВТ", cMuted, cSurf, 1);
   snprintf(b, sizeof(b), "%.2f А", gCurrent);
   drawTxt(pb.x + 6, pb.y + 45, b, cMuted, cSurf, 1);
-  drawTxtR(pb.x + pb.w - 6, pb.y + 45, "ВТ", cMuted, cSurf, 1);
 
   // ---- сегодня
   const Block& db = BLOCKS[3];
@@ -7572,11 +7572,6 @@ static int   cliLoadedOff = -1;
 static void climateLoadDay(int off) {
   for (int i = 0; i < 24; i++) { cliT[i] = 0; cliOk[i] = false; }
   if (!envOk) return;
-  if (off == 0) {
-    for (int i = 0; i < 24; i++) { cliT[i] = envHourT[i]; cliOk[i] = envHourOk[i]; }
-    cliLoadedOff = 0;
-    return;
-  }
   long nowE = nowLocalEpoch();
   if (nowE <= 0) { cliLoadedOff = -1; return; }
   String want = dateFromEpoch(nowE - (long)off * 86400L);
@@ -7596,6 +7591,10 @@ static void climateLoadDay(int off) {
     if (hh >= 0 && hh < 24) { cliT[hh] = v; cliOk[hh] = true; }
   }
   f.close();
+  if (off == 0) {
+    // сегодня: память точнее журнала (в ней 30-секундные данные), она главнее
+    for (int i = 0; i < 24; i++) if (envHourOk[i]) { cliT[i] = envHourT[i]; cliOk[i] = true; }
+  }
   cliLoadedOff = off;
 }
 
@@ -12052,7 +12051,7 @@ void webSetup() {
     // датчики I2C добавляем после snprintf: формат не разрастается
     String dj = String(b);
     dj.remove(dj.length() - 1);          // убираем закрывающую }
-    dj += "," + envJson() + ",\"ui\":4}";
+    dj += "," + envJson() + ",\"ui\":5}";
     gWeb.send(200, "application/json", dj);
   });
 
@@ -13139,6 +13138,20 @@ void webSetup() {
   });
 
   gWeb.on("/climate", []() {
+    // ?data=1 — что сейчас на графике климата (24 часа)
+    if (gWeb.hasArg("data")) {
+      climateLoadDay(0);
+      String dj = "{\"ok\":true,\"hours\":[";
+      int n = 0;
+      for (int i = 0; i < 24; i++) {
+        if (i) dj += ',';
+        if (cliOk[i]) { dj += String(cliT[i], 1); n++; }
+        else dj += "null";
+      }
+      dj += "],\"n\":" + String(n) + "}";
+      gWeb.send(200, "application/json; charset=utf-8", dj);
+      return;
+    }
     // ?clean=1 — почистить /climate.csv: одна строка на час, без мусорного давления
     if (!gWeb.hasArg("clean")) {
       File f = SD.open("/climate.csv", FILE_READ);
