@@ -7336,13 +7336,14 @@ void drawMain() {
   drawTxt(vb.x + VSZ + 8, vb.y + 4, "ТЕМП РЕЛЕ", cMuted, cSurf, 1);
   if (gTempValid) snprintf(b, sizeof(b), "%.1f", gTemp);
   else            strcpy(b, "--");
-  int tdh = 20, tgap = 4;
-  seg7Str(vb.x + VSZ + 8, vb.y + 16, tdh, b, cTEMP_ACC, tgap);
-  drawTxt(vb.x + VSZ + 8 + seg7W(b, tdh, tgap) + 3, vb.y + 26, "C", cMuted, cSurf, 1);
-  if (dayTSec) snprintf(b, sizeof(b), "СР %.1f", (float)(daySumT / dayTSec));
-  else         strcpy(b, "СР --");
-  drawTxt(vb.x + VSZ + 8, vb.y + 44, b, cMuted, cSurf, 1);
-  drawTxt(vb.x + VSZ + 8, vb.y + 56, "КОРПУС", cMuted, cSurf, 1);
+  int tdh = 32, tgap = 4;                       // было 20 — как крупно у напряжения
+  int tw2 = seg7W(b, tdh, tgap);
+  while (tw2 > 92 && tdh > 24) { tdh -= 2; tw2 = seg7W(b, tdh, tgap); }
+  seg7Str(vb.x + VSZ + 8, vb.y + 14, tdh, b, cTEMP_ACC, tgap);
+  drawTxt(vb.x + VSZ + 8 + tw2 + 3, vb.y + 14 + tdh - 10, "C", cMuted, cSurf, 1);
+  if (dayTSec) snprintf(b, sizeof(b), "СР %.1f за сутки", (float)(daySumT / dayTSec));
+  else         strcpy(b, "СР -- за сутки");
+  drawTxt(vb.x + VSZ + 8, vb.y + 52, b, cMuted, cSurf, 1);
 
   // ---- климат в комнате (AHT20 + BMP280) вместо температуры реле
   const Block& tb = BLOCKS[1];
@@ -7521,45 +7522,42 @@ void drawTempScreen() {
 
   char b[40];
   snprintf(b, sizeof(b), "%.1f", gTemp);
-  int dh = 64, gap = 7;                     // было 46 → 64
+  int dh = 46, gap = 7;
   int tw = seg7W(b, dh, gap);
-  while (tw > 170 && dh > 44) { dh -= 4; tw = seg7W(b, dh, gap); }
-  seg7Str(12, 52, dh, b, cTEMP_ACC, gap);
-  drawTxt(12 + tw + 8, 52 + dh - 22, "C", cMuted, cBg, 2);
-
-  drawTxt(12, 52 + dh + 4, "КОРПУС РЕЛЕ", cMuted, cBg, 1);
-  drawStamp(120, 52 + dh + 4, gTempMs, cBg);
+  seg7Str(12, 54, dh, b, cTEMP_ACC, gap);
+  drawTxt(12 + tw + 8, 80, "C", cMuted, cBg, 2);
+  drawStamp(12, 104, gTempMs, cBg);
+  drawTxt(12, 116, "ТЕМПЕРАТУРА КОРПУСА РЕЛЕ", cMuted, cBg, 1);
 
   // Показатели — за ВЫБРАННЫЙ день (сегодня из day*, прошлый из dd*).
   bool past = (gDayOffset > 0);
-  int y0 = 52 + dh + 18;
   char lab[40];
   if (past) snprintf(lab, sizeof(lab), "МАКС ЗА %s", gDayLabel);
   else      snprintf(lab, sizeof(lab), "МАКС ЗА СУТКИ");
-  drawTxt(12, y0, lab, cMuted, cBg, 1);
+  drawTxt(12, 126, lab, cMuted, cBg, 1);
   float tMax = past ? ddMaxT : dayMaxT;
   if (past && ddSecT == 0) strcpy(b, "--");
   else                     snprintf(b, sizeof(b), "%.1f", (tMax > -100) ? tMax : gTemp);
-  drawTxt(12, y0 + 10, b, cTEMP_ACC, cBg, 3);
+  drawTxt(12, 136, b, cTEMP_ACC, cBg, 3);
   hhmm(past ? ddMaxTMin : dayMaxTMin, b, sizeof(b));
-  drawTxt(12, y0 + 34, b, cMuted, cBg, 1);
+  drawTxt(12, 160, b, cMuted, cBg, 1);
 
-  drawTxt(100, y0, "СРЕДНЯЯ", cMuted, cBg, 1);
+  drawTxt(100, 126, "СРЕДНЯЯ", cMuted, cBg, 1);
   if (past && ddSecT == 0) strcpy(b, "--");
   else snprintf(b, sizeof(b), "%.1f", past ? (ddSecT ? (float)(ddSumT / ddSecT) : gTemp)
                                            : (dayTSec ? (float)(daySumT / dayTSec) : gTemp));
-  drawTxt(100, y0 + 10, b, cText, cBg, 2);
+  drawTxt(100, 136, b, cText, cBg, 2);
 
-  drawTxt(178, y0, "МИН", cMuted, cBg, 1);
+  drawTxt(100, 162, "МИН", cMuted, cBg, 1);
   float tMin = past ? ddMinT : dayMinT;
   if (past && ddSecT == 0) strcpy(b, "--");
   else                     snprintf(b, sizeof(b), "%.1f", (tMin < 900) ? tMin : gTemp);
-  drawTxt(178, y0 + 10, b, cMuted, cBg, 2);
+  drawTxt(148, 162, b, cMuted, cBg, 1);
 
   const float* arrT = past ? dayT : h24T;
   drawHourTitle(176, arrT, 2, "C", 1);
   if (!gSkipChart)
-    drawHourBars(10, 188, 220, 84, arrT, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
+    drawHourBars(10, 186, 220, 86, arrT, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
   char cap[80];
   if (past) snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА %s", gDayLabel);
   else      snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА КАЖДЫЙ ЧАС");
@@ -12054,7 +12052,7 @@ void webSetup() {
     // датчики I2C добавляем после snprintf: формат не разрастается
     String dj = String(b);
     dj.remove(dj.length() - 1);          // убираем закрывающую }
-    dj += "," + envJson() + ",\"ui\":3}";
+    dj += "," + envJson() + ",\"ui\":4}";
     gWeb.send(200, "application/json", dj);
   });
 
