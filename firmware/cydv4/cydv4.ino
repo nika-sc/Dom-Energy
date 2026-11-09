@@ -356,8 +356,72 @@ void pickTheme() {
   cSky    = C_SKY;
   cGood   = C_KWH;
   cBadC   = C_BAD;
+
+
   cWarn   = tft.color565(217, 119, 6);      // предупреждение — тёмно-янтарный
   cGhost  = tft.color565(226, 232, 240);    // погасшие сегменты
+}
+
+// ---------------------------------------------------------------- скины (темы)
+#define SKIN_N 6
+static const uint8_t SKINS[SKIN_N][12][3] = {
+  // bg, surf, elev, text, muted, line, accent, temp, power, money, good, bad
+  { {248,250,255},{255,255,255},{239,244,255},{15,23,42},{100,116,139},{219,228,245},
+    {37,99,235},{139,92,246},{245,158,11},{219,39,119},{16,185,129},{239,68,68} },   // светлая
+  { {11,17,27},{20,28,42},{28,38,54},{232,238,252},{147,164,190},{36,48,68},
+    {34,211,238},{251,191,36},{52,211,153},{244,114,182},{52,211,153},{248,113,113} }, // тёмная
+  { {0,0,0},{26,26,26},{40,40,40},{255,255,255},{160,160,160},{70,70,70},
+    {255,255,255},{255,255,255},{205,205,205},{255,255,255},{255,255,255},{255,255,255} }, // ЧБ
+  { {255,240,246},{255,255,255},{255,228,238},{60,20,40},{150,90,120},{255,205,225},
+    {236,72,153},{219,39,119},{168,85,247},{190,24,93},{16,185,129},{239,68,68} },   // розовая
+  { {20,8,8},{32,12,12},{48,18,18},{255,230,230},{200,150,150},{80,30,30},
+    {239,68,68},{251,146,60},{250,204,21},{248,113,113},{74,222,128},{255,0,0} },    // красная
+  { {12,10,24},{24,18,42},{36,26,60},{240,240,255},{170,160,210},{60,45,100},
+    {0,229,255},{255,0,200},{170,255,0},{255,230,0},{0,255,150},{255,60,60} },       // радужная
+};
+static const char* SKIN_NAMES[SKIN_N] = { "светлая", "тёмная", "ЧБ", "розовая", "красная", "радужная" };
+int gSkin = 0;
+
+static void applySkin(int n) {
+  if (n < 0) n = 0;
+  if (n >= SKIN_N) n = SKIN_N - 1;
+  gSkin = n;
+  const uint8_t (*s)[3] = SKINS[n];
+  cBg      = tft.color565(s[0][0],  s[0][1],  s[0][2]);
+  cSurf    = tft.color565(s[1][0],  s[1][1],  s[1][2]);
+  cElev    = tft.color565(s[2][0],  s[2][1],  s[2][2]);
+  cText    = tft.color565(s[3][0],  s[3][1],  s[3][2]);
+  cMuted   = tft.color565(s[4][0],  s[4][1],  s[4][2]);
+  cLine    = tft.color565(s[5][0],  s[5][1],  s[5][2]);
+  cAccent  = tft.color565(s[6][0],  s[6][1],  s[6][2]);
+  cTEMP_ACC= tft.color565(s[7][0],  s[7][1],  s[7][2]);
+  cPOWER_ACC=tft.color565(s[8][0], s[8][1],  s[8][2]);
+  C_MONEY  = tft.color565(s[9][0],  s[9][1],  s[9][2]);
+  cGood    = tft.color565(s[10][0], s[10][1], s[10][2]);
+  cBadC    = tft.color565(s[11][0], s[11][1], s[11][2]);
+  C_KWH    = cGood;
+}
+
+static void skinSave(int n) {
+  Preferences p;
+  if (!p.begin("ui", false)) return;
+  p.putUChar("skin", (uint8_t)n);
+  p.end();
+}
+static int skinLoad() {
+  Preferences p;
+  if (!p.begin("ui", true)) return 0;
+  int n = p.getUChar("skin", 0);
+  p.end();
+  return n;
+}
+
+// единый стиль цифр на главном экране: семь сегментов, одна высота
+static int bigNum(int x, int y, const char* s, uint16_t col, int maxW, int wantH = 26) {
+  int dh = wantH, gap = 5;
+  while (seg7W(s, dh, gap) > maxW && dh > 16) { dh -= 2; gap = (dh >= 24) ? 5 : 4; }
+  seg7Str(x, y, dh, s, col, gap);
+  return dh;
 }
 
 // буквы с разрядкой — для подписей
@@ -7323,10 +7387,9 @@ void drawMain() {
 
   strcpy(b, vok ? "" : "---");
   if (vok) snprintf(b, sizeof(b), "%.0f", gVoltage);
-  int vdh = 30, vgap = 5;
-  seg7Str(vb.x + 7, vb.y + 14, vdh, b, vc, vgap);
-  int vw = seg7W(b, vdh, vgap);
-  drawTxt(vb.x + 7 + vw + 5, vb.y + 26, "В", cMuted, cSurf, 1);
+  int vdh = bigNum(vb.x + 7, vb.y + 14, b, vc, 70);
+  int vw = seg7W(b, vdh, 5);
+  drawTxt(vb.x + 7 + vw + 5, vb.y + 14 + vdh - 10, "В", cMuted, cSurf, 1);
 
   snprintf(b, sizeof(b), "МИН %.0f  МАКС %.0f", (dayMinV < 900) ? dayMinV : 0, dayMaxV);
   drawTxt(vb.x + 7, vb.y + 46, b, cMuted, cSurf, 1);
@@ -7336,10 +7399,8 @@ void drawMain() {
   drawTxt(vb.x + VSZ + 8, vb.y + 4, "ТЕМП РЕЛЕ", cMuted, cSurf, 1);
   if (gTempValid) snprintf(b, sizeof(b), "%.1f", gTemp);
   else            strcpy(b, "--");
-  int tdh = 32, tgap = 4;                       // было 20 — как крупно у напряжения
-  int tw2 = seg7W(b, tdh, tgap);
-  while (tw2 > 92 && tdh > 24) { tdh -= 2; tw2 = seg7W(b, tdh, tgap); }
-  seg7Str(vb.x + VSZ + 8, vb.y + 14, tdh, b, cTEMP_ACC, tgap);
+  int tdh = bigNum(vb.x + VSZ + 8, vb.y + 14, b, cTEMP_ACC, 92);
+  int tw2 = seg7W(b, tdh, 5);
   drawTxt(vb.x + VSZ + 8 + tw2 + 3, vb.y + 14 + tdh - 10, "C", cMuted, cSurf, 1);
   if (dayTSec) snprintf(b, sizeof(b), "СР %.1f за сутки", (float)(daySumT / dayTSec));
   else         strcpy(b, "СР -- за сутки");
@@ -7352,9 +7413,8 @@ void drawMain() {
   if (envOk) {
     float et = isnan(envT) ? 0.0f : envT;
     snprintf(b, sizeof(b), "%.1f", et);
-    int dh2 = 20;
-    seg7Str(tb.x + 7, tb.y + 17, dh2, b, cTEMP_ACC, 6);
-    drawTxt(tb.x + 7 + seg7W(b, dh2, 6) + 3, tb.y + 26, "C", cMuted, cSurf, 1);
+    int dh2 = bigNum(tb.x + 7, tb.y + 16, b, cTEMP_ACC, 76);
+    drawTxt(tb.x + 7 + seg7W(b, dh2, 5) + 3, tb.y + 16 + dh2 - 10, "C", cMuted, cSurf, 1);
     float eh = isnan(envH) ? 0.0f : envH;
     float ep = isnan(envP) ? 0.0f : envP * 0.75006f;
     snprintf(b, sizeof(b), "%.0f%%  %.0f", eh, ep);
@@ -7373,10 +7433,9 @@ void drawMain() {
   drawTxt(pb.x + 6, pb.y + 5, "МОЩНОСТЬ", cMuted, cSurf, 1);
   if (gPower >= 1000) snprintf(b, sizeof(b), "%.0f", gPower);
   else                snprintf(b, sizeof(b), "%.1f", gPower);
-  int pdh = 21, pgap = 9;
-  int pw = seg7W(b, pdh, pgap);
-  seg7Str(pb.x + 6, pb.y + 17, pdh, b, cPOWER_ACC, pgap);
-  drawTxt(pb.x + 6 + pw + 4, pb.y + 26, "ВТ", cMuted, cSurf, 1);
+  int pdh = bigNum(pb.x + 6, pb.y + 16, b, cPOWER_ACC, 78);
+  int pw = seg7W(b, pdh, 5);
+  drawTxt(pb.x + 6 + pw + 4, pb.y + 16 + pdh - 10, "ВТ", cMuted, cSurf, 1);
   snprintf(b, sizeof(b), "%.2f А", gCurrent);
   drawTxt(pb.x + 6, pb.y + 45, b, cMuted, cSurf, 1);
 
@@ -7387,11 +7446,14 @@ void drawMain() {
   // Те же правила, что в окне ИТОГИ: компактное число и подгонка масштаба,
   // иначе 100 кВт*ч и 1000 руб. налезали друг на друга.
   fmtVal(b, sizeof(b), myTodayKwh);
-  drawTxt(db.x + 8, db.y + 14, b, cGood, cSurf, fitScale(b, 100, 3));
-  drawTxt(db.x + 8, db.y + 38, "КВТ*Ч", cMuted, cSurf, 1);
+  bigNum(db.x + 8, db.y + 14, b, cGood, 100, 24);
+  drawTxt(db.x + 8, db.y + 40, "КВТ*Ч", cMuted, cSurf, 1);
   fmtVal(b, sizeof(b), myTodayCost);
-  drawTxtR(db.x + db.w - 8, db.y + 14, b, C_MONEY, cSurf, fitScale(b, 100, 3));
-  drawTxtR(db.x + db.w - 8, db.y + 38, "РУБ", cMuted, cSurf, 1);
+  {
+    int bw = seg7W(b, 24, 5);
+    bigNum(db.x + db.w - 8 - bw, db.y + 14, b, C_MONEY, 100, 24);
+  }
+  drawTxtR(db.x + db.w - 8, db.y + 40, "РУБ", cMuted, cSurf, 1);
   snprintf(b, sizeof(b), "ВЧЕРА %.2f", yKwh);
   drawTxt(db.x + 8, db.y + 52, b, cMuted, cSurf, 1);
   snprintf(b, sizeof(b), "МЕСЯЦ %.1f", mKwh);
@@ -12051,7 +12113,7 @@ void webSetup() {
     // датчики I2C добавляем после snprintf: формат не разрастается
     String dj = String(b);
     dj.remove(dj.length() - 1);          // убираем закрывающую }
-    dj += "," + envJson() + ",\"ui\":5}";
+    dj += "," + envJson() + ",\"ui\":6,\"skin\":" + String(gSkin) + "}";
     gWeb.send(200, "application/json", dj);
   });
 
@@ -13137,7 +13199,24 @@ void webSetup() {
     gWeb.send(200, "application/json", "{\"ok\":true,\"sound\":\"" + s + "\"}");
   });
 
-  gWeb.on("/climate", []() {
+  gWeb.on("/skin", []() {
+    if (gWeb.hasArg("n")) {
+      int n = gWeb.arg("n").toInt();
+      applySkin(n);
+      skinSave(gSkin);
+      drawScreen();
+      gLastDraw = millis();
+    }
+    String out = "{\"ok\":true,\"skin\":" + String(gSkin) + ",\"themes\":[";
+    for (int i = 0; i < SKIN_N; i++) {
+      if (i) out += ',';
+      out += "{\"id\":" + String(i) + ",\"name\":\"" + String(SKIN_NAMES[i]) + "\"}";
+    }
+    out += "]}";
+    gWeb.send(200, "application/json; charset=utf-8", out);
+  });
+
+gWeb.on("/climate", []() {
     // ?data=1 — что сейчас на графике климата (24 часа)
     if (gWeb.hasArg("data")) {
       climateLoadDay(0);
@@ -13545,6 +13624,7 @@ void setup() {
   dispPwmBegin();      // ШИМ подсветки до tft.init()
   ledInit();           // синий на время загрузки
   gLedBootUntil = millis() + 3000;
+  applySkin(skinLoad());    // тема оформления из NVS
   envBegin();               // I2C: AHT20 + BMP280 на IO27/IO22
   beepInit();
   beepBoot();          // короткий тихий сигнал загрузки          // динамик: тишина (звук по умолчанию выключен)
