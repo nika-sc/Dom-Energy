@@ -6765,7 +6765,7 @@ String envJson() {
   // данные считаем живыми, только если читали их недавно (5 минут)
   bool fresh = envOk && envReadAt && (millis() - envReadAt < 300000UL);
   long age = envReadAt ? (long)((millis() - envReadAt) / 1000UL) : -1;
-  snprintf(b, sizeof(b), "\"eok\":%d,\"et\":%.1f,\"eh\":%.1f,\"ep\":%.1f,\"eage\":%ld",
+  snprintf(b, sizeof(b), "\"eok\":%d,\"et\":%.1f,\"eh\":%.1f,\"ep\":%.1f,\"envAge\":%ld",
            fresh ? 1 : 0, isnan(envT) ? 0.0f : envT, isnan(envH) ? 0.0f : envH,
            isnan(envP) ? 0.0f : envP, age);
   return String(b);
