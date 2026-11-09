@@ -7521,42 +7521,44 @@ void drawTempScreen() {
 
   char b[40];
   snprintf(b, sizeof(b), "%.1f", gTemp);
-  int dh = 46, gap = 7;
+  int dh = 58, gap = 8;                 // крупнее: было 46
   int tw = seg7W(b, dh, gap);
-  seg7Str(12, 54, dh, b, cTEMP_ACC, gap);
-  drawTxt(12 + tw + 8, 80, "C", cMuted, cBg, 2);
-  drawStamp(12, 104, gTempMs, cBg);
-  drawTxt(12, 116, "ТЕМПЕРАТУРА КОРПУСА РЕЛЕ", cMuted, cBg, 1);
+  if (tw > 168) { dh = 52; gap = 7; tw = seg7W(b, dh, gap); }
+  seg7Str(12, 56, dh, b, cTEMP_ACC, gap);
+  drawTxt(12 + tw + 8, 56 + dh - 24, "C", cMuted, cBg, 2);
+
+  drawTxt(12, 120, "КОРПУС РЕЛЕ", cMuted, cBg, 1);
+  drawStamp(120, 120, gTempMs, cBg);
 
   // Показатели — за ВЫБРАННЫЙ день (сегодня из day*, прошлый из dd*).
   bool past = (gDayOffset > 0);
   char lab[40];
   if (past) snprintf(lab, sizeof(lab), "МАКС ЗА %s", gDayLabel);
   else      snprintf(lab, sizeof(lab), "МАКС ЗА СУТКИ");
-  drawTxt(12, 126, lab, cMuted, cBg, 1);
+  drawTxt(12, 134, lab, cMuted, cBg, 1);
   float tMax = past ? ddMaxT : dayMaxT;
   if (past && ddSecT == 0) strcpy(b, "--");
   else                     snprintf(b, sizeof(b), "%.1f", (tMax > -100) ? tMax : gTemp);
-  drawTxt(12, 136, b, cTEMP_ACC, cBg, 3);
+  drawTxt(12, 144, b, cTEMP_ACC, cBg, 3);
   hhmm(past ? ddMaxTMin : dayMaxTMin, b, sizeof(b));
-  drawTxt(12, 160, b, cMuted, cBg, 1);
+  drawTxt(12, 168, b, cMuted, cBg, 1);
 
-  drawTxt(100, 126, "СРЕДНЯЯ", cMuted, cBg, 1);
+  drawTxt(100, 134, "СРЕДНЯЯ", cMuted, cBg, 1);
   if (past && ddSecT == 0) strcpy(b, "--");
   else snprintf(b, sizeof(b), "%.1f", past ? (ddSecT ? (float)(ddSumT / ddSecT) : gTemp)
                                            : (dayTSec ? (float)(daySumT / dayTSec) : gTemp));
-  drawTxt(100, 136, b, cText, cBg, 2);
+  drawTxt(100, 144, b, cText, cBg, 2);
 
-  drawTxt(100, 162, "МИН", cMuted, cBg, 1);
+  drawTxt(178, 134, "МИН", cMuted, cBg, 1);
   float tMin = past ? ddMinT : dayMinT;
   if (past && ddSecT == 0) strcpy(b, "--");
   else                     snprintf(b, sizeof(b), "%.1f", (tMin < 900) ? tMin : gTemp);
-  drawTxt(148, 162, b, cMuted, cBg, 1);
+  drawTxt(178, 144, b, cMuted, cBg, 2);
 
   const float* arrT = past ? dayT : h24T;
   drawHourTitle(176, arrT, 2, "C", 1);
   if (!gSkipChart)
-    drawHourBars(10, 186, 220, 86, arrT, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
+    drawHourBars(10, 188, 220, 84, arrT, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
   char cap[80];
   if (past) snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА %s", gDayLabel);
   else      snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА КАЖДЫЙ ЧАС");
@@ -7664,11 +7666,15 @@ void drawClimateScreen() {
   drawTxtC(80, 150, (gDayOffset == 0) ? "СЕГОДНЯ" : gDayLabel,
            (gDayOffset == 0) ? cGood : cText, cBg, 1);
   {
-    float sum = 0; int cnt = 0;
-    for (int i = 0; i < 24; i++) if (cliOk[i]) { sum += cliT[i]; cnt++; }
-    char sb[24];
-    if (cnt) snprintf(sb, sizeof(sb), "СР %.1f C", sum / cnt);
-    else     strcpy(sb, "--");
+    char sb[28];
+    if (gChartHour >= 0 && cliOk[gChartHour]) {
+      snprintf(sb, sizeof(sb), "%02d: %.1f C", gChartHour, cliT[gChartHour]);
+    } else {
+      float sum = 0; int cnt = 0;
+      for (int i = 0; i < 24; i++) if (cliOk[i]) { sum += cliT[i]; cnt++; }
+      if (cnt) snprintf(sb, sizeof(sb), "СР %.1f C", sum / cnt);
+      else     strcpy(sb, "--");
+    }
     drawTxtR(234, 150, sb, cMuted, cBg, 1);
   }
   if (!gSkipChart) climateDrawBars(10, 166, 220, 108);
@@ -8218,7 +8224,8 @@ bool inRect(int x, int y, int rx, int ry, int rw, int rh) {
 
 // Области графиков: {x, y, w, h}. Столбики идут от x шагом 9 px, 24 штуки.
 static const int CHART_VOLT[4]  = { 10, 202, 220, 86 };
-static const int CHART_TEMP[4]  = { 10, 186, 220, 86 };
+static const int CHART_TEMP[4]  = { 10, 188, 220, 84 };
+static const int CHART_CLIMATE[4] = { 10, 166, 220, 108 };
 static const int CHART_POWER[4] = { 10, 214, 220, 72 };
 
 // ---------------------------------------------------------------- листание дней
@@ -8233,6 +8240,7 @@ static int chartTitleY() {
 static const int* chartRect() {
   if (gScreen == SCR_VOLT)  return CHART_VOLT;
   if (gScreen == SCR_TEMP)  return CHART_TEMP;
+  if (gScreen == SCR_CLIMATE) return CHART_CLIMATE;
   if (gScreen == SCR_POWER) return CHART_POWER;
   return NULL;
 }
