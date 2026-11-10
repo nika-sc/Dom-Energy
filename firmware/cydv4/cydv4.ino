@@ -7641,6 +7641,7 @@ static void climateLoadDay(int off) {
   if (!f) { cliLoadedOff = -1; return; }
   int guard = 0;
   while (f.available() && guard++ < 4000) {
+    if ((guard & 127) == 0) { yield(); esp_task_wdt_reset(); }
     String l = f.readStringUntil('\n');
     l.trim();
     if (l.length() < 20 || !l.startsWith(want)) continue;
@@ -7683,9 +7684,9 @@ static void climateDrawBars(int x, int y, int w, int h) {
       bh = 6 + (int)(k * (h - 24));
     }
     int bx = x + i * PITCH;
-    // выбранный час (тап по столбику) подсвечиваем ярко, как на экране температуры
-    bool selected = (gChartHour == i);
-    bool current  = (gChartHour < 0 && gDayOffset == 0 && i == nowH);
+    // пустой час выбрать нельзя; текущий час остаётся зелёным даже при выборе другого
+    bool selected = (gChartHour == i && cliOk[i]);
+    bool current  = (gDayOffset == 0 && i == nowH);
     if (selected)                     uiFill(bx, base - bh, BW, bh, cTEMP_ACC);
     else if (current)                 uiFill(bx, base - bh, BW, bh, cGood);
     else if (bh > 0)                  uiFill(bx, base - bh, BW, bh, cAccent);
@@ -8404,6 +8405,8 @@ void handleTapAt(int x, int y) {
       int hour = (x - ch[0]) / 9;
       if (hour < 0)  hour = 0;
       if (hour > 23) hour = 23;
+      // в климате нельзя выбрать час без данных — иначе пустая рамка и «HH: --»
+      if (gScreen == SCR_CLIMATE && !cliOk[hour]) return;
       gChartHour = (gChartHour == hour) ? -1 : hour;   // повторно — назад к текущему
       drawScreen();
       gLastDraw = millis();
@@ -12125,7 +12128,7 @@ void webSetup() {
     // датчики I2C добавляем после snprintf: формат не разрастается
     String dj = String(b);
     dj.remove(dj.length() - 1);          // убираем закрывающую }
-    dj += "," + envJson() + ",\"ui\":7,\"skin\":" + String(gSkin) + "}";
+    dj += "," + envJson() + ",\"ui\":8,\"skin\":" + String(gSkin) + "}";
     gWeb.send(200, "application/json", dj);
   });
 
@@ -12330,6 +12333,14 @@ void webSetup() {
   // Диагностика тача без COM-порта: /tap?x=120&y=82 возвращает номер экрана.
   // Нужна для проверки диспетчера, когда USB-порт занят монитором.
   gWeb.on("/tap", []() {
+    // для диагностики: HTTP-тап показываем так же, как физический
+    if (gWeb.hasArg("x") && gWeb.hasArg("y")) {
+      gTapRawX = gWeb.arg("x").toInt();
+      gTapRawY = gWeb.arg("y").toInt();
+      gTapMapX = gTapRawX;
+      gTapMapY = gTapRawY;
+    }
+
     if (!gWeb.hasArg("x") || !gWeb.hasArg("y")) {
       gWeb.send(400, "application/json", "{\"err\":\"x,y\"}");
       return;
@@ -13033,11 +13044,20 @@ void webSetup() {
   });
 
   gWeb.on("/range", []() {
+    // без параметров отдаём сегодняшний день, а не ошибку
+    String f, tt;
     if (!gWeb.hasArg("from") || !gWeb.hasArg("to")) {
-      gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"from/to\"}");
-      return;
+      long nowE0 = nowLocalEpoch();
+      if (nowE0 <= 0) {
+        gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"from/to\"}");
+        return;
+      }
+      f = dateFromEpoch(nowE0);
+      tt = f;
+    } else {
+      f = gWeb.arg("from");
+      tt = gWeb.arg("to");
     }
-    String f = gWeb.arg("from"), tt = gWeb.arg("to");
     long fE = dateEpoch(f.c_str()), tE = dateEpoch(tt.c_str());
     if (!fE || !tE || tE < fE) {
       gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"bad date\"}");
@@ -13231,7 +13251,7 @@ void webSetup() {
 gWeb.on("/climate", []() {
     // ?data=1 — что сейчас на графике климата (24 часа)
     if (gWeb.hasArg("data")) {
-      climateLoadDay(0);
+      climateLoadDay(gDayOffset);
       String dj = "{\"ok\":true,\"hours\":[";
       int n = 0;
       for (int i = 0; i < 24; i++) {
