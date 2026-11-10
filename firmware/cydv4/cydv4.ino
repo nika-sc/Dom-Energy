@@ -7789,6 +7789,13 @@ void drawClimateScreen() {
   uiScreen(cBg);
   drawDetailHeader("КЛИМАТ");
 
+  // раз в час данные «сегодня» меняются — иначе график замирает до перезагрузки
+  if (gDayOffset == 0) {
+    static int cliHour = -1;
+    struct tm ti3;
+    int hh = getLocalTime(&ti3, 5) ? ti3.tm_hour : -1;
+    if (hh != cliHour) { cliHour = hh; cliLoadedOff = -1; }
+  }
   if (cliLoadedOff != gDayOffset) climateLoadDay(gDayOffset);
   // если за выбранный день истории климата нет — откатываемся к более свежему
   {
@@ -12202,7 +12209,7 @@ void webSetup() {
     // датчики I2C добавляем после snprintf: формат не разрастается
     String dj = String(b);
     dj.remove(dj.length() - 1);          // убираем закрывающую }
-    dj += "," + envJson() + ",\"ui\":9,\"skin\":" + String(gSkin) + "}";
+    dj += "," + envJson() + ",\"ui\":10,\"skin\":" + String(gSkin) + "}";
     gWeb.send(200, "application/json", dj);
   });
 
