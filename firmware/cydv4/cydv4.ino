@@ -7683,9 +7683,20 @@ static void climateDrawBars(int x, int y, int w, int h) {
       bh = 6 + (int)(k * (h - 24));
     }
     int bx = x + i * PITCH;
-    if (i == nowH && gDayOffset == 0) uiFill(bx, base - bh, BW, bh, cTEMP_ACC);
+    // выбранный час (тап по столбику) подсвечиваем ярко, как на экране температуры
+    bool selected = (gChartHour == i);
+    bool current  = (gChartHour < 0 && gDayOffset == 0 && i == nowH);
+    if (selected)                     uiFill(bx, base - bh, BW, bh, cTEMP_ACC);
+    else if (current)                 uiFill(bx, base - bh, BW, bh, cGood);
     else if (bh > 0)                  uiFill(bx, base - bh, BW, bh, cAccent);
     else                              uiFill(bx, base - 2, BW, 2, cLine);
+    if (selected) {
+      // рамка вокруг выбранного столбика, чтобы было видно, что нажали
+      uiFill(bx - 1, base - bh - 1, BW + 2, 1, cText);
+      uiFill(bx - 1, base, BW + 2, 1, cText);
+      uiFill(bx - 1, base - bh - 1, 1, bh + 2, cText);
+      uiFill(bx + BW, base - bh - 1, 1, bh + 2, cText);
+    }
   }
   uiFill(x, base + 1, w, 1, cLine);
   // подписи часов
@@ -7748,8 +7759,9 @@ void drawClimateScreen() {
            (gDayOffset == 0) ? cGood : cText, cBg, 1);
   {
     char sb[28];
-    if (gChartHour >= 0 && cliOk[gChartHour]) {
-      snprintf(sb, sizeof(sb), "%02d: %.1f C", gChartHour, cliT[gChartHour]);
+    if (gChartHour >= 0) {
+      if (cliOk[gChartHour]) snprintf(sb, sizeof(sb), "%02d: %.1f C", gChartHour, cliT[gChartHour]);
+      else                   snprintf(sb, sizeof(sb), "%02d: --", gChartHour);
     } else {
       float sum = 0; int cnt = 0;
       for (int i = 0; i < 24; i++) if (cliOk[i]) { sum += cliT[i]; cnt++; }
@@ -12113,7 +12125,7 @@ void webSetup() {
     // датчики I2C добавляем после snprintf: формат не разрастается
     String dj = String(b);
     dj.remove(dj.length() - 1);          // убираем закрывающую }
-    dj += "," + envJson() + ",\"ui\":6,\"skin\":" + String(gSkin) + "}";
+    dj += "," + envJson() + ",\"ui\":7,\"skin\":" + String(gSkin) + "}";
     gWeb.send(200, "application/json", dj);
   });
 
