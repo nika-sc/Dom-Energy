@@ -46,6 +46,13 @@ struct DayCache {
   int16_t tmin, tmax;
   bool valid;
 };
+struct WDayCache {
+  uint32_t day;
+  float tmin, tmax, rtmin, rtmax;
+  char desc[28];
+  bool ok;
+};
+
 static DayCache* sDayCache = nullptr;   // в куче: 12 КБ статически не влезают в DRAM
 static bool sDayCacheInit = false;
 static bool sDayCacheDirty = false;
@@ -5146,6 +5153,7 @@ static bool weatherLogFind(const char* date, char* desc, size_t dn,
   bool found = false;
   int guard = 0;
   while (f.available() && guard++ < 6000) {
+    if ((guard & 127) == 0) { yield(); esp_task_wdt_reset(); }
     String l = f.readStringUntil('\n');
     l.trim();
     if (l.length() < 12 || !l.startsWith(date)) continue;
@@ -7624,6 +7632,71 @@ void drawTempScreen() {
   if (past) snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА %s", gDayLabel);
   else      snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА КАЖДЫЙ ЧАС");
   drawTxt(10, 284, cap, cMuted, cBg, 1);
+}
+
+// ---------------------------------------------------------------- погода за период одним проходом
+
+// Один проход по /weather.csv: раньше /range открывал файл заново на КАЖДЫЙ день
+// и на 10 днях блокировал loop до 7 секунд.
+static void weatherLoadRange(long fromE, long toE, WDayCache* out, int n) {
+  for (int i = 0; i < n; i++) {
+    out[i].day = (uint32_t)(fromE / 86400L) + i;
+    out[i].tmin = out[i].tmax = out[i].rtmin = out[i].rtmax = 0;
+    out[i].desc[0] = 0;
+    out[i].ok = false;
+  }
+  File f = SD.open("/weather.csv", FILE_READ);
+  if (!f) return;
+  int guard = 0;
+  while (f.available() && guard++ < 20000) {
+    if ((guard & 127) == 0) { yield(); esp_task_wdt_reset(); }
+    String l = f.readStringUntil('\n');
+    l.trim();
+    if (l.length() < 12) continue;
+    long ep = dateEpoch(l.substring(0, 10).c_str());
+    if (ep <= 0) continue;
+    uint32_t d = (uint32_t)(ep / 86400L);
+    int idx = -1;
+    for (int i = 0; i < n; i++) if (out[i].day == d) { idx = i; break; }
+    if (idx < 0) continue;
+    // поля: дата, t_улицы_min, t_улицы_max, [t_реле_min, t_реле_max,] описание, дождь
+    String fd[8];
+    int cnt = 0, from = 0;
+    while (cnt < 8) {
+      int c = l.indexOf(',', from);
+      if (c < 0) { fd[cnt++] = l.substring(from); break; }
+      fd[cnt++] = l.substring(from, c);
+      from = c + 1;
+    }
+    if (cnt < 4) continue;
+    auto isNum = [](const String& s) -> bool {
+      if (!s.length()) return false;
+      for (uint16_t k = 0; k < s.length(); k++) {
+        char ch = s[k];
+        if (!(isdigit((unsigned char)ch) || ch == '-' || ch == '.' || ch == ' ')) return false;
+      }
+      return true;
+    };
+    out[idx].tmin = fd[1].toFloat();
+    out[idx].tmax = fd[2].toFloat();
+    int dstart = 3;
+    if (cnt >= 7 && isNum(fd[3]) && isNum(fd[4])) {
+      out[idx].rtmin = fd[3].toFloat();
+      out[idx].rtmax = fd[4].toFloat();
+      dstart = 5;
+    }
+    String dsc = "";
+    for (int j = dstart; j < cnt - 1; j++) { if (j > dstart) dsc += ','; dsc += fd[j]; }
+    dsc.trim();
+    strncpy(out[idx].desc, dsc.c_str(), sizeof(out[idx].desc) - 1);
+    out[idx].desc[sizeof(out[idx].desc) - 1] = 0;
+    int k2 = (int)strlen(out[idx].desc);
+    while (k2 > 0 && ((unsigned char)out[idx].desc[k2] & 0xC0) == 0x80) k2--;
+    while (k2 > 0 && ((unsigned char)out[idx].desc[k2 - 1] & 0xC0) == 0xC0) k2--;
+    out[idx].desc[k2] = 0;
+    out[idx].ok = true;
+  }
+  f.close();
 }
 
 // ---------------------------------------------------------------- климат: данные выбранного дня
@@ -12020,6 +12093,7 @@ void webSetup() {
   gWeb.on("/", []() { pageSend(); });
 
   gWeb.on("/data", []() {
+    if (gWeb.hasArg("reset")) { gLoopMaxAll = 0; gBlkMs = 0; }
     char b[2400];   // запас: ответ ~800 Б, +новые поля
     char nows[24] = "";
     struct tm ti;
@@ -12128,7 +12202,7 @@ void webSetup() {
     // датчики I2C добавляем после snprintf: формат не разрастается
     String dj = String(b);
     dj.remove(dj.length() - 1);          // убираем закрывающую }
-    dj += "," + envJson() + ",\"ui\":8,\"skin\":" + String(gSkin) + "}";
+    dj += "," + envJson() + ",\"ui\":9,\"skin\":" + String(gSkin) + "}";
     gWeb.send(200, "application/json", dj);
   });
 
@@ -13154,6 +13228,10 @@ void webSetup() {
       dayCacheFlush(false);
     }
 
+    // погода за весь период — одним проходом по файлу
+    static WDayCache wcache[RNG_MAX];
+    weatherLoadRange(fE, tE, wcache, n);
+
     String out = "{\"from\":\"" + f + "\",\"to\":\"" + tt + "\",\"days\":" + String(n);
     float tK = 0, tC = 0, tD = 0, tN = 0;
     uint16_t vmin = 0xFFFF, vmax = 0, pmaxAll = 0;
@@ -13192,9 +13270,12 @@ void webSetup() {
       out += ",\"tmin\":" + String(agg[i].tmin == 999 ? 0 : agg[i].tmin / 10.0f, 1);
       out += ",\"tmax\":" + String(agg[i].tmax == -999 ? 0 : agg[i].tmax / 10.0f, 1);
       {
-        char wdesc[72]; float wtmin = 0, wtmax = 0, rtmin = 0, rtmax = 0;
-        bool okw = weatherLogFind(dateFromEpoch((long)agg[i].day * 86400L).c_str(), wdesc, sizeof(wdesc),
-                                  &wtmin, &wtmax, &rtmin, &rtmax);
+        const WDayCache& wc = wcache[i];
+        char wdesc[28];
+        strncpy(wdesc, wc.desc, sizeof(wdesc) - 1);
+        wdesc[sizeof(wdesc) - 1] = 0;
+        float wtmin = wc.tmin, wtmax = wc.tmax, rtmin = wc.rtmin, rtmax = wc.rtmax;
+        bool okw = wc.ok;
         out += ",\"w\":\"";
         if (okw) { for (char* c = wdesc; *c; c++) { if (*c == '"') *c = '\''; } out += wdesc; }
         out += "\",\"wtmin\":" + String(okw ? wtmin : 0, 1) + ",\"wtmax\":" + String(okw ? wtmax : 0, 1);
@@ -13251,7 +13332,8 @@ void webSetup() {
 gWeb.on("/climate", []() {
     // ?data=1 — что сейчас на графике климата (24 часа)
     if (gWeb.hasArg("data")) {
-      climateLoadDay(gDayOffset);
+      if (cliLoadedOff != gDayOffset) climateLoadDay(gDayOffset);
+      { int g2 = 0; while (gDayOffset > 0 && !climateAnyData() && g2++ < 30) { gDayOffset--; climateLoadDay(gDayOffset); } }
       String dj = "{\"ok\":true,\"hours\":[";
       int n = 0;
       for (int i = 0; i < 24; i++) {
