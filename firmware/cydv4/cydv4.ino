@@ -7273,7 +7273,8 @@ void drawHourTitle(int y, const float* vals, uint8_t bit, const char* unit, int 
     else if (dec)   snprintf(b, sizeof(b), "%02d: %.1f %s", nowH, a, unit);
     else            snprintf(b, sizeof(b), "%02d: %.0f %s", nowH, a, unit);
   }
-  drawTxtR(234, y, b, cMuted, cBg, 1);
+  // выбранный час подсвечиваем цветом, чтобы было видно, что нажал
+  drawTxtR(234, y, b, (gChartHour >= 0) ? cTEMP_ACC : cMuted, cBg, 1);
 }
 
 // 24 столбика: width 8 px, зазор 1 px, шаг 9 px -> 24*9 = 216 px.
@@ -7420,14 +7421,20 @@ void drawMain() {
   drawTxt(tb.x + 7, tb.y + 5, envOk ? "КЛИМАТ" : "ТЕМПЕРАТУРА", cMuted, cSurf, 1);
   if (envOk) {
     float et = isnan(envT) ? 0.0f : envT;
-    snprintf(b, sizeof(b), "%.1f", et);
-    int dh2 = bigNum(tb.x + 7, tb.y + 16, b, cTEMP_ACC, 76);
-    drawTxt(tb.x + 7 + seg7W(b, dh2, 5) + 3, tb.y + 16 + dh2 - 10, "C", cMuted, cSurf, 1);
     float eh = isnan(envH) ? 0.0f : envH;
     float ep = isnan(envP) ? 0.0f : envP * 0.75006f;
-    snprintf(b, sizeof(b), "%.0f%%  %.0f", eh, ep);
-    drawTxt(tb.x + 7, tb.y + 42, b, cAccent, cSurf, 1);
-    drawTxt(tb.x + 7, tb.y + 52, "ВЛАЖН  ДАВЛ", cMuted, cSurf, 1);
+    // температура слева крупно
+    snprintf(b, sizeof(b), "%.1f", et);
+    int dh2 = bigNum(tb.x + 7, tb.y + 16, b, cTEMP_ACC, 64, 24);
+    drawTxt(tb.x + 7 + seg7W(b, dh2, 5) + 2, tb.y + 16 + dh2 - 9, "C", cMuted, cSurf, 1);
+    // влажность и давление — отдельным столбиком справа, без наложений
+    int cx = tb.x + 74;
+    drawTxt(cx, tb.y + 6, "ВЛАЖ", cMuted, cSurf, 1);
+    snprintf(b, sizeof(b), "%.0f%%", eh);
+    drawTxt(cx, tb.y + 15, b, cAccent, cSurf, 2);
+    drawTxt(cx, tb.y + 34, "ДАВЛ", cMuted, cSurf, 1);
+    snprintf(b, sizeof(b), "%.0f", ep);
+    drawTxt(cx, tb.y + 43, b, cText, cSurf, 2);
   } else {
     snprintf(b, sizeof(b), "%.1f", gTemp);
     seg7Str(tb.x + 7, tb.y + 19, 22, b, cTEMP_ACC, 7);
@@ -7629,9 +7636,17 @@ void drawTempScreen() {
   if (!gSkipChart)
     drawHourBars(10, 186, 220, 86, arrT, 2, cTEMP_ACC, tft.color565(221, 214, 254), false);
   char cap[80];
-  if (past) snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА %s", gDayLabel);
-  else      snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА КАЖДЫЙ ЧАС");
-  drawTxt(10, 284, cap, cMuted, cBg, 1);
+  if (gChartHour >= 0) {
+    int nn = 0;
+    float av = hourAverage(arrT, 2, gChartHour, &nn);
+    if (nn) snprintf(cap, sizeof(cap), "%02d:00   %.1f C", gChartHour, av);
+    else    snprintf(cap, sizeof(cap), "%02d:00   нет данных", gChartHour);
+    drawTxt(10, 282, cap, cTEMP_ACC, cBg, 2);
+  } else {
+    if (past) snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА %s", gDayLabel);
+    else      snprintf(cap, sizeof(cap), "СРЕДНЯЯ ТЕМПЕРАТУРА ЗА КАЖДЫЙ ЧАС");
+    drawTxt(10, 284, cap, cMuted, cBg, 1);
+  }
 }
 
 // ---------------------------------------------------------------- погода за период одним проходом
@@ -7853,9 +7868,15 @@ void drawClimateScreen() {
   }
   if (!gSkipChart) climateDrawBars(10, 166, 220, 108);
   char cap[80];
-  if (gDayOffset) snprintf(cap, sizeof(cap), "ТЕМПЕРАТУРА ЗА %s", gDayLabel);
-  else            snprintf(cap, sizeof(cap), "ТЕМПЕРАТУРА ПО ЧАСАМ");
-  drawTxt(10, 288, cap, cMuted, cBg, 1);
+  if (gChartHour >= 0) {
+    if (cliOk[gChartHour]) snprintf(cap, sizeof(cap), "%02d:00   %.1f C", gChartHour, cliT[gChartHour]);
+    else                   snprintf(cap, sizeof(cap), "%02d:00   нет данных", gChartHour);
+    drawTxt(10, 286, cap, cTEMP_ACC, cBg, 2);
+  } else {
+    if (gDayOffset) snprintf(cap, sizeof(cap), "ТЕМПЕРАТУРА ЗА %s", gDayLabel);
+    else            snprintf(cap, sizeof(cap), "ТЕМПЕРАТУРА ПО ЧАСАМ");
+    drawTxt(10, 288, cap, cMuted, cBg, 1);
+  }
 }
 
 // ---------------------------------------------------------------- окно мощности
@@ -12209,7 +12230,7 @@ void webSetup() {
     // датчики I2C добавляем после snprintf: формат не разрастается
     String dj = String(b);
     dj.remove(dj.length() - 1);          // убираем закрывающую }
-    dj += "," + envJson() + ",\"ui\":10,\"skin\":" + String(gSkin) + "}";
+    dj += "," + envJson() + ",\"ui\":11,\"skin\":" + String(gSkin) + "}";
     gWeb.send(200, "application/json", dj);
   });
 
