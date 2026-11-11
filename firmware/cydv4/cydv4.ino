@@ -141,12 +141,13 @@ void dispApply();                 // подсветка: определена н
 #include <esp_task_wdt.h>
 #include <esp_system.h>       // esp_reset_reason(): причина последней перезагрузки
 #include "page_html.h"   // шаблон страницы (генерируется build_page.py)
+#include "assets.h"      // /app.css и /app.js (генерируется build_page.py)
 
 #include <mbedtls/gcm.h>
 #include <mbedtls/md.h>
 
 // ---------------------------------------------------------------- настройки
-const char* FW_VER = "4.12.0";
+const char* FW_VER = "4.13";
 
 // ---------------------------------------------------------------- секреты
 // Пароли и ключи НЕ хранятся в репозитории. Скопируйте secrets.example.h
@@ -193,7 +194,7 @@ const char* FORECAST_URL =
 TFT_eSPI tft = TFT_eSPI();
 
 // ---------------------------------------------------------------- экран
-enum { SCR_MAIN = 0, SCR_VOLT, SCR_TEMP, SCR_POWER, SCR_TODAY, SCR_WEATHER, SCR_WATCH, SCR_CLIMATE };
+enum { SCR_MAIN = 0, SCR_VOLT, SCR_TEMP, SCR_POWER, SCR_TODAY, SCR_WEATHER, SCR_WATCH, SCR_CLIMATE, SCR_SETTINGS };
 int gScreen = SCR_MAIN;
 int gChartHour = -1;
 int gCalStep = 0;
@@ -369,6 +370,29 @@ void pickTheme() {
   cGhost  = tft.color565(226, 232, 240);    // погасшие сегменты
 }
 
+// ---------------------------------------------------------------- инверсия панели
+// У части плат CYD матрица ST7789 отвечает «негативом». Раньше это лечилось
+// только пересборкой, теперь — переключателем в настройках (?invert=0|1).
+bool gInvert = true;      // у этой платы матрица «негативом» — так правильно
+
+static void applyInvert() {
+  tft.invertDisplay(gInvert);
+}
+
+static void invertSave() {
+  Preferences p;
+  if (!p.begin("ui", false)) return;
+  p.putBool("inv", gInvert);
+  p.end();
+}
+static bool invertLoad() {
+  Preferences p;
+  if (!p.begin("ui", true)) return true;   // панель «негативом» — это дефолт
+  bool v = p.getBool("inv", true);
+  p.end();
+  return v;
+}
+
 // ---------------------------------------------------------------- скины (темы)
 #define SKIN_N 6
 static const uint8_t SKINS[SKIN_N][12][3] = {
@@ -379,14 +403,16 @@ static const uint8_t SKINS[SKIN_N][12][3] = {
     {34,211,238},{251,191,36},{52,211,153},{244,114,182},{52,211,153},{248,113,113} }, // тёмная
   { {0,0,0},{26,26,26},{40,40,40},{255,255,255},{160,160,160},{70,70,70},
     {255,255,255},{255,255,255},{205,205,205},{255,255,255},{255,255,255},{255,255,255} }, // ЧБ
-  { {255,240,246},{255,255,255},{255,228,238},{60,20,40},{150,90,120},{255,205,225},
-    {236,72,153},{219,39,119},{168,85,247},{190,24,93},{16,185,129},{239,68,68} },   // розовая
-  { {20,8,8},{32,12,12},{48,18,18},{255,230,230},{200,150,150},{80,30,30},
-    {239,68,68},{251,146,60},{250,204,21},{248,113,113},{74,222,128},{255,0,0} },    // красная
+  { {255,224,236},{255,245,250},{255,205,225},{72,16,44},{176,72,116},{250,176,208},
+    {219,39,119},{190,24,93},{147,51,234},{163,20,80},{5,150,105},{220,38,38} },     // розовая
+  { {46,8,8},{62,14,14},{84,22,22},{255,236,236},{224,160,160},{120,44,44},
+    {255,82,82},{255,138,61},{255,214,64},{255,120,120},{74,222,128},{255,40,40} },   // красная
   { {12,10,24},{24,18,42},{36,26,60},{240,240,255},{170,160,210},{60,45,100},
     {0,229,255},{255,0,200},{170,255,0},{255,230,0},{0,255,150},{255,60,60} },       // радужная
 };
 static const char* SKIN_NAMES[SKIN_N] = { "светлая", "тёмная", "ЧБ", "розовая", "красная", "радужная" };
+// шрифт платы 5x7 — только заглавные, поэтому на экране отдельный список
+static const char* SKIN_NAMES_UP[SKIN_N] = { "СВЕТЛАЯ", "ТЁМНАЯ", "ЧБ", "РОЗОВАЯ", "КРАСНАЯ", "РАДУЖНАЯ" };
 int gSkin = 0;
 
 static void applySkin(int n) {
@@ -407,6 +433,17 @@ static void applySkin(int n) {
   cGood    = tft.color565(s[10][0], s[10][1], s[10][2]);
   cBadC    = tft.color565(s[11][0], s[11][1], s[11][2]);
   C_KWH    = cGood;
+  C_OK     = cGood;
+  C_BAD    = cBadC;
+  cWarn    = cPOWER_ACC;
+  cSky     = cAccent;
+  cGhost   = cMuted;
+  cAccent2 = cAccent;
+  C_VOLT   = cAccent;
+  C_TEMP   = cTEMP_ACC;
+  C_POWER  = cPOWER_ACC;
+  C_MONEY  = C_MONEY;
+  C_SKY    = cSky;
 }
 
 static void skinSave(int n) {
@@ -5885,7 +5922,7 @@ void drawTopBar() {
   uiFill(0, 0, 240, 1, cAccent);
   uiFill(0, HDR_H - 1, 240, 1, cLine);
 
-  drawTxt(8, 6, "ДОМ", cText, cSurf, 3);
+  drawTxt(8, 14, "ДОМ — ЭНЕРГИЯ", cText, cSurf, 2);
   drawTxt(8, 30, FW_VER, cMuted, cSurf, 1);
 
   struct tm ti;
@@ -5894,11 +5931,11 @@ void drawTopBar() {
                                  "ИЮЛ", "АВГ", "СЕН", "ОКТ", "НОЯ", "ДЕК" };
     char b[20];
     snprintf(b, sizeof(b), "%02d:%02d", ti.tm_hour, ti.tm_min);
-    drawTxtR(232, 6, b, cText, cSurf, 3);
+    drawTxtR(232, 14, b, cText, cSurf, 2);   // мельче: иначе наезжает на название
     snprintf(b, sizeof(b), "%d %s", ti.tm_mday, MON[ti.tm_mon]);
     drawTxtR(232, 30, b, cMuted, cSurf, 1);
   } else {
-    drawTxtR(232, 10, "--:--", cMuted, cSurf, 3);
+    drawTxtR(232, 14, "--:--", cMuted, cSurf, 2);
   }
 }
 
@@ -6251,7 +6288,7 @@ static const char* EV_NAMES[EV_N] PROGMEM = {
   "загрузка", "перезагрузка", "OTA завершена", "ошибка/защита", "авария U/I",
   "реле включилось", "реле выключилось", "начало часа", "касание экрана"
 };
-static const uint8_t EV_DEFAULT[EV_N] = { 3, 5, 6, 10, 10, 1, 2, 0, 1 };
+static const uint8_t EV_DEFAULT[EV_N] = { 3, 5, 6, 10, 10, 1, 2, 0, 8 };  // тап — «щелчок»
 
 // --- настройки ---
 bool     gBeepOn    = true;       // общий выключатель звука
@@ -6361,11 +6398,23 @@ void sndPlayPreset(uint8_t id, bool alarm) {
     bpSteps++;
   }
   if (!bpSteps) return;
-  bpStep = 0;
-  SndStep s0; memcpy_P(&s0, &bpCur[0], sizeof(s0));
-  bpFreq = s0.f; bpOn = s0.on; bpOff = s0.off;
-  bpSounding = true; bpAt = millis();
-  beepTone(true);
+
+  // Играем СРАЗУ, а не «по шагам в loop()»: loop нагружен (веб, SD, Tuya), и
+  // раньше звук растягивался в разы — при загрузке «гонг» пищал секундами,
+  // при касании «щелчок» приходил с задержкой. Все пресеты короче 500 мс,
+  // поэтому блокирующая последовательность безопасна.
+  for (int i = 0; i < bpSteps; i++) {
+    SndStep s;
+    memcpy_P(&s, &bpCur[i], sizeof(s));
+    if (s.f == 0) break;
+    bpFreq = s.f;
+    beepTone(true);
+    delay(s.on);
+    beepTone(false);
+    if (s.off) delay(s.off);
+  }
+  bpSteps = 0;
+  bpSounding = false;
 }
 
 // событие → пресет
@@ -6380,6 +6429,7 @@ void sndEvent(uint8_t ev) {
 void sndAlarm() { sndPlayPreset(sndEv[EV_ALARM], true); }
 
 void beepTick() {
+  if (bpSteps == 0) { if (bpSounding) { beepTone(false); bpSounding = false; } return; }
   if (!bpSounding && bpStep + 1 >= bpSteps) return;
   unsigned long now = millis();
   if (bpSounding) {
@@ -6506,14 +6556,20 @@ function load(){pv().then(function(j){S=j;
   var m=j.muteLeft||0; q('mutev').textContent=m>0?('ещё '+Math.round(m/60)+' мин'):'';
   var h='<div class="s">Событие → звук</div>';
   j.events.forEach(function(e){
-    h+='<div class="r"><span class="n">'+e.name+'</span><div class="e"><select data-ev="'+e.key+'">';
+    h+='<div class="r"><span class="n">'+e.name+'</span><div class="e"><select data-ev="'+e.key+'" data-saved="'+e.preset+'">';
     j.presets.forEach(function(p){h+='<option value="'+p.id+'"'+(p.id==e.preset?' selected':'')+'>'+p.name+'</option>'});
     h+='</select><button onclick="test(this)">▶</button></div></div>';
   });
   q('evs').innerHTML=h;
 })}
-function test(b){var s=b.parentNode.querySelector('select');
-  fetch('/beep?preset='+s.value).then(function(){b.textContent='✓';setTimeout(function(){b.textContent='▶'},600)})}
+function test(b){var s=b.parentNode.querySelector('select'),ev=s.getAttribute('data-ev');
+  // если в списке выбран другой пресет — слушаем именно его (в той же громкости события),
+  // иначе — ровно тот звук, который плата сыграет на это событие
+  var saved=s.getAttribute('data-saved'), url;
+  if(saved!=null && s.value!==saved){ url='/beep?preset='+s.value; }
+  else { url='/beep?ev='+encodeURIComponent(ev); }
+  fetch(url).then(function(){b.textContent='✓';setTimeout(function(){b.textContent='▶'},600)})
+  .catch(function(){b.textContent='!'})}
 function save(){
   var u='/sound?on='+(q('on').checked?1:0)+'&quiet='+(q('quiet').checked?1:0)+
         '&vol='+q('vol').value+'&nvol='+q('nvol').value;
@@ -7701,7 +7757,8 @@ static void weatherLoadRange(long fromE, long toE, WDayCache* out, int n) {
       dstart = 5;
     }
     String dsc = "";
-    for (int j = dstart; j < cnt - 1; j++) { if (j > dstart) dsc += ','; dsc += fd[j]; }
+    int lastIdx = (cnt >= 5) ? (cnt - 1) : cnt;   // без 5-го поля «дождь»
+    for (int j = dstart; j < lastIdx; j++) { if (j > dstart) dsc += ','; dsc += fd[j]; }
     dsc.trim();
     strncpy(out[idx].desc, dsc.c_str(), sizeof(out[idx].desc) - 1);
     out[idx].desc[sizeof(out[idx].desc) - 1] = 0;
@@ -7797,6 +7854,49 @@ static void climateDrawBars(int x, int y, int w, int h) {
 static bool climateAnyData() {
   for (int i = 0; i < 24; i++) if (cliOk[i]) return true;
   return false;
+}
+
+// ---------------------------------------------------------------- настройки (скин, яркость, звук)
+void drawSettingsScreen() {
+  uiScreen(cBg);
+  drawDetailHeader("НАСТРОЙКИ");
+
+  struct Row { const char* name; char value[24]; uint16_t col; };
+  char v1[24], v2[24], v3[24];
+  snprintf(v1, sizeof(v1), "%s", SKIN_NAMES_UP[gSkin]);
+  snprintf(v2, sizeof(v2), "%d%%", (int)((unsigned)gDispBright * 100 / 255));
+  snprintf(v3, sizeof(v3), "%s", gBeepOn ? "ВКЛ" : "ВЫКЛ");
+  char v4[24];
+  snprintf(v4, sizeof(v4), "%s", sndQuiet ? "22-08" : "ВЫКЛ");
+
+  Row rows[4] = {
+    { "СКИН",        "",  cAccent },
+    { "ЯРКОСТЬ",     "",  cText },
+    { "ЗВУК",        "",  cGood },
+    { "ТИХИЕ ЧАСЫ",  "",  cText },
+  };
+  const char* vals[4] = { v1, v2, v3, v4 };
+
+  for (int i = 0; i < 4; i++) {
+    int y = 56 + i * 52;
+    uiFill(8, y, 224, 44, cSurf);
+    uiRect(8, y, 224, 44, cLine);
+    drawTxt(18, y + 8, rows[i].name, cMuted, cSurf, 1);
+    // чистим всю строку значения: иначе от прошлого (более длинного) названия
+    // скина остаются «хвосты» и кажется, что имя не то
+    uiFill(16, y + 19, 144, 18, cSurf);
+    drawTxt(18, y + 22, vals[i], (i == 0) ? cAccent : cText, cSurf, 2);
+    if (i == 0) {
+      // три плашки — сразу видно, какая это тема
+      uiFill(166, y + 12, 10, 20, cBg);
+      uiFill(178, y + 12, 10, 20, cSurf);
+      uiFill(190, y + 12, 10, 20, cTEMP_ACC);
+      uiRect(166, y + 12, 34, 20, cLine);
+    }
+    drawChevron(212, y + 22, false, cMuted);
+  }
+  drawTxt(10, 282, "ТАП: сменить · ЯРКОСТЬ: слева/справа", cMuted, cBg, 1);
+  drawTxt(10, 296, "ВЫХОД — ТАП ПО ШАПКЕ", cMuted, cBg, 1);
 }
 
 // ---------------------------------------------------------------- окно климата
@@ -8237,6 +8337,7 @@ void drawScreen() {
     case SCR_WEATHER: drawWeatherScreen(); break;
     case SCR_WATCH:   drawWatchScreen();   break;
     case SCR_CLIMATE: drawClimateScreen(); break;
+    case SCR_SETTINGS: drawSettingsScreen(); break;
     default:          drawMain();          break;
   }
 }
@@ -8484,6 +8585,49 @@ void dayShift(int delta) {
 }
 
 void handleTapAt(int x, int y) {
+  // на главном тап по шапке (левый верх) открывает настройки
+  if (gScreen == SCR_MAIN && y < 44 && x < 80) {
+    gScreen = SCR_SETTINGS;
+    drawScreen();
+    gLastDraw = millis(); gLastSig = screenSig(); gLastWinFull = millis();
+    return;
+  }
+  if (gScreen == SCR_SETTINGS) {
+    if (y < 44) {                        // шапка — назад
+      gScreen = SCR_MAIN;
+      drawScreen();
+      gLastDraw = millis(); gLastSig = screenSig(); gLastWinFull = millis();
+      return;
+    }
+    int row = (y - 56) / 52;
+    int rowTop = 56 + row * 52;
+    bool inRow = (row >= 0 && row < 4 && y >= rowTop && y <= rowTop + 44);
+    if (inRow) {
+      if (row == 0) {                    // скин: следующий
+        applySkin((gSkin + 1) % SKIN_N);
+        skinSave(gSkin);
+      } else if (row == 1) {             // яркость: слева меньше, справа больше
+        int step = (x < 120) ? -25 : 25;
+        int b = (int)gDispBright + step;
+        if (b < 25)  b = 25;
+        if (b > 255) b = 255;
+        gDispBright = (uint8_t)b;
+        gDispOn = true;
+        dispApply();
+        dispSave();
+      } else if (row == 2) {             // звук вкл/выкл
+        gBeepOn = !gBeepOn;
+        beepSave();
+        if (gBeepOn) beepOk();
+      } else if (row == 3) {             // тихие часы
+        sndQuiet = !sndQuiet;
+        beepSave();
+      }
+      drawScreen();
+      gLastDraw = millis(); gLastSig = screenSig(); gLastWinFull = millis();
+    }
+    return;
+  }
   if (gScreen != SCR_MAIN) {
     // Стрелки ‹ › и дата в строке заголовка графика (левая треть, центр,
     // правая треть полосы). Проверяем ДО графика: полоса вплотную над ним.
@@ -9662,7 +9806,7 @@ static size_t csvFileSize() {
 #define PAGE_SEND_STALL   800UL   // нет прогресса 0.8 с — клиент мёртв, рвём
 #define PAGE_CHUNK       4096     // мельче — больше задержек на TCP
 #define PAGE_MAX_TAGS      22     // столько подстановок в web/page.html
-#define PAGE_CAP        64000     // предел ответа: страница выросла (период, погода)
+#define PAGE_CAP        96000     // предел ответа: CSS и JS вынесены в /app.css и /app.js
 
 struct PgVal {
   const char* tag;      // "__FW__" и т.п.
@@ -10745,8 +10889,8 @@ int mqttHaConfig(int i, char* b, size_t n) {
     "\"availability_topic\":\"%s/status\","
     "\"device\":{\"identifiers\":[\"%s\"],\"name\":\"Дом — энергия\","
     "\"manufacturer\":\"NIKA SERVICE\","
-    "\"model\":\"CYD-4.4 (ESP32-2432S028)\",\"sw_version\":\"4.4\"}}",
-    mqBase, mqBase);
+    "\"model\":\"CYD-%s (ESP32-2432S028)\",\"sw_version\":\"%s\"}}",
+    mqBase, mqBase, FW_VER, FW_VER);
   if (w < 0 || w >= (int)n) return -1;
   return w;
 }
@@ -12181,7 +12325,7 @@ void webSetup() {
       // завтра, короткое описание, осадки за завтра и heap после запроса.
       "\"wPop\":%.0f,\"wPopT\":%.0f,\"wTminT\":%.1f,\"wTmaxT\":%.1f,"
       "\"wDescT\":\"%s\",\"wRainT\":%.1f,\"wfHeap\":%u,"
-      "\"now\":\"%s\"}",
+      "\"now\":\"%s\"",
       FW_VER, gVoltage, gTemp, gPower, gCurrent, gEnergy,
       gRelay ? "true" : "false", myTodayKwh, myTodayCost, yKwh, yCost,
       mKwh, mCost, measuredTariff(), TARIFF_DAY, TARIFF_NIGHT, gRssi, gSdRows,
@@ -12228,9 +12372,9 @@ void webSetup() {
       wPopNow, wPopTom, wTminTom, wTmaxTom, wDescTom.c_str(), wRainTom, wfHeap,
       nows);
     // датчики I2C добавляем после snprintf: формат не разрастается
+    if (b[0] == 0) { gWeb.send(500, "application/json", "{\"ok\":false,\"err\":\"data\"}"); return; }
     String dj = String(b);
-    dj.remove(dj.length() - 1);          // убираем закрывающую }
-    dj += "," + envJson() + ",\"ui\":11,\"skin\":" + String(gSkin) + "}";
+    dj += "," + envJson() + ",\"ui\":19,\"skin\":" + String(gSkin) + ",\"inv\":" + (gInvert ? "1" : "0") + "}";
     gWeb.send(200, "application/json", dj);
   });
 
@@ -13322,10 +13466,30 @@ void webSetup() {
 
   gWeb.on("/beep", []() {
     // /beep?preset=N — прослушать пресет; /beep?sound=boot|error|ok — старое поведение
+    // ?ev=touch — проиграть ровно так, как это делает плата (с громкостью события
+    // и тихими часами), иначе предпросмотр звучал громче живого
+    if (gWeb.hasArg("ev")) {
+      String key = gWeb.arg("ev"); key.toLowerCase();
+      String key2 = key.startsWith("ev_") ? key.substring(3) : key;   // touch и ev_touch — одно
+      for (int i = 0; i < EV_N; i++) {
+        char kbuf[16];
+        strncpy_P(kbuf, EV_KEYS[i], sizeof(kbuf) - 1);   // имена в PROGMEM
+        kbuf[sizeof(kbuf) - 1] = 0;
+        String kb2 = String(kbuf);
+        if (kb2.startsWith("ev_")) kb2 = kb2.substring(3);
+        if (key2 == kb2) {
+          sndEvent((uint8_t)i);
+          gWeb.send(200, "application/json", "{\"ok\":true,\"ev\":\"" + key + "\",\"preset\":" + String(sndEv[i]) + "}");
+          return;
+        }
+      }
+      gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"ev\"}");
+      return;
+    }
     if (gWeb.hasArg("preset")) {
       int id = gWeb.arg("preset").toInt();
       if (id < 0 || id >= SND_N) { gWeb.send(400, "application/json", "{\"ok\":false,\"err\":\"preset\"}"); return; }
-      sndPlayPreset((uint8_t)id, true);
+      sndPlayPreset((uint8_t)id, false);      // как обычный звук, а не аварийный
       gWeb.send(200, "application/json", "{\"ok\":true,\"preset\":" + String(id) + "}");
       return;
     }
@@ -13340,9 +13504,51 @@ void webSetup() {
     gWeb.send(200, "application/json", "{\"ok\":true,\"sound\":\"" + s + "\"}");
   });
 
-  gWeb.on("/skin", []() {
-    if (gWeb.hasArg("n")) {
-      int n = gWeb.arg("n").toInt();
+    // ---------------------------------------------------- статика страницы (CSS и JS)
+  gWeb.on("/app.css", []() {
+    gWeb.sendHeader("Cache-Control", "public, max-age=86400");
+    gWeb.send_P(200, "text/css; charset=utf-8", APP_CSS);
+  });
+
+  gWeb.on("/app.js", []() {
+    gWeb.sendHeader("Cache-Control", "public, max-age=86400");
+    gWeb.send_P(200, "application/javascript; charset=utf-8", APP_JS);
+  });
+
+gWeb.on("/skintest", []() {
+    int n = gWeb.hasArg("n") ? gWeb.arg("n").toInt() : gSkin;
+    if (n < 0) n = 0;
+    if (n >= SKIN_N) n = SKIN_N - 1;
+    // по умолчанию только читаем таблицу; применяем тему лишь по ?set=1
+    if (gWeb.hasArg("set") && gWeb.arg("set") == "1") { applySkin(n); skinSave(gSkin); drawScreen(); }
+    const uint8_t (*s)[3] = SKINS[n];
+    char b[260];
+    snprintf(b, sizeof(b),
+             "{\"skin\":%d,\"applied\":%d,\"name\":\"%s\",\"bg\":\"#%02x%02x%02x\",\"surf\":\"#%02x%02x%02x\","
+             "\"text\":\"#%02x%02x%02x\",\"accent\":\"#%02x%02x%02x\",\"temp\":\"#%02x%02x%02x\"}",
+             n, gSkin, SKIN_NAMES[n],
+             s[0][0], s[0][1], s[0][2], s[1][0], s[1][1], s[1][2],
+             s[3][0], s[3][1], s[3][2], s[6][0], s[6][1], s[6][2], s[7][0], s[7][1], s[7][2]);
+    gWeb.send(200, "application/json; charset=utf-8", b);
+  });
+
+gWeb.on("/invert", []() {
+    if (gWeb.hasArg("on")) {
+      gInvert = (gWeb.arg("on") == "1");
+      applyInvert();
+      invertSave();
+      drawScreen();
+    }
+    gWeb.send(200, "application/json", String("{\"ok\":true,\"invert\":") + (gInvert ? "1" : "0") + "}");
+  });
+
+gWeb.on("/skin", []() {
+    if (gWeb.hasArg("n") || gWeb.hasArg("s")) {
+      int n = (gWeb.hasArg("n") ? gWeb.arg("n") : gWeb.arg("s")).toInt();
+      if (n < 0 || n >= SKIN_N) {
+        gWeb.send(400, "application/json", String("{\"ok\":false,\"err\":\"skin range\",\"max\":") + (SKIN_N - 1) + "}");
+        return;
+      }
       applySkin(n);
       skinSave(gSkin);
       drawScreen();
@@ -13351,7 +13557,14 @@ void webSetup() {
     String out = "{\"ok\":true,\"skin\":" + String(gSkin) + ",\"themes\":[";
     for (int i = 0; i < SKIN_N; i++) {
       if (i) out += ',';
-      out += "{\"id\":" + String(i) + ",\"name\":\"" + String(SKIN_NAMES[i]) + "\"}";
+      const uint8_t* s0 = SKINS[i][0];
+      char hex[8];
+      snprintf(hex, sizeof(hex), "#%02x%02x%02x", s0[0], s0[1], s0[2]);
+      out += "{\"id\":" + String(i) + ",\"name\":\"" + String(SKIN_NAMES[i]) +
+             "\",\"bg\":\"" + hex + "\",\"accent\":\"#" +
+             String(SKINS[i][6][0] < 16 ? "0" : "") + String(SKINS[i][6][0], HEX) +
+             String(SKINS[i][6][1] < 16 ? "0" : "") + String(SKINS[i][6][1], HEX) +
+             String(SKINS[i][6][2] < 16 ? "0" : "") + String(SKINS[i][6][2], HEX) + "\"}";
     }
     out += "]}";
     gWeb.send(200, "application/json; charset=utf-8", out);
@@ -13766,10 +13979,9 @@ void setup() {
   dispPwmBegin();      // ШИМ подсветки до tft.init()
   ledInit();           // синий на время загрузки
   gLedBootUntil = millis() + 3000;
-  applySkin(skinLoad());    // тема оформления из NVS
   envBegin();               // I2C: AHT20 + BMP280 на IO27/IO22
   beepInit();
-  beepBoot();          // короткий тихий сигнал загрузки          // динамик: тишина (звук по умолчанию выключен)
+  beepStop();          // тишина до конца загрузки
 
   tpInit();
   loadCal();
@@ -13777,6 +13989,9 @@ void setup() {
 
   tft.init();
   tft.setRotation(0);
+  gInvert = invertLoad();
+  applyInvert();      // негатив панели, если включено
+
   dispPwmBegin();      // TFT_eSPI трогает TFT_BL (21) — привязываем ШИМ заново
   tft.fillScreen(TFT_BLACK);
 
@@ -13813,6 +14028,7 @@ void setup() {
   Serial.printf("rr=%s(%d) rrn=%lu\n", rrName(gRRcode), gRRcode, gRRn);
 
   pickTheme();
+  applySkin(skinLoad());   // тема из NVS поверх базовой палитры
 
   gSdOk = initSD();
   if (gSdOk) {
@@ -13859,6 +14075,11 @@ void setup() {
   // должен валить плату за медленный Wi-Fi/NTP/карту.
   esp_task_wdt_add(NULL);
   esp_task_wdt_reset();
+
+  // Короткий сигнал загрузки — ровно здесь: раньше он играл в начале setup,
+  // а loop() ещё не крутился, поэтому beepTick() не выключал тон и динамик
+  // пищал всё время заставки.
+  beepBoot();
 }
 
 // ============================================================================

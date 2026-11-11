@@ -7,7 +7,7 @@
 - [ ] `FW_VER` в `firmware/cydv4/cydv4.ino` = новой версии
 - [ ] `web/page.html` собран в `page_html.h` (`python web/build_page.py`)
 - [ ] прошивка собрана: `arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs`
-- [ ] бинарник прошит по OTA, `boots.log` содержит `rr=OTA`, `/data.fw` отдаёт новую версию
+- [ ] бинарник прошит по OTA, `boots.log` содержит `rr=OTA`, поле `fw` в `/data` отдаёт новую версию
 - [ ] прогон тестов: `/range` на всех периодах, границы, `/tariff`, `/sound`, `/beep`, `/gapfill`, `/files`
 
 ## 2. Документация

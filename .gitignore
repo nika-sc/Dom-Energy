@@ -35,6 +35,8 @@ shots/
 !docs/screenshots/*.png
 !docs/screenshots/**/*.png
 !docs/assets/*.png
+# фото датчиков, динамика и схемы подключения — тоже в репозиторий
+!docs/hardware/*.png
 
 # Данные с карты и отчёты
 backup-sd/

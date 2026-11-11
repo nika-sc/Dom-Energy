@@ -160,6 +160,10 @@ $script:cfg = [ordered]@{
 
     setupDone = $false
 
+    # --- тема интерфейса: light | dark | mono | pink | red | rainbow -----
+
+    theme     = 'dark'
+
     # --- уведомления (пороги; можно менять в settings.json) ---
 
     alertOn       = $true
@@ -424,6 +428,146 @@ function Fnt([string]$name, [float]$size, [bool]$bold) {
 
 }
 
+
+# ---------------------------------------------------------------- ui-kit: база
+
+function HexOf($c) {
+    try { return ('#{0:X2}{1:X2}{2:X2}' -f [int]$c.R, [int]$c.G, [int]$c.B) } catch { return '#000000' }
+}
+
+# смешать два цвета: k=0 — первый, k=1 — второй
+function MixC([string]$a, [string]$b, [double]$k) {
+    try {
+        $ca = [System.Drawing.ColorTranslator]::FromHtml($a)
+        $cb = [System.Drawing.ColorTranslator]::FromHtml($b)
+        $r = [int][Math]::Round($ca.R + ($cb.R - $ca.R) * $k)
+        $g = [int][Math]::Round($ca.G + ($cb.G - $ca.G) * $k)
+        $bl = [int][Math]::Round($ca.B + ($cb.B - $ca.B) * $k)
+        return ('#{0:X2}{1:X2}{2:X2}' -f $r, $g, $bl)
+    } catch { return $a }
+}
+
+# «ручной» цвет из кода -> токен текущего скина (кнопки, диалоги)
+function SkinC([string]$hex) {
+    try {
+        if ($null -eq $script:LegacyRole -or $null -eq $script:CLR) { return $hex }
+        $h = ([string]$hex).ToUpper()
+        if ($script:LegacyRole.ContainsKey($h)) {
+            $role = [string]$script:LegacyRole[$h]
+            if ($script:CLR.Contains($role)) { return [string]$script:CLR[$role] }
+        }
+    } catch { }
+    return $hex
+}
+
+# цвет кнопки при наведении: тёмные — светлее, светлые — чуть темнее (иначе не видно)
+function Get-HoverC([string]$hex) {
+    try {
+        $c = [System.Drawing.ColorTranslator]::FromHtml($hex)
+        $lum = (0.2126 * $c.R + 0.7152 * $c.G + 0.0722 * $c.B) / 255.0
+        if ($lum -gt 0.72) { return (MixC $hex '#000000' 0.10) }
+        return (MixC $hex '#FFFFFF' 0.16)
+    } catch { return $hex }
+}
+
+# скругление контрола: GraphicsPath + Region
+function Set-Round($ctl, [int]$r = 12) {
+    try {
+        if ($null -eq $ctl) { return }
+        $w = [int]$ctl.Width
+        $h = [int]$ctl.Height
+        if ($w -le 2 -or $h -le 2) { return }
+        $d = [Math]::Min($r * 2, [Math]::Min($w, $h))
+        if ($d -lt 4) { return }
+        $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $path.AddArc(0, 0, $d, $d, 180, 90)
+        $path.AddArc($w - $d - 1, 0, $d, $d, 270, 90)
+        $path.AddArc($w - $d - 1, $h - $d - 1, $d, $d, 0, 90)
+        $path.AddArc(0, $h - $d - 1, $d, $d, 90, 90)
+        $path.CloseFigure()
+        $old = $ctl.Region
+        $ctl.Region = New-Object System.Drawing.Region($path)
+        if ($null -ne $old) { $old.Dispose() }
+        $path.Dispose()
+    } catch { }
+}
+
+function Set-RoundDot($ctl) {
+    try {
+        if ($null -eq $ctl) { return }
+        $w = [int]$ctl.Width
+        $h = [int]$ctl.Height
+        if ($w -le 1 -or $h -le 1) { return }
+        $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $path.AddEllipse(0, 0, $w, $h)
+        $old = $ctl.Region
+        $ctl.Region = New-Object System.Drawing.Region($path)
+        if ($null -ne $old) { $old.Dispose() }
+        $path.Dispose()
+    } catch { }
+}
+
+function Set-Dot($dot, [string]$hex) {
+    if ($null -eq $dot) { return }
+    try { $dot.BackColor = C $hex } catch { }
+}
+
+# двойная буферизация (свойства защищённые — через reflection, без Add-Type)
+function Enable-DoubleBuffer($ctl) {
+    if ($null -eq $ctl) { return }
+    try {
+        $flags = [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Instance
+        $pi = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', $flags)
+        if ($null -ne $pi) { $pi.SetValue($ctl, $true, $null) }
+        $mi = [System.Windows.Forms.Control].GetMethod('SetStyle', $flags)
+        if ($null -ne $mi) {
+            $styles = [System.Windows.Forms.ControlStyles]::OptimizedDoubleBuffer -bor [System.Windows.Forms.ControlStyles]::AllPaintingInWmPaint
+            $null = $mi.Invoke($ctl, @($styles, $true))
+        }
+    } catch { }
+}
+
+function Enable-DoubleBufferAll($root) {
+    if ($null -eq $root) { return }
+    Enable-DoubleBuffer $root
+    try { foreach ($ch in @($root.Controls)) { Enable-DoubleBufferAll $ch } } catch { }
+}
+
+# сглаженная кривая (AddCurve) + полупрозрачная градиентная заливка под ней
+function Draw-Curve($g, $pts, $pen, [string]$fillHex, [float]$baseY) {
+    try {
+        if ($null -eq $g -or $null -eq $pts) { return }
+        $n = $pts.Count
+        if ($n -lt 2) { return }
+        $arr = [System.Drawing.PointF[]]::new($n)
+        for ($i = 0; $i -lt $n; $i++) { $arr[$i] = $pts[$i] }
+        $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $path.AddCurve($arr, [single]0.45)
+        if ($fillHex -and $fillHex -match '^#') {
+            $poly = [System.Drawing.PointF[]]::new($n + 2)
+            $poly[0] = [System.Drawing.PointF]::new([single]$arr[0].X, [single]$baseY)
+            for ($i = 0; $i -lt $n; $i++) { $poly[$i + 1] = $arr[$i] }
+            $poly[$n + 1] = [System.Drawing.PointF]::new([single]$arr[$n - 1].X, [single]$baseY)
+            $minY = [single]$baseY
+            for ($i = 0; $i -lt $n; $i++) { if ($arr[$i].Y -lt $minY) { $minY = [single]$arr[$i].Y } }
+            $bx = [single]$arr[0].X
+            $bw = [single]($arr[$n - 1].X - $arr[0].X)
+            if ($bw -lt 1) { $bw = [single]1 }
+            $bh = [single]($baseY - $minY)
+            if ($bh -lt 1) { $bh = [single]1 }
+            $rect = [System.Drawing.RectangleF]::new($bx, $minY, $bw, $bh)
+            $col = [System.Drawing.ColorTranslator]::FromHtml($fillHex)
+            $c1 = [System.Drawing.Color]::FromArgb(115, $col.R, $col.G, $col.B)
+            $c2 = [System.Drawing.Color]::FromArgb(0, $col.R, $col.G, $col.B)
+            $br = [System.Drawing.Drawing2D.LinearGradientBrush]::new($rect, $c1, $c2, [System.Drawing.Drawing2D.LinearGradientMode]::Vertical)
+            $g.FillPolygon($br, $poly)
+            $br.Dispose()
+        }
+        $g.DrawPath($pen, $path)
+        $path.Dispose()
+    } catch { try { Write-AppLog ('curve: ' + $_.Exception.Message) } catch { } }
+}
+
 function Num($v, [string]$fmt) {
 
     if ($null -eq $v) { return '—' }
@@ -633,31 +777,28 @@ function New-Lbl($parent, [string]$text, $size, [string]$color, [bool]$bold, $x,
 
 
 function New-Btn($parent, [string]$text, [string]$bg, [string]$fg, [int]$w, [int]$h) {
-
     $b = New-Object System.Windows.Forms.Button
-
+    if ($h -le 0) { $h = 30 }
     $b.Text = $text
-
     $b.Size = New-Object System.Drawing.Size($w, $h)
-
     $b.FlatStyle = 'Flat'
-
-    $b.BackColor = C $bg
-
+    $hex = if ($bg -match '^#[0-9A-Fa-f]{6}$') { $bg.ToUpper() } else { '#2A3240' }
+    $hex = SkinC $hex
+    $b.BackColor = C $hex
     $b.ForeColor = C $fg
-
     $b.FlatAppearance.BorderSize = 0
-
-    $b.FlatAppearance.MouseOverBackColor = C '#2C3442'
-
+    $b.FlatAppearance.MouseOverBackColor = C (Get-HoverC $hex)
+    $b.FlatAppearance.MouseDownBackColor = C (Get-HoverC $hex)
     $b.Font = Fnt 'Segoe UI' 9 $true
-
     $b.Cursor = 'Hand'
-
+    $b.UseVisualStyleBackColor = $false
+    $b.Tag = $hex
     if ($null -ne $parent) { $parent.Controls.Add($b) }
-
+    $b.Add_MouseEnter({ param($s, $e) try { if ($null -ne $s.Tag) { $s.BackColor = C (Get-HoverC ([string]$s.Tag)) } } catch { } })
+    $b.Add_MouseLeave({ param($s, $e) try { $s.BackColor = C ([string]$s.Tag) } catch { } })
+    $b.Add_Resize({ param($s, $e) Set-Round $s 8 })
+    Set-Round $b 8
     return $b
-
 }
 
 
@@ -1376,43 +1517,28 @@ function Test-PortFree([string]$name) {
 
 
 function Update-ComBadge {
-
     if ($null -eq $lblCom) { return }
-
     $com = [string]$script:cfg.comPort
-
+    $col = $script:CLR.dim2
     if ($script:port -and $script:port.IsOpen) {
-
-        Set-Lbl $lblCom ('● ' + $com + ' — открыт (монитор)')
-
-        $lblCom.ForeColor = C '#63D68B'
-
+        Set-Lbl $lblCom ($com + ' — открыт (монитор)')
+        $col = $script:CLR.ok
     } elseif (-not (Test-ComPresent $com)) {
-
-        Set-Lbl $lblCom ('● ' + $com + ' — нет устройства')
-
-        $lblCom.ForeColor = C '#E85D5D'
-
+        Set-Lbl $lblCom ($com + ' — нет устройства')
+        $col = $script:CLR.err
     } elseif ((Test-PortFree $com) -eq $false) {
-
-        Set-Lbl $lblCom ('● ' + $com + ' — занят другой программой')
-
-        $lblCom.ForeColor = C '#F2B44B'
-
+        Set-Lbl $lblCom ($com + ' — занят другой программой')
+        $col = $script:CLR.warn
     } else {
-
-        Set-Lbl $lblCom ('● ' + $com + ' — закрыт')
-
-        $lblCom.ForeColor = C '#8B94A5'
-
+        Set-Lbl $lblCom ($com + ' — закрыт')
+        $col = $script:CLR.dim2
     }
+    $lblCom.ForeColor = C $col
+    Set-Dot $script:dotCom $col
 
     if ($null -ne $script:tipMain) {
-
         $script:tipMain.SetToolTip($lblCom, "порт нужен для команд Пульт/Перезагрузить; данные идут по HTTP`r`nоткрыт (монитор) — порт держит эта программа`r`nзакрыт — порт свободен, работаем по HTTP`r`nзанят другой программой — порт захвачен другим ПО`r`nнет устройства — адаптер не найден в системе")
-
     }
-
 }
 
 
@@ -1564,49 +1690,182 @@ function Handle-Line($line) {
 
 
 
+
+# ---------------------------------------------------------------- ui-kit: скины
+
+# 12 токенов из docs/UI-KIT.md (плата, веб и приложение — одна палитра)
+$script:SkinOrder = @('light', 'dark', 'mono', 'pink', 'red', 'rainbow')
+
+$script:SkinRu = @{
+    light   = 'светлая'
+    dark    = 'тёмная'
+    mono    = 'ЧБ'
+    pink    = 'розовая'
+    red     = 'красная'
+    rainbow = 'радужная'
+}
+
+$script:SkinData = @{
+    light = @{ bg = '#F8FAFF'; surf = '#FFFFFF'; elev = '#EFF4FF'; text = '#0F172A'; muted = '#64748B'
+               line = '#DBE4F5'; accent = '#2563EB'; temp = '#8B5CF6'; power = '#F59E0B'
+               money = '#DB2777'; good = '#10B981'; bad = '#EF4444' }
+    dark  = @{ bg = '#0B111B'; surf = '#141C2A'; elev = '#1C2636'; text = '#E8EEFC'; muted = '#93A4BE'
+               line = '#243044'; accent = '#22D3EE'; temp = '#FBBF24'; power = '#34D399'
+               money = '#F472B6'; good = '#34D399'; bad = '#F87171' }
+    mono  = @{ bg = '#000000'; surf = '#1A1A1A'; elev = '#282828'; text = '#FFFFFF'; muted = '#A0A0A0'
+               line = '#464646'; accent = '#FFFFFF'; temp = '#FFFFFF'; power = '#CDCDCD'
+               money = '#FFFFFF'; good = '#FFFFFF'; bad = '#FFFFFF' }
+    pink  = @{ bg = '#FFF0F6'; surf = '#FFFFFF'; elev = '#FFE4EE'; text = '#3C1428'; muted = '#965A78'
+               line = '#FFCDE1'; accent = '#EC4899'; temp = '#DB2777'; power = '#A855F7'
+               money = '#BE185D'; good = '#10B981'; bad = '#EF4444' }
+    red   = @{ bg = '#140808'; surf = '#200C0C'; elev = '#301212'; text = '#FFE6E6'; muted = '#C89696'
+               line = '#501E1E'; accent = '#EF4444'; temp = '#FB923C'; power = '#FACC15'
+               money = '#F87171'; good = '#4ADE80'; bad = '#FF0000' }
+    rainbow = @{ bg = '#0C0A18'; surf = '#18122A'; elev = '#241A3C'; text = '#F0F0FF'; muted = '#AAA0D2'
+                 line = '#3C2D64'; accent = '#00E5FF'; temp = '#FF00C8'; power = '#AAFF00'
+                 money = '#FFE600'; good = '#00FF96'; bad = '#FF3C3C' }
+}
+
+# палитра приложения из 12 токенов: те же имена ключей, что были в $script:CLR
+function Get-Skin([string]$name) {
+    if ([string]::IsNullOrEmpty($name)) { $name = 'dark' }
+    $name = ([string]$name).Trim().ToLower()
+    if (-not $script:SkinData.ContainsKey($name)) { $name = 'dark' }
+    $d = $script:SkinData[$name]
+    $bg = $d.bg
+    $surf = $d.surf
+    $cBg = [System.Drawing.ColorTranslator]::FromHtml($bg)
+    $lum = (0.2126 * $cBg.R + 0.7152 * $cBg.G + 0.0722 * $cBg.B) / 255.0
+    return [ordered]@{
+        bg     = $bg
+        header = (MixC $surf $bg 0.42)
+        nav    = (MixC $surf $bg 0.18)
+        footer = (MixC $bg $surf 0.25)
+        panel  = $d.elev
+        card   = $surf
+        card2  = $d.elev
+        line   = $d.line
+        text   = $d.text
+        dim    = $d.muted
+        dim2   = (MixC $d.muted $bg 0.55)
+        accent = $d.accent
+        ok     = $d.good
+        warn   = $d.power
+        err    = $d.bad
+        lcdBg  = '#05070A'
+        lcdFg  = $d.good
+        temp   = $d.temp
+        power  = $d.power
+        money  = $d.money
+        good   = $d.good
+        bad    = $d.bad
+        shadow = (MixC $bg '#000000' 0.17)
+        btnA   = (MixC $d.accent $surf 0.78)
+        btnN   = $d.elev
+        btnD   = (MixC $d.bad $surf 0.80)
+        btnOk  = (MixC $d.good $surf 0.74)
+        skin   = $name
+        dark   = ($lum -lt 0.45)
+    }
+}
+
+# цвета, которые в коде заданы «руками» (до появления палитры)
+
+$script:LegacyRole = @{
+    '#05070A' = 'lcdBg'; '#0A0C10' = 'lcdBg'; '#0F1218' = 'bg'; '#12161C' = 'panel'
+    '#14181E' = 'panel'; '#151B26' = 'card2'; '#171B22' = 'panel'; '#1F2530' = 'line'
+    '#222836' = 'card2'; '#232A36' = 'card2'; '#232B39' = 'card2'; '#24405A' = 'btnA'
+    '#252C38' = 'line'; '#2A3240' = 'btnN'; '#2A3444' = 'card2'; '#2B4A66' = 'btnA'
+    '#2C3442' = 'btnN'; '#3E4654' = 'btnN'; '#3E7FB8' = 'accent'; '#46536A' = 'line'
+    '#4A3138' = 'btnD'; '#43272E' = 'btnD'
+    '#5AC8FF' = 'accent'; '#5C6575' = 'dim2'; '#63D68B' = 'ok'; '#7D879B' = 'dim'
+    '#8A93A3' = 'dim'; '#8B94A5' = 'dim'; '#8FA3BF' = 'dim'; '#9AA6B8' = 'dim'
+    '#9BB4CF' = 'dim'; '#9BE3B4' = 'ok'; '#9FB2CC' = 'dim'; '#A78BFA' = 'temp'
+    '#A8C6E8' = 'text'; '#C3CCDA' = 'text'; '#D5DCE7' = 'text'; '#D6E2F5' = 'text'
+    '#DEE5EF' = 'text'; '#E6ECF5' = 'text'; '#E85D5D' = 'err'; '#F2B44B' = 'warn'
+    '#F2F6FC' = 'text'; '#F472B6' = 'temp'; '#F8B4B4' = 'err'; '#1F7A46' = 'btnOk'
+    '#2A4034' = 'btnOk'; '#2E4A6B' = 'btnA'; '#1B5E8C' = 'btnA'; '#0E1015' = 'bg'
+    '#12151B' = 'header'; '#151920' = 'nav'; '#101318' = 'footer'; '#1B2029' = 'card'
+}
+
+# объекты рисования графиков: пересоздаются при смене темы
+function New-Draw {
+    $c = $script:CLR
+    $rgb = {
+        param($hex, $alpha)
+        $col = [System.Drawing.ColorTranslator]::FromHtml([string]$hex)
+        return [System.Drawing.Color]::FromArgb([int]$alpha, $col.R, $col.G, $col.B)
+    }
+    $solid = {
+        param($hex)
+        return New-Object System.Drawing.SolidBrush ([System.Drawing.ColorTranslator]::FromHtml([string]$hex))
+    }
+    $pen = {
+        param($hex, $width, $alpha)
+        $col = [System.Drawing.ColorTranslator]::FromHtml([string]$hex)
+        if ($alpha -lt 255) { $col = [System.Drawing.Color]::FromArgb([int]$alpha, $col.R, $col.G, $col.B) }
+        return New-Object System.Drawing.Pen ($col, [single]$width)
+    }
+
+    $d = @{
+        fontAxis  = Fnt 'Segoe UI' 8 $false
+        fontSmall = Fnt 'Segoe UI' 7.5 $false
+        fontTitle = Fnt 'Segoe UI' 10 $true
+        fontVal   = Fnt 'Segoe UI' 8.5 $true
+
+        brDim     = & $solid $c.dim
+        brDim2    = & $solid $c.dim2
+        brText    = & $solid $c.text
+        brAccent  = & $solid $c.accent
+        brWarn    = & $solid $c.warn
+        brOk      = & $solid $c.ok
+        brVolt    = & $solid $c.accent
+        brTemp    = & $solid $c.temp
+        brBar     = & $solid (MixC $c.accent $c.card2 0.45)
+        brBarHi   = & $solid $c.accent
+        brBarDim  = & $solid (MixC $c.accent $c.card 0.72)
+        brHover   = New-Object System.Drawing.SolidBrush (& $rgb $c.accent 24)
+        brGap     = New-Object System.Drawing.SolidBrush (& $rgb $c.warn 26)
+        brFill    = New-Object System.Drawing.SolidBrush (& $rgb $c.accent 22)
+        brTipBg   = New-Object System.Drawing.SolidBrush (& $rgb $c.card 246)
+        brTipText = & $solid $c.text
+        brTipDim  = & $solid $c.dim
+
+        penGrid      = & $pen $c.line 1 40
+        penGrid2     = & $pen $c.line 1 78
+        penVolt      = & $pen $c.accent 2 255
+        penViolet    = & $pen $c.accent 1.6 255
+        penNow       = & $pen $c.warn 1 255
+        penTip       = & $pen $c.line 1 255
+        penHover     = & $pen $c.accent 1 150
+        penCursor    = & $pen $c.accent 1 190
+        penTemp      = & $pen $c.temp 1.6 255
+        penVoltHi    = & $pen $c.accent 3 255
+        penTempHi    = & $pen $c.temp 3 255
+        penVioletDim = & $pen $c.accent 1.2 90
+        penTempDim   = & $pen $c.temp 1.2 90
+        penSparkV    = & $pen $c.accent 1.8 255
+        penSparkP    = & $pen $c.power 1.8 255
+        penSparkT    = & $pen $c.temp 1.8 255
+        penSparkE    = & $pen $c.money 1.8 255
+        brSparkV     = New-Object System.Drawing.SolidBrush (& $rgb $c.accent 30)
+        brSparkP     = New-Object System.Drawing.SolidBrush (& $rgb $c.power 30)
+        brSparkT     = New-Object System.Drawing.SolidBrush (& $rgb $c.temp 30)
+        brSparkE     = New-Object System.Drawing.SolidBrush (& $rgb $c.money 30)
+    }
+    $d.penNow.DashStyle = 'Dash'
+    $d.penCursor.DashStyle = 'Dash'
+    return $d
+}
+
 # ============================================================================
 
 #  ПАЛИТРА И ФОРМА
 
+
 # ============================================================================
 
-$script:CLR = @{
-
-    bg     = '#0E1015'
-
-    header = '#12151B'
-
-    nav    = '#151920'
-
-    footer = '#101318'
-
-    panel  = '#171B22'
-
-    card   = '#1B2029'
-
-    card2  = '#232A36'
-
-    line   = '#252C38'
-
-    text   = '#E6ECF5'
-
-    dim    = '#8B94A5'
-
-    dim2   = '#68707F'
-
-    accent = '#5AC8FF'
-
-    ok     = '#63D68B'
-
-    warn   = '#F2B44B'
-
-    err    = '#E85D5D'
-
-    lcdBg  = '#05070A'
-
-    lcdFg  = '#7FE0A0'
-
-}
+$script:CLR = Get-Skin $script:cfg.theme
 
 
 
@@ -1616,7 +1875,7 @@ $form.Text           = 'DOM MONITOR — пульт управления'
 
 $form.Size           = New-Object System.Drawing.Size(1140, 872)
 
-$form.MinimumSize    = New-Object System.Drawing.Size(980, 740)
+$form.MinimumSize    = New-Object System.Drawing.Size(980, 760)
 
 $form.StartPosition  = 'CenterScreen'
 
@@ -1631,210 +1890,134 @@ $form.Font           = Fnt 'Segoe UI' 9 $false
 # ------------------------------------------------------------------ шапка
 
 $top = New-Object System.Windows.Forms.Panel
-
 $top.Dock = 'Top'
-
-$top.Height = 62
-
+$top.Height = 80
 $top.BackColor = C $script:CLR.header
-
 $form.Controls.Add($top)
 
+# заголовок
+$lblTitle = New-Lbl $top 'DOM MONITOR' 15.5 $script:CLR.accent $true 16 11
+$lblSub   = New-Lbl $top 'ESP32 · 192.168.0.51 · обновление 5 с' 7.5 $script:CLR.dim2 $false 18 54
 
-
-$lblTitle = New-Lbl $top 'DOM MONITOR' 15.5 $script:CLR.accent $true 16 8
-
-$lblSub   = New-Lbl $top 'ESP32 · 192.168.0.51 · обновление 5 с' 8 $script:CLR.dim2 $false 18 38
-
-
-
-$lblFwChip = New-Object System.Windows.Forms.Label
-
-$lblFwChip.Text = 'прошивка —'
-
-$lblFwChip.Font = Fnt 'Segoe UI' 8 $false
-
-$lblFwChip.ForeColor = C $script:CLR.dim
-
-$lblFwChip.BackColor = C $script:CLR.card
-
-$lblFwChip.TextAlign = 'MiddleCenter'
-
-$lblFwChip.Size = New-Object System.Drawing.Size(130, 26)
-
-$lblFwChip.Location = New-Object System.Drawing.Point(196, 20)
-
-$top.Controls.Add($lblFwChip)
-
-
+# --- статус связи: цветная точка + одна строка текста -----------------------
+$script:dotHttp = New-Object System.Windows.Forms.Panel
+$script:dotHttp.Size = New-Object System.Drawing.Size(8, 8)
+$script:dotHttp.Location = New-Object System.Drawing.Point(180, 22)
+$script:dotHttp.BackColor = C $script:CLR.err
+$top.Controls.Add($script:dotHttp)
+Set-RoundDot $script:dotHttp
 
 $lblHttp = New-Object System.Windows.Forms.Label
-
-$lblHttp.Text = '● HTTP —'
-
-$lblHttp.Font = Fnt 'Segoe UI' 8 $true
-
+$lblHttp.Text = 'HTTP —'
+$lblHttp.Font = Fnt 'Segoe UI' 9.5 $true
 $lblHttp.ForeColor = C $script:CLR.err
-
-$lblHttp.BackColor = C $script:CLR.card
-
-$lblHttp.TextAlign = 'MiddleCenter'
-
-$lblHttp.Size = New-Object System.Drawing.Size(112, 26)
-
-$lblHttp.Location = New-Object System.Drawing.Point(600, 20)
-
+$lblHttp.BackColor = C $script:CLR.header
+$lblHttp.TextAlign = 'MiddleLeft'
+$lblHttp.AutoSize = $false
+$lblHttp.Size = New-Object System.Drawing.Size(198, 22)
+$lblHttp.Location = New-Object System.Drawing.Point(194, 13)
 $top.Controls.Add($lblHttp)
 
-
-
-# свежесть самих показателей (vAt/tAt/pAt/eAt), а не факта ответа платы
+# --- второй ряд: прошивка · свежесть данных · климат · COM ------------------
+$lblFwChip = New-Object System.Windows.Forms.Label
+$lblFwChip.Text = 'прошивка —'
+$lblFwChip.Font = Fnt 'Segoe UI' 7.5 $false
+$lblFwChip.ForeColor = C $script:CLR.dim
+$lblFwChip.BackColor = C $script:CLR.card
+$lblFwChip.TextAlign = 'MiddleCenter'
+$lblFwChip.Size = New-Object System.Drawing.Size(116, 20)
+$lblFwChip.Location = New-Object System.Drawing.Point(200, 48)
+$top.Controls.Add($lblFwChip)
 
 $lblFresh = New-Object System.Windows.Forms.Label
-
 $lblFresh.Text = 'данные —'
-
 $lblFresh.Font = Fnt 'Segoe UI' 8 $false
-
 $lblFresh.ForeColor = C $script:CLR.dim2
-
 $lblFresh.BackColor = C $script:CLR.card
-
 $lblFresh.TextAlign = 'MiddleCenter'
-
-$lblFresh.Size = New-Object System.Drawing.Size(92, 26)
-
-$lblFresh.Location = New-Object System.Drawing.Point(456, 20)
-
-$script:lblClimate = New-Object System.Windows.Forms.Label
-
-$script:lblClimate.Text = 'климат —'
-
-$script:lblClimate.Font = Fnt 'Segoe UI' 8 $false
-
-$script:lblClimate.ForeColor = C $script:CLR.dim2
-
-$script:lblClimate.BackColor = C $script:CLR.card
-
-$script:lblClimate.AutoSize = $true
-
-$script:lblClimate.Location = New-Object System.Drawing.Point(14, 44)
-
-$top.Controls.Add($script:lblClimate)
-
+$lblFresh.Size = New-Object System.Drawing.Size(92, 20)
+$lblFresh.Location = New-Object System.Drawing.Point(326, 50)
 $top.Controls.Add($lblFresh)
 
+$script:lblClimate = New-Object System.Windows.Forms.Label
+$script:lblClimate.Text = 'климат —'
+$script:lblClimate.Font = Fnt 'Segoe UI' 8 $false
+$script:lblClimate.ForeColor = C $script:CLR.dim2
+$script:lblClimate.BackColor = C $script:CLR.card
+$script:lblClimate.AutoSize = $true
+$script:lblClimate.Location = New-Object System.Drawing.Point(428, 51)
+$top.Controls.Add($script:lblClimate)
 
+$script:dotCom = New-Object System.Windows.Forms.Panel
+$script:dotCom.Size = New-Object System.Drawing.Size(8, 8)
+$script:dotCom.Location = New-Object System.Drawing.Point(580, 55)
+$script:dotCom.BackColor = C $script:CLR.dim2
+$top.Controls.Add($script:dotCom)
+Set-RoundDot $script:dotCom
 
 $lblCom = New-Object System.Windows.Forms.Label
-
-$lblCom.Text = '● COM5 — закрыт'
-
+$lblCom.Text = 'COM5 — закрыт'
 $lblCom.Font = Fnt 'Segoe UI' 8 $false
-
 $lblCom.ForeColor = C $script:CLR.dim2
-
 $lblCom.BackColor = C $script:CLR.card
-
-$lblCom.TextAlign = 'MiddleCenter'
-
-$lblCom.Size = New-Object System.Drawing.Size(150, 26)
-
+$lblCom.TextAlign = 'MiddleLeft'
+$lblCom.AutoSize = $false
 $lblCom.AutoEllipsis = $true
-
-$lblCom.Location = New-Object System.Drawing.Point(798, 20)
-
+$lblCom.Size = New-Object System.Drawing.Size(180, 20)
+$lblCom.Location = New-Object System.Drawing.Point(594, 47)
 $top.Controls.Add($lblCom)
 
-
-
-$btnSnd     = New-Btn $top 'Звуки' '#24405A' $script:CLR.text 92 32
-
+# --- крупные кнопки справа (высота 30 px) -----------------------------------
+$btnSnd     = New-Btn $top '♪ Звуки' '#24405A' $script:CLR.text 92 30
 $btnSnd.Add_Click({ Show-Sounds })
+$btnPult    = New-Btn $top 'Экран платы' '#2A3240' $script:CLR.text 108 30
+$btnReboot  = New-Btn $top '⟳ Перезагрузка' '#4A3138' $script:CLR.text 138 30
+$btnSerial  = New-Btn $top 'Подключить' '#24405A' $script:CLR.text 104 30
+$script:btnTheme = New-Btn $top '◐ Тема' '#2A3240' $script:CLR.text 84 30
+$script:btnTheme.Add_Click({ Switch-Theme })
 
-$btnPult    = New-Btn $top 'Экран платы' '#2A3240' $script:CLR.text 112 32
-
-$btnReboot  = New-Btn $top 'Перезагрузить' '#4A3138' $script:CLR.text 120 32
-
-$btnSerial  = New-Btn $top 'Подключить'   '#24405A' $script:CLR.text 100 32
+$btnSnd.Location    = New-Object System.Drawing.Point(568, 12)
+$btnPult.Location   = New-Object System.Drawing.Point(668, 12)
+$btnReboot.Location = New-Object System.Drawing.Point(784, 12)
+$btnSerial.Location = New-Object System.Drawing.Point(930, 12)
+$script:btnTheme.Location = New-Object System.Drawing.Point(1042, 12)
 
 # --- яркость экрана платы: ползунок в шапке, работает по HTTP ---------------
-
 $script:trkBright = New-Object System.Windows.Forms.TrackBar
-
 $script:trkBright.Minimum = 5
-
 $script:trkBright.Maximum = 100
-
 $script:trkBright.TickFrequency = 25
-
 $script:trkBright.Value = 100
-
-$script:trkBright.Size = New-Object System.Drawing.Size(130, 28)
-
-$script:trkBright.Location = New-Object System.Drawing.Point(600, 17)
-
+$script:trkBright.Size = New-Object System.Drawing.Size(130, 26)
+$script:trkBright.Location = New-Object System.Drawing.Point(944, 50)
 $top.Controls.Add($script:trkBright)
 
-
-
-$script:lblBright = New-Lbl $top '100 %' 8.5 $script:CLR.dim2 $true 736 22
-
-
+$script:lblBright = New-Lbl $top '100 %' 8.5 $script:CLR.dim2 $true 1082 56
 
 $script:trkBright.Add_Scroll({
-
     $v = [int]$script:trkBright.Value
-
     if ($null -ne $script:lblBright) { $script:lblBright.Text = "$v %" }
-
     try {
-
         $null = $script:http.GetStringAsync("$($script:cfg.board)/disp?bright=$v").Result
-
         Add-Log ("яркость экрана: $v %")
-
     } catch { Add-Log "яркость: плата не ответила" 'warn' }
-
 })
 
-if ($null -ne $script:tipMain) {
-
-    $script:tipMain.SetToolTip($script:trkBright, 'яркость подсветки экрана платы (5-100 %), применяется сразу по HTTP')
-
-}
-
-
-
-$btnPult.Location    = New-Object System.Drawing.Point(760, 15)
-
-$btnReboot.Location  = New-Object System.Drawing.Point(886, 15)
-
-$btnSerial.Location  = New-Object System.Drawing.Point(1020, 15)
-
-
-
-# подсказки в шапке
-
+# подсказки
 $script:tipMain = New-Object System.Windows.Forms.ToolTip
-
 $script:tipMain.AutoPopDelay = 20000
-
 $script:tipMain.InitialDelay = 350
-
 $script:tipMain.ReshowDelay = 200
-
 $script:tipMain.ShowAlways = $true
-
 $script:tipMain.SetToolTip($btnPult, 'включить/выключить подсветку экрана платы (команда disp toggle по serial; нужен открытый порт)')
-
-$script:tipMain.SetToolTip($btnReboot, 'перезагрузить плату (команда reboot по serial; нужен открытый порт)')
-
+$script:tipMain.SetToolTip($btnReboot, 'перезагрузить плату (HTTP /reboot; COM — только если HTTP недоступен)')
 $script:tipMain.SetToolTip($btnSerial, 'открыть/закрыть COM-порт для команд Пульт и Перезагрузить; данные идут по HTTP')
-
 $script:tipMain.SetToolTip($lblFwChip, 'версия прошивки: из /data, из serial или со страницы платы (CYD-4.4)')
-
-
+$script:tipMain.SetToolTip($btnSnd, 'звуки платы: тест мелодий и громкости')
+$script:tipMain.SetToolTip($script:btnTheme, 'тема интерфейса: клик — следующая из шести (светлая, тёмная, ЧБ, розовая, красная, радужная)')
+$script:tipMain.SetToolTip($lblHttp, 'канал связи с платой по HTTP — данные обновляются каждые 5 с')
+$script:tipMain.SetToolTip($lblCom, 'COM-порт для команд Пульт/Перезагрузить (данные идут по HTTP)')
+$script:tipMain.SetToolTip($script:trkBright, 'яркость подсветки экрана платы (5-100 %), применяется сразу по HTTP')
 
 # ------------------------------------------------------------------ вкладки
 
@@ -1874,7 +2057,7 @@ function New-NavButton($key, $text, $x) {
 
     $b.FlatAppearance.BorderSize = 0
 
-    $b.FlatAppearance.MouseOverBackColor = C '#222836'
+    $b.FlatAppearance.MouseOverBackColor = C (SkinC '#222836')
 
     $b.Cursor = 'Hand'
 
@@ -1975,45 +2158,41 @@ function New-TabPage {
 
 
 function Show-Page($key) {
+    if (-not $script:pages.Contains($key)) { return }
 
-    foreach ($k in @($script:pages.Keys)) {
-
-        $script:pages[$k].Visible = ($k -eq $key)
-
-        $b = $script:navBtn[$k]
-
-        if ($null -ne $b) {
-
-            if ($k -eq $key) {
-
-                $b.ForeColor = C $script:CLR.accent
-
-                $b.BackColor = C $script:CLR.card
-
-            } else {
-
-                $b.ForeColor = C $script:CLR.dim
-
-                $b.BackColor = C $script:CLR.nav
-
+    # без мерцания: пока переключаем видимость, раскладка приостановлена
+    $locked = ($null -ne $pageHost -and $pageHost.IsHandleCreated)
+    if ($locked) { $pageHost.SuspendLayout() }
+    try {
+        foreach ($k in @($script:pages.Keys)) {
+            $script:pages[$k].Visible = ($k -eq $key)
+            $b = $script:navBtn[$k]
+            if ($null -ne $b) {
+                if ($k -eq $key) {
+                    $b.ForeColor = C $script:CLR.accent
+                    $b.BackColor = C $script:CLR.card
+                } else {
+                    $b.ForeColor = C $script:CLR.dim
+                    $b.BackColor = C $script:CLR.nav
+                }
             }
-
         }
-
+    } finally {
+        if ($locked) { $pageHost.ResumeLayout($true) }
     }
 
-    if ($key -eq 'screen') { $chartScreen.Invalidate() }
-
-    if ($key -eq 'hist')   { Layout-History; $chartHist.Invalidate() }
-
-    if ($key -eq 'dev')    { Layout-Device }
-
-    if ($key -eq 'flash')  { Layout-Flash }
-
-    if ($key -eq 'log')    { Layout-Log }
-
-    if ($key -eq 'prot')   { Layout-Prot; Load-Prot }
-
+    # раскладку страницы считаем уже после ResumeLayout:
+    # иначе ClientSize ещё старый и Layout-* выходит по «малому» размеру
+    try {
+        if ($key -eq 'screen') { Layout-Screen; $chartScreen.Invalidate() }
+        if ($key -eq 'hist')   { Layout-History; $chartHist.Invalidate() }
+        if ($key -eq 'dev')    { Layout-Device }
+        if ($key -eq 'flash')  { Layout-Flash }
+        if ($key -eq 'log')    { Layout-Log }
+        if ($key -eq 'prot')   { Layout-Prot; Load-Prot }
+    } catch {
+        Write-AppLog ('страница ' + $key + ': ' + $_.Exception.Message)
+    }
 }
 
 
@@ -2071,101 +2250,76 @@ $lblLcdHint = New-Lbl $lcdWrap 'зеркало OLED-экрана платы' 7.5
 
 
 function New-Card($parent, [string]$caption, [float]$valSize) {
+    # мягкая тень: второй прямоугольник со смещением 2 px, чуть темнее фона
+    $sh = New-Object System.Windows.Forms.Panel
+    $sh.Size = New-Object System.Drawing.Size(200, 132)
+    $sh.BackColor = C $script:CLR.shadow
+    $sh.Enabled = $false
+    $sh.TabStop = $false
 
     $p = New-Object System.Windows.Forms.Panel
-
     $p.BackColor = C $script:CLR.card
-
     $p.Size = New-Object System.Drawing.Size(200, 132)
 
+    # внутренние отступы 12 px
+    $cap = New-Lbl $p $caption 8.5 $script:CLR.dim $true 12 9
 
-
-    $cap = New-Lbl $p $caption 7.5 $script:CLR.dim $true 11 9
-
-
+    # значение: крупно, но не больше 20 pt
+    $vs = $valSize
+    if ($vs -lt 16) { $vs = 16 }
+    if ($vs -gt 20) { $vs = 20 }
 
     $val = New-Object System.Windows.Forms.Label
-
     $val.Text = '—'
-
     $val.AutoSize = $false
-
-    $val.Font = Fnt 'Segoe UI' $valSize $true
-
+    $val.Font = Fnt 'Segoe UI' $vs $true
     $val.ForeColor = C $script:CLR.text
-
-    $val.Location = New-Object System.Drawing.Point(10, 24)
-
-    $val.Size = New-Object System.Drawing.Size(180, 34)
-
+    $val.Location = New-Object System.Drawing.Point(12, 26)
+    $val.Size = New-Object System.Drawing.Size(176, 38)
     $val.TextAlign = 'MiddleLeft'
-
     $p.Controls.Add($val)
 
-
-
     $sub = New-Object System.Windows.Forms.Label
-
     $sub.Text = ''
-
     $sub.AutoSize = $false
-
     $sub.AutoEllipsis = $true
-
     $sub.Font = Fnt 'Segoe UI' 8 $false
-
     $sub.ForeColor = C $script:CLR.dim2
-
-    $sub.Location = New-Object System.Drawing.Point(11, 62)
-
-    $sub.Size = New-Object System.Drawing.Size(180, 17)
-
+    $sub.Location = New-Object System.Drawing.Point(12, 66)
+    $sub.Size = New-Object System.Drawing.Size(176, 17)
     $p.Controls.Add($sub)
 
-
-
     # третья строка: когда показатель реально получен («получено 12:31»)
-
     $when = New-Object System.Windows.Forms.Label
-
     $when.Text = 'получено —'
-
     $when.AutoSize = $false
-
     $when.AutoEllipsis = $true
-
     $when.Font = Fnt 'Segoe UI' 7.5 $false
-
     $when.ForeColor = C $script:CLR.dim2
-
-    $when.Location = New-Object System.Drawing.Point(11, 80)
-
-    $when.Size = New-Object System.Drawing.Size(180, 16)
-
+    $when.Location = New-Object System.Drawing.Point(12, 83)
+    $when.Size = New-Object System.Drawing.Size(176, 15)
     $p.Controls.Add($when)
 
-
-
     # мини-график за сутки внизу карточки (рисуется по /history)
-
     $spark = New-Object System.Windows.Forms.PictureBox
-
     $spark.BackColor = C $script:CLR.card
-
-    $spark.Location = New-Object System.Drawing.Point(10, 99)
-
-    $spark.Size = New-Object System.Drawing.Size(180, 27)
-
+    $spark.Location = New-Object System.Drawing.Point(12, 98)
+    $spark.Size = New-Object System.Drawing.Size(176, 26)
     $spark.Cursor = 'Hand'
-
     $p.Controls.Add($spark)
 
+    if ($null -ne $parent) {
+        $parent.Controls.Add($sh)
+        $parent.Controls.Add($p)
+        $p.BringToFront()
+    }
 
+    Set-Round $sh 12
+    Set-Round $p 12
+    $p.Add_Resize({ param($s, $e) Set-Round $s 12 })
+    $sh.Add_Resize({ param($s, $e) Set-Round $s 12 })
 
-    $parent.Controls.Add($p)
-
-    return [pscustomobject]@{ Panel = $p; Cap = $cap; Val = $val; Sub = $sub; When = $when; Spark = $spark }
-
+    return [pscustomobject]@{ Panel = $p; Cap = $cap; Val = $val; Sub = $sub; When = $when; Spark = $spark; Shadow = $sh }
 }
 
 
@@ -2240,7 +2394,7 @@ foreach ($ck in @($script:cardSparkMetric.Keys)) {
 
 $chartScreen = New-Object System.Windows.Forms.PictureBox
 
-$chartScreen.BackColor = C '#0F1218'
+$chartScreen.BackColor = C $script:CLR.bg
 
 $chartScreen.Location = New-Object System.Drawing.Point(14, 300)
 
@@ -2252,93 +2406,7 @@ $pgScreen.Controls.Add($chartScreen)
 
 # --- общие объекты рисования (создаются один раз, чтобы не течь GDI) --------
 
-$script:draw = @{
-
-    fontAxis  = Fnt 'Segoe UI' 8 $false
-
-    fontSmall = Fnt 'Segoe UI' 7.5 $false
-
-    fontTitle = Fnt 'Segoe UI' 10 $true
-
-    fontVal   = Fnt 'Segoe UI' 8.5 $true
-
-    brDim     = New-Object System.Drawing.SolidBrush (C '#7D879B')
-
-    brDim2    = New-Object System.Drawing.SolidBrush (C '#5C6575')
-
-    brText    = New-Object System.Drawing.SolidBrush (C '#C3CCDA')
-
-    brAccent  = New-Object System.Drawing.SolidBrush (C '#5AC8FF')
-
-    brWarn    = New-Object System.Drawing.SolidBrush (C '#F2B44B')
-
-    brOk      = New-Object System.Drawing.SolidBrush (C '#63D68B')
-
-    brVolt    = New-Object System.Drawing.SolidBrush (C '#A78BFA')
-
-    brBar     = New-Object System.Drawing.SolidBrush (C '#3E7FB8')
-
-    brBarHi   = New-Object System.Drawing.SolidBrush (C '#5AC8FF')
-
-    penGrid   = New-Object System.Drawing.Pen ((C '#1F2530'), 1)
-
-    penGrid2  = New-Object System.Drawing.Pen ((C '#2A3240'), 1)
-
-    penVolt   = New-Object System.Drawing.Pen ((C '#5AC8FF'), 2)
-
-    penViolet = New-Object System.Drawing.Pen ((C '#A78BFA'), 1.6)
-
-    penNow    = New-Object System.Drawing.Pen ((C '#F2B44B'), 1)
-
-    brGap     = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(26, 242, 180, 75))
-
-    brFill    = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(22, 90, 200, 255))
-
-    # --- интерактивные подсказки и мини-графики
-
-    brTipBg   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(244, 13, 16, 21))
-
-    brTipText = New-Object System.Drawing.SolidBrush (C '#F2F6FC')
-
-    brTipDim  = New-Object System.Drawing.SolidBrush (C '#9AA6B8')
-
-    penTip    = New-Object System.Drawing.Pen ((C '#46536A'), 1)
-
-    brHover   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(22, 90, 200, 255))
-
-    penHover  = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(150, 90, 200, 255), 1)
-
-    brBarDim  = New-Object System.Drawing.SolidBrush (C '#2B4A66')
-
-    penTemp   = New-Object System.Drawing.Pen ((C '#F472B6'), 1.6)
-
-    brTemp    = New-Object System.Drawing.SolidBrush (C '#F472B6')
-
-    penVoltHi    = New-Object System.Drawing.Pen ((C '#5AC8FF'), 3)
-
-    penTempHi    = New-Object System.Drawing.Pen ((C '#F472B6'), 3)
-
-    penVioletDim = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(90, 167, 139, 250), 1.2)
-
-    penTempDim   = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(90, 244, 114, 182), 1.2)
-
-    penSparkV = New-Object System.Drawing.Pen ((C '#5AC8FF'), 1.5)
-
-    penSparkP = New-Object System.Drawing.Pen ((C '#63D68B'), 1.5)
-
-    penSparkT = New-Object System.Drawing.Pen ((C '#F472B6'), 1.5)
-
-    penSparkE = New-Object System.Drawing.Pen ((C '#F2B44B'), 1.5)
-
-    brSparkV  = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(30, 90, 200, 255))
-
-    brSparkP  = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(30, 99, 214, 139))
-
-    brSparkT  = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(30, 244, 114, 182))
-
-    brSparkE  = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(30, 242, 180, 75))
-
-}
+$script:draw = New-Draw
 
 $script:draw.penNow.DashStyle = 'Dash'
 
@@ -2529,97 +2597,58 @@ function Get-SparkValues([string]$metric) {
 
 
 function Draw-Sparkline($g, $pic, [string]$metric) {
-
     try {
-
         if ($null -eq $g -or $null -eq $pic) { return }
-
         $D = $script:draw
-
         $w = [int]$pic.Width; $h = [int]$pic.Height
-
         if ($w -lt 20 -or $h -lt 10) { return }
-
         $vals = Get-SparkValues $metric
 
-        $pen = $D.penSparkE; $fill = $D.brSparkE
-
+        $pen = $D.penSparkE
+        $fill = $script:CLR.money
         switch ($metric) {
-
-            'v' { $pen = $D.penSparkV; $fill = $D.brSparkV }
-
-            'p' { $pen = $D.penSparkP; $fill = $D.brSparkP }
-
-            't' { $pen = $D.penSparkT; $fill = $D.brSparkT }
-
-            'e' { $pen = $D.penSparkE; $fill = $D.brSparkE }
-
+            'v' { $pen = $D.penSparkV; $fill = $script:CLR.accent }
+            'p' { $pen = $D.penSparkP; $fill = $script:CLR.power }
+            't' { $pen = $D.penSparkT; $fill = $script:CLR.temp }
+            'e' { $pen = $D.penSparkE; $fill = $script:CLR.money }
         }
 
         $n = 0
-
         $min = 1.0e12; $max = -1.0e12
-
         for ($i = 0; $i -lt 24; $i++) {
-
             $vv = $vals[$i]
-
             if ($null -eq $vv) { continue }
-
             $n++
-
             if ($vv -lt $min) { $min = $vv }
-
             if ($vv -gt $max) { $max = $vv }
-
         }
 
         if ($n -lt 2) {
-
             $g.DrawString('история за сегодня недоступна', $D.fontSmall, $D.brDim2, 0, [float](($h - 12) / 2))
-
             return
-
         }
 
         if (($max - $min) -lt 0.001) { $min = $min - 0.5; $max = $max + 0.5 }
 
         $pad = 2
-
         $pts = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
-
         for ($i = 0; $i -lt 24; $i++) {
-
             $vv = $vals[$i]
-
             if ($null -eq $vv) { continue }
-
             $px = [float]($pad + ($w - 2 * $pad) * $i / 23.0)
-
             $py = [float]($h - $pad - ($h - 2 * $pad) * (($vv - $min) / ($max - $min)))
-
             $pts.Add([System.Drawing.PointF]::new([single]$px, [single]$py))
-
         }
 
         if ($pts.Count -lt 2) { return }
 
-        $poly = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
+        # сглаженная линия + градиентная заливка под ней
+        Draw-Curve $g $pts $pen $fill ([float]($h - 1))
 
-        $poly.Add([System.Drawing.PointF]::new([single]$pts[0].X, [single]($h - 1)))
-
-        foreach ($pt in $pts) { $poly.Add($pt) }
-
-        $poly.Add([System.Drawing.PointF]::new([single]$pts[$pts.Count - 1].X, [single]($h - 1)))
-
-        $g.FillPolygon($fill, $poly.ToArray())
-
-        $g.DrawLines($pen, $pts.ToArray())
-
-        $g.FillEllipse($pen.Brush, [float]($pts[$pts.Count - 1].X - 2), [float]($pts[$pts.Count - 1].Y - 2), 4, 4)
+        $last = $pts[$pts.Count - 1]
+        $g.FillEllipse($pen.Brush, [float]($last.X - 2), [float]($last.Y - 2), 4, 4)
 
     } catch { Write-AppLog ('spark: ошибка ' + $_.Exception.Message) }
-
 }
 
 
@@ -2647,91 +2676,54 @@ function Open-CardHistory([string]$metric) {
 
 
 function Layout-Screen {
-
     if (-not $script:uiReady) { return }
-
     $pw = $pgScreen.ClientSize.Width
-
     $ph = $pgScreen.ClientSize.Height
-
     if ($pw -lt 500 -or $ph -lt 380) { return }
 
-
-
     $m = 14
-
     $lcdW = 356
-
     $lcdWrap.Location = New-Object System.Drawing.Point($m, 12)
-
     $lcdWrap.Size = New-Object System.Drawing.Size($lcdW, 278)
-
     $lcd.Size = New-Object System.Drawing.Size($lcdW, 236)
-
     $lblLcdHint.Location = New-Object System.Drawing.Point(2, 258)
 
-
-
     $cx = $m + $lcdW + $m
-
     $cw = $pw - $cx - $m
-
     $gap = 10
-
     $cardH = 132
-
     $cardW = [int](($cw - 2 * $gap) / 3)
-
     if ($cardW -lt 120) { $cardW = 120 }
 
-
-
     $i = 0
-
     foreach ($k in @($script:cards.Keys)) {
-
         $c = $script:cards[$k]
-
         $col = $i % 3
-
         $row = [Math]::Floor($i / 3)
-
+        $px = $cx + $col * ($cardW + $gap)
+        $py = $m + $row * ($cardH + $gap)
         $c.Panel.Size = New-Object System.Drawing.Size($cardW, $cardH)
-
-        $c.Panel.Location = New-Object System.Drawing.Point(($cx + $col * ($cardW + $gap)), ($m + $row * ($cardH + $gap)))
-
-        $c.Val.Width = $cardW - 20
-
-        $c.Sub.Width = $cardW - 20
-
-        $c.When.Width = $cardW - 20
-
-        if ($null -ne $c.Spark) {
-
-            $c.Spark.Location = New-Object System.Drawing.Point(10, ($cardH - 33))
-
-            $c.Spark.Size = New-Object System.Drawing.Size(($cardW - 20), 27)
-
+        $c.Panel.Location = New-Object System.Drawing.Point($px, $py)
+        if ($null -ne $c.Shadow) {
+            $c.Shadow.Size = New-Object System.Drawing.Size($cardW, $cardH)
+            $c.Shadow.Location = New-Object System.Drawing.Point(($px + 2), ($py + 2))
         }
-
+        $c.Val.Width = $cardW - 24
+        $c.Sub.Width = $cardW - 24
+        $c.When.Width = $cardW - 24
+        if ($null -ne $c.Spark) {
+            $c.Spark.Location = New-Object System.Drawing.Point(12, ($cardH - 34))
+            $c.Spark.Size = New-Object System.Drawing.Size(($cardW - 24), 26)
+        }
         $i++
-
     }
 
-
-
     $chartTop = $m + 3 * $cardH + 2 * $gap + $m
-
     $chartH = $ph - $chartTop - $m
-
     if ($chartH -lt 110) { $chartH = 110 }
-
     $chartScreen.Location = New-Object System.Drawing.Point($m, $chartTop)
-
     $chartScreen.Size = New-Object System.Drawing.Size(($pw - 2 * $m), $chartH)
-
     $chartScreen.Invalidate()
-
 }
 
 
@@ -2774,7 +2766,7 @@ $chartScreen.Add_Paint({
 
         $g.DrawString("НАПРЯЖЕНИЕ ЗА СУТКИ · $dayLabel", $D.fontTitle, $D.brText, [float]$padL, 10)
 
-        $g.DrawString('В', $D.fontAxis, $D.brDim, 12, [float]($padT - 14))
+        $g.DrawString('В', $D.fontAxis, $D.brDim, 10, [float]($padT - 26))
 
 
 
@@ -2930,25 +2922,19 @@ $chartScreen.Add_Paint({
 
 
 
-        # линия (с разрывом на пропусках)
-
+        # линия напряжения: сглаженная кривая (AddCurve) + заливка под ней
+        $sorted = @($pts | Sort-Object x)
+        $seg = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
         $prev = $null
-
-        foreach ($p in ($pts | Sort-Object x)) {
-
-            if ($null -ne $prev -and ($p.x - $prev.x) -lt 6) {
-
-                $g.DrawLine($D.penVolt, [float](& $xOf $prev.x), [float](& $yOf $prev.v),
-
-                            [float](& $xOf $p.x), [float](& $yOf $p.v))
-
+        foreach ($p in $sorted) {
+            if ($null -ne $prev -and ($p.x - $prev.x) -ge 6) {
+                Draw-Curve $g $seg $D.penVolt $script:CLR.accent ([float]($padT + $plotH))
+                $seg = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
             }
-
+            $seg.Add([System.Drawing.PointF]::new([single](& $xOf $p.x), [single](& $yOf $p.v)))
             $prev = $p
-
         }
-
-
+        Draw-Curve $g $seg $D.penVolt $script:CLR.accent ([float]($padT + $plotH))
 
         # точка «сейчас»
 
@@ -3004,34 +2990,43 @@ $chartScreen.Add_Paint({
 
 
 
-        # --- интерактив: подсветка часа и подсказка (наведение или клик)
-
+        # --- интерактив: вертикальная линия, точка на кривой и подсказка «чч:мм · значение»
         $hhTip = $script:hoverScr
-
         if ($hhTip -lt 0) { $hhTip = $script:pinScr }
-
         if ($hhTip -ge 0 -and $hhTip -le 23) {
-
             $x1 = & $xOf $hhTip
-
             $x2 = & $xOf ($hhTip + 1)
+            $cx = ($x1 + $x2) / 2.0
 
+            # лёгкая подсветка часа и вертикальная линия под курсором
             $g.FillRectangle($D.brHover, [float]$x1, [float]$padT, [float]($x2 - $x1), [float]$plotH)
+            $g.DrawLine($D.penCursor, [float]$cx, [float]$padT, [float]$cx, [float]($padT + $plotH))
 
-            $g.DrawLine($D.penHover, [float]$x1, [float]$padT, [float]$x1, [float]($padT + $plotH))
-
-            $g.DrawLine($D.penHover, [float]$x2, [float]$padT, [float]$x2, [float]($padT + $plotH))
+            # значение этого часа — точкой на кривой и подписью «чч:мм · значение»
+            $vTip = 0.0
+            $hasTip = $false
+            if ($map.ContainsKey($hhTip)) {
+                $vTip = [double](Field $map[$hhTip] @('v') 0)
+                if ($vTip -gt 0) { $hasTip = $true }
+            } elseif ($hhTip -eq (Get-Date).Hour -and $live -gt 0) {
+                $vTip = $live
+                $hasTip = $true
+            }
+            if ($hasTip) {
+                $cy = & $yOf $vTip
+                $g.FillEllipse($D.brAccent, [float]($cx - 4), [float]($cy - 4), 8, 8)
+                $lblTip = ('{0:00}:00 · {1} В' -f $hhTip, (Num $vTip '0'))
+                $szTip = $g.MeasureString($lblTip, $D.fontVal)
+                $txTip = $cx + 10
+                if (($txTip + $szTip.Width) -gt ($padL + $plotW)) { $txTip = $cx - 10 - $szTip.Width }
+                $g.DrawString($lblTip, $D.fontVal, $D.brAccent, [float]$txTip, [float]($cy - 20))
+            }
 
             $tipLines = Get-ScreenHourLines $hhTip
-
             # при наведении — у курсора, при закреплённом клике — у выбранного часа
-
-            $mx = if ($script:hoverScr -ge 0 -and $script:mouseScr.X -ge 0) { [int]$script:mouseScr.X } else { [int]($x1 + $plotW / 24.0 * 0.5) }
-
+            $mx = if ($script:hoverScr -ge 0 -and $script:mouseScr.X -ge 0) { [int]$script:mouseScr.X } else { [int]($cx + 14) }
             $my = if ($script:hoverScr -ge 0 -and $script:mouseScr.Y -ge 0) { [int]$script:mouseScr.Y } else { [int]($padT + 70) }
-
             Draw-Tooltip $g $tipLines $mx $my $w $h
-
         }
 
     } catch {
@@ -3140,33 +3135,33 @@ function New-Grid($parent, [int]$rowH) {
 
     $grid = New-Object System.Windows.Forms.DataGridView
 
-    $grid.BackgroundColor = C '#12161C'
+    $grid.BackgroundColor = C $script:CLR.panel
 
     $grid.BorderStyle = 'None'
 
     $grid.EnableHeadersVisualStyles = $false
 
-    $grid.ColumnHeadersDefaultCellStyle.BackColor = C '#232A36'
+    $grid.ColumnHeadersDefaultCellStyle.BackColor = C $script:CLR.card2
 
-    $grid.ColumnHeadersDefaultCellStyle.ForeColor = C '#E6ECF5'
+    $grid.ColumnHeadersDefaultCellStyle.ForeColor = C $script:CLR.text
 
-    $grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = C '#232A36'
+    $grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = C $script:CLR.card2
 
     $grid.ColumnHeadersDefaultCellStyle.Font = Fnt 'Segoe UI' 8.5 $true
 
     $grid.ColumnHeadersHeight = 28
 
-    $grid.DefaultCellStyle.BackColor = C '#171B22'
+    $grid.DefaultCellStyle.BackColor = C $script:CLR.panel
 
-    $grid.DefaultCellStyle.ForeColor = C '#D5DCE7'
+    $grid.DefaultCellStyle.ForeColor = C $script:CLR.text
 
-    $grid.DefaultCellStyle.SelectionBackColor = C '#2A3444'
+    $grid.DefaultCellStyle.SelectionBackColor = C $script:CLR.card2
 
-    $grid.DefaultCellStyle.SelectionForeColor = C '#FFFFFF'
+    $grid.DefaultCellStyle.SelectionForeColor = C $script:CLR.text
 
-    $grid.AlternatingRowsDefaultCellStyle.BackColor = C '#14181E'
+    $grid.AlternatingRowsDefaultCellStyle.BackColor = C $script:CLR.card
 
-    $grid.GridColor = C '#252C38'
+    $grid.GridColor = C $script:CLR.line
 
     $grid.RowHeadersVisible = $false
 
@@ -3210,7 +3205,7 @@ $btnNext    = New-Btn $pgHist '›' '#2A3240' $script:CLR.text 40 30
 
 $btnToday   = New-Btn $pgHist 'Сегодня'  '#24405A' $script:CLR.text 96 30
 
-$btnReload  = New-Btn $pgHist 'Обновить' '#2A3240' $script:CLR.text 100 30
+$btnReload  = New-Btn $pgHist '⟳ Обновить' '#2A3240' $script:CLR.text 110 30
 
 $btnRange   = New-Btn $pgHist 'Период'  '#24405A' $script:CLR.text 96 30
 
@@ -3295,7 +3290,7 @@ foreach ($col in @(
 
 $chartHist = New-Object System.Windows.Forms.PictureBox
 
-$chartHist.BackColor = C '#0F1218'
+$chartHist.BackColor = C $script:CLR.bg
 
 $pgHist.Controls.Add($chartHist)
 
@@ -3303,7 +3298,7 @@ $pgHist.Controls.Add($chartHist)
 
 $btnHistTg = New-Btn $pgHist 'Отчёт в Telegram' '#24405A' $script:CLR.text 160 30
 
-$btnHistCsv = New-Btn $pgHist 'CSV дня' '#2A4034' $script:CLR.text 100 30
+$btnHistCsv = New-Btn $pgHist '⤓ CSV дня' '#2A4034' $script:CLR.text 110 30
 
 
 
@@ -3581,87 +3576,73 @@ $chartHist.Add_Paint({
 
 
 
-        # линия напряжения
-
+        # линия напряжения: сглаженная кривая, у выбранного показателя — с заливкой
         if ($hasVolt) {
-
             $vPen = $D.penViolet
-
             if ($metric -eq 'v') { $vPen = $D.penVoltHi }
-
             elseif ($metric -eq 't' -or $metric -eq 'e') { $vPen = $D.penVioletDim }
 
-            $prev = $null
+            $fillV = $null
+            if ($metric -eq 'v') { $fillV = $script:CLR.accent }
 
+            $run = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
+            $prevX = -999.0
             for ($hh = 0; $hh -lt 24; $hh++) {
-
-                if (-not $map.ContainsKey($hh)) { $prev = $null; continue }
-
-                $vm = [double](Field $map[$hh] @('v') 0)
-
-                if ($vm -le 0) { $prev = $null; continue }
-
-                $px = [float]($padL + $slot * ($hh + 0.5))
-
-                $py = [float]($padT + $plotH - $plotH * (($vm - $vLo) / ($vHi - $vLo)))
-
-                if ($null -ne $prev) {
-
-                    $g.DrawLine($vPen, [float]$prev.x, [float]$prev.y, $px, $py)
-
+                $okH = $map.ContainsKey($hh)
+                $vm = 0.0
+                if ($okH) { $vm = [double](Field $map[$hh] @('v') 0) }
+                if (-not $okH -or $vm -le 0) {
+                    if ($run.Count -ge 2) { Draw-Curve $g $run $vPen $fillV ([float]($padT + $plotH)) }
+                    $run = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
+                    $prevX = -999.0
+                    continue
                 }
-
+                $px = [float]($padL + $slot * ($hh + 0.5))
+                if ($run.Count -gt 0 -and ($px - $prevX) -gt ($slot * 1.6)) {
+                    if ($run.Count -ge 2) { Draw-Curve $g $run $vPen $fillV ([float]($padT + $plotH)) }
+                    $run = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
+                }
+                $py = [float]($padT + $plotH - $plotH * (($vm - $vLo) / ($vHi - $vLo)))
+                $run.Add([System.Drawing.PointF]::new([single]$px, [single]$py))
                 $g.FillEllipse($D.brVolt, [float]($px - 2), [float]($py - 2), 4, 4)
-
-                $prev = [pscustomobject]@{ x = $px; y = $py }
-
+                $prevX = $px
             }
-
+            if ($run.Count -ge 2) { Draw-Curve $g $run $vPen $fillV ([float]($padT + $plotH)) }
         }
-
-
 
         # линия температуры (своя шкала, подписи — в легенде и подсказке)
-
         if ($hasTemp) {
-
             $tPen = $D.penTemp
-
             if ($metric -eq 't') { $tPen = $D.penTempHi }
-
             elseif ($metric -eq 'v' -or $metric -eq 'e') { $tPen = $D.penTempDim }
 
-            $prevT = $null
+            $fillT = $null
+            if ($metric -eq 't') { $fillT = $script:CLR.temp }
 
+            $runT = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
+            $prevT = -999.0
             for ($hh = 0; $hh -lt 24; $hh++) {
-
-                if (-not $map.ContainsKey($hh)) { $prevT = $null; continue }
-
-                $tm = Field $map[$hh] @('t')
-
-                if ($null -eq $tm) { $prevT = $null; continue }
-
-                $tf = [double]$tm
-
-                $px = [float]($padL + $slot * ($hh + 0.5))
-
-                $py = [float]($padT + $plotH - $plotH * (($tf - $tMin) / ($tMax - $tMin)))
-
-                if ($null -ne $prevT) {
-
-                    $g.DrawLine($tPen, [float]$prevT.x, [float]$prevT.y, $px, $py)
-
+                $tm = $null
+                if ($map.ContainsKey($hh)) { $tm = Field $map[$hh] @('t') }
+                if ($null -eq $tm) {
+                    if ($runT.Count -ge 2) { Draw-Curve $g $runT $tPen $fillT ([float]($padT + $plotH)) }
+                    $runT = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
+                    $prevT = -999.0
+                    continue
                 }
-
+                $tf = [double]$tm
+                $px = [float]($padL + $slot * ($hh + 0.5))
+                if ($runT.Count -gt 0 -and ($px - $prevT) -gt ($slot * 1.6)) {
+                    if ($runT.Count -ge 2) { Draw-Curve $g $runT $tPen $fillT ([float]($padT + $plotH)) }
+                    $runT = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
+                }
+                $py = [float]($padT + $plotH - $plotH * (($tf - $tMin) / ($tMax - $tMin)))
+                $runT.Add([System.Drawing.PointF]::new([single]$px, [single]$py))
                 $g.FillEllipse($D.brTemp, [float]($px - 2), [float]($py - 2), 4, 4)
-
-                $prevT = [pscustomobject]@{ x = $px; y = $py }
-
+                $prevT = $px
             }
-
+            if ($runT.Count -ge 2) { Draw-Curve $g $runT $tPen $fillT ([float]($padT + $plotH)) }
         }
-
-
 
         # --- интерактив: подсветка столбика и подсказка
 
@@ -3894,9 +3875,9 @@ function Layout-History {
 $btnRange.Location  = New-Object System.Drawing.Point(($m + 604), 12)
 
     # «Отчёт в Telegram» и «CSV дня» прижимаем к правому краю: на узком окне они обрезались
-    $btnHistCsv.Location = New-Object System.Drawing.Point(($pw - $m - 100), 12)
+    $btnHistCsv.Location = New-Object System.Drawing.Point(($pw - $m - $btnHistCsv.Width), 12)
 
-    $btnHistTg.Location = New-Object System.Drawing.Point(($pw - $m - 100 - 8 - 160), 12)
+    $btnHistTg.Location = New-Object System.Drawing.Point(($pw - $m - $btnHistCsv.Width - 8 - 160), 12)
 
     $lblHistSum.TextAlign = 'MiddleLeft'
 
@@ -4110,7 +4091,7 @@ $txtSketch.FlatStyle = 'Flat'
 
 $txtSketch.Font = Fnt 'Consolas' 9 $false
 
-$txtSketch.BackColor = C '#12161C'
+$txtSketch.BackColor = C (SkinC '#12161C')
 
 $txtSketch.ForeColor = C '#D5DCE7'
 
@@ -4142,7 +4123,7 @@ $txtFqbn = New-Object System.Windows.Forms.TextBox
 
 $txtFqbn.Text = $script:cfg.fqbn
 
-$txtFqbn.BackColor = C '#12161C'
+$txtFqbn.BackColor = C (SkinC '#12161C')
 
 $txtFqbn.ForeColor = C '#9BB4CF'
 
@@ -4178,9 +4159,9 @@ $txtFlashLog.ScrollBars = 'Vertical'
 
 $txtFlashLog.ReadOnly = $true
 
-$txtFlashLog.BackColor = C '#0A0C10'
+$txtFlashLog.BackColor = C $script:CLR.lcdBg
 
-$txtFlashLog.ForeColor = C '#9BE3B4'
+$txtFlashLog.ForeColor = C $script:CLR.lcdFg
 
 $txtFlashLog.Font = Fnt 'Consolas' 9 $false
 
@@ -4250,7 +4231,7 @@ foreach ($d in $protDefs) {
     $tb = New-Object System.Windows.Forms.TextBox
     $tb.Text = $d.d
     $tb.Width = 80
-    $tb.BackColor = C '#0F1218'
+    $tb.BackColor = C $script:CLR.bg
     $tb.ForeColor = C '#D6E2F5'
     $pgProt.Controls.Add($tb)
     $script:protFields[$d.k + '_lbl'] = $lbl
@@ -4371,7 +4352,7 @@ $script:txtLog.ScrollBars = 'Vertical'
 
 $script:txtLog.ReadOnly = $true
 
-$script:txtLog.BackColor = C '#0A0C10'
+$script:txtLog.BackColor = C (SkinC '#0A0C10')
 
 $script:txtLog.ForeColor = C '#A8C6E8'
 
@@ -4517,6 +4498,14 @@ function Update-Header {
 
             if ($null -ne $ep) { $txt += ' · ' + [Math]::Round([double]$ep * 0.75006) + ' мм' }
 
+            # погода (раньше её в приложении не было вовсе)
+            $wt = Field $script:board @('wT')
+            $wd = Field $script:board @('wDesc')
+            if ($null -ne $wt -and [string]$wt -ne '') {
+                $txt += ' · улица ' + (Num $wt '0.0') + '°'
+                if ($wd) { $txt += ' ' + [string]$wd }
+            }
+
             Set-Lbl $script:lblClimate $txt
 
             $script:lblClimate.ForeColor = C $script:CLR.text
@@ -4537,9 +4526,11 @@ function Update-Header {
 
     if ($null -ne $script:board -and $age -le 12) {
 
-        Set-Lbl $lblHttp ('● HTTP ' + [int]$age + ' с · ' + (Num (Field $script:board @('p') 0) '0') + ' Вт')
+        Set-Lbl $lblHttp ('HTTP ' + [int]$age + ' с · ' + (Num (Field $script:board @('p') 0) '0') + ' Вт')
 
         $lblHttp.ForeColor = C $script:CLR.ok
+
+        Set-Dot $script:dotHttp $script:CLR.ok
 
     } elseif ($comOpen -and $null -ne $script:serialData -and (((Get-Date) - $script:serialAt).TotalSeconds) -le 90) {
 
@@ -4547,19 +4538,23 @@ function Update-Header {
 
         # иначе в шапке одновременно стояли «РЕЗЕРВ COM5» и «COM5 закрыт»
 
-        Set-Lbl $lblHttp '● РЕЗЕРВ COM5'
+        Set-Lbl $lblHttp 'РЕЗЕРВ COM5'
 
         $lblHttp.ForeColor = C $script:CLR.warn
 
+        Set-Dot $script:dotHttp $script:CLR.warn
+
     } else {
 
-        $txt = '● НЕТ СВЯЗИ'
+        $txt = 'НЕТ СВЯЗИ'
 
         if ($null -ne $script:board -and $age -lt 86400) { $txt += ' · ' + [int]$age + ' с' }
 
         Set-Lbl $lblHttp $txt
 
         $lblHttp.ForeColor = C $script:CLR.err
+
+        Set-Dot $script:dotHttp $script:CLR.err
 
     }
 
@@ -5550,7 +5545,7 @@ function Update-HistoryView {
 
     $gridHist.Rows[$idx].DefaultCellStyle.Font = Fnt 'Segoe UI' 8.5 $true
 
-    $gridHist.Rows[$idx].DefaultCellStyle.BackColor = C '#232A36'
+    $gridHist.Rows[$idx].DefaultCellStyle.BackColor = C (SkinC '#232A36')
 
     $gridHist.Rows[$idx].DefaultCellStyle.ForeColor = C '#E6ECF5'
 
@@ -5910,13 +5905,13 @@ function Show-Sounds {
     $grid = New-Object System.Windows.Forms.DataGridView
     $grid.Location = New-Object System.Drawing.Point(14, 36)
     $grid.Size = New-Object System.Drawing.Size(600, 300)
-    $grid.BackgroundColor = C '#0F1218'
+    $grid.BackgroundColor = C $script:CLR.panel
     $grid.GridColor = C '#232B39'
     $grid.BorderStyle = 'None'
     $grid.EnableHeadersVisualStyles = $false
-    $grid.ColumnHeadersDefaultCellStyle.BackColor = C '#151B26'
+    $grid.ColumnHeadersDefaultCellStyle.BackColor = C (SkinC '#151B26')
     $grid.ColumnHeadersDefaultCellStyle.ForeColor = C '#8FA3BF'
-    $grid.DefaultCellStyle.BackColor = C '#0F1218'
+    $grid.DefaultCellStyle.BackColor = C $script:CLR.panel
     $grid.DefaultCellStyle.ForeColor = C '#D6E2F5'
     $grid.RowHeadersVisible = $false
     $grid.AllowUserToAddRows = $false
@@ -5935,7 +5930,7 @@ function Show-Sounds {
     $btnTest.Location = New-Object System.Drawing.Point(14, 344)
     $btnTest.Size = New-Object System.Drawing.Size(130, 28)
     $btnTest.FlatStyle = 'Flat'
-    $btnTest.BackColor = C '#24405A'
+    $btnTest.BackColor = C (SkinC '#24405A')
     $btnTest.ForeColor = C $script:CLR.text
     $f.Controls.Add($btnTest)
 
@@ -5980,7 +5975,7 @@ function Show-Sounds {
     $btnMute.Location = New-Object System.Drawing.Point(420, 378)
     $btnMute.Size = New-Object System.Drawing.Size(150, 26)
     $btnMute.FlatStyle = 'Flat'
-    $btnMute.BackColor = C '#2A3240'
+    $btnMute.BackColor = C (SkinC '#2A3240')
     $btnMute.ForeColor = C $script:CLR.text
     $f.Controls.Add($btnMute)
 
@@ -5996,7 +5991,7 @@ function Show-Sounds {
     $btnSave.Location = New-Object System.Drawing.Point(14, 440)
     $btnSave.Size = New-Object System.Drawing.Size(170, 30)
     $btnSave.FlatStyle = 'Flat'
-    $btnSave.BackColor = C '#24405A'
+    $btnSave.BackColor = C (SkinC '#24405A')
     $btnSave.ForeColor = C $script:CLR.text
     $f.Controls.Add($btnSave)
 
@@ -6038,7 +6033,18 @@ function Show-Sounds {
                 for ($k = 0; $k -lt $script:sndPresets.Count; $k++) {
                     if ($script:sndPresets[$k].name -eq $pname) { $pid2 = $k; break }
                 }
-                Invoke-RestUi ('http://' + $ip + '/beep?preset=' + $pid2) 10 | Out-Null
+                # правило проекта: слушаем так же, как играет плата по событию
+                # (та же громкость и тихие часы), а не «как авария»
+                $key = [string]$grid.Rows[$idx].Cells[1].Value
+                $saved = -1
+                foreach ($ev in @($script:sndEvents)) {
+                    if ([string]$ev.key -eq $key) { $saved = [int]$ev.preset; break }
+                }
+                if ($saved -eq $pid2) {
+                    Invoke-RestUi ('http://' + $ip + '/beep?ev=' + $key) 10 | Out-Null
+                } else {
+                    Invoke-RestUi ('http://' + $ip + '/beep?preset=' + $pid2) 10 | Out-Null
+                }
                 $st.Text = ('проиграл: ' + $pname)
             }
         } catch { $st.Text = 'ошибка прослушивания' }
@@ -6098,7 +6104,7 @@ function Show-Range {
         $b.Size = New-Object System.Drawing.Size(84, 28)
         $b.Location = New-Object System.Drawing.Point($x, 10)
         $b.FlatStyle = 'Flat'
-        $b.BackColor = C '#24405A'
+        $b.BackColor = C (SkinC '#24405A')
         $b.ForeColor = C $script:CLR.text
         $b.Font = $font
         $f.Controls.Add($b)
@@ -6122,7 +6128,7 @@ function Show-Range {
     $btnGo.Location = New-Object System.Drawing.Point(292, 44)
     $btnGo.Size = New-Object System.Drawing.Size(110, 28)
     $btnGo.FlatStyle = 'Flat'
-    $btnGo.BackColor = C '#24405A'
+    $btnGo.BackColor = C (SkinC '#24405A')
     $btnGo.ForeColor = C $script:CLR.text
     $f.Controls.Add($btnGo)
 
@@ -6131,7 +6137,7 @@ function Show-Range {
     $btnFill.Location = New-Object System.Drawing.Point(552, 44)
     $btnFill.Size = New-Object System.Drawing.Size(150, 28)
     $btnFill.FlatStyle = 'Flat'
-    $btnFill.BackColor = C '#24405A'
+    $btnFill.BackColor = C (SkinC '#24405A')
     $btnFill.ForeColor = C $script:CLR.text
     $f.Controls.Add($btnFill)
 
@@ -6140,7 +6146,7 @@ function Show-Range {
     $btnCsv.Location = New-Object System.Drawing.Point(412, 44)
     $btnCsv.Size = New-Object System.Drawing.Size(130, 28)
     $btnCsv.FlatStyle = 'Flat'
-    $btnCsv.BackColor = C '#2A3240'
+    $btnCsv.BackColor = C (SkinC '#2A3240')
     $btnCsv.ForeColor = C $script:CLR.text
     $f.Controls.Add($btnCsv)
 
@@ -6154,16 +6160,16 @@ function Show-Range {
     $grid = New-Object System.Windows.Forms.DataGridView
     $grid.Location = New-Object System.Drawing.Point(12, 108)
     $grid.Size = New-Object System.Drawing.Size(840, 400)
-    $grid.BackgroundColor = C '#0F1218'
+    $grid.BackgroundColor = C $script:CLR.panel
     $grid.GridColor = C '#232B39'
     $grid.BorderStyle = 'None'
     $grid.EnableHeadersVisualStyles = $false
-    $grid.ColumnHeadersDefaultCellStyle.BackColor = C '#151B26'
+    $grid.ColumnHeadersDefaultCellStyle.BackColor = C (SkinC '#151B26')
     $grid.ColumnHeadersDefaultCellStyle.ForeColor = C '#8FA3BF'
-    $grid.DefaultCellStyle.BackColor = C '#0F1218'
+    $grid.DefaultCellStyle.BackColor = C $script:CLR.panel
     $grid.DefaultCellStyle.ForeColor = C '#D6E2F5'
-    $grid.DefaultCellStyle.SelectionBackColor = C '#24405A'
-    $grid.DefaultCellStyle.SelectionForeColor = C '#FFFFFF'
+    $grid.DefaultCellStyle.SelectionBackColor = C (SkinC '#24405A')
+    $grid.DefaultCellStyle.SelectionForeColor = C $script:CLR.text
     $grid.RowHeadersVisible = $false
     $grid.AllowUserToAddRows = $false
     $grid.ReadOnly = $true
@@ -6267,7 +6273,7 @@ function Show-Scheduler {
     $list = New-Object System.Windows.Forms.ListBox
     $list.Location = New-Object System.Drawing.Point(14, 14)
     $list.Size = New-Object System.Drawing.Size(516, 210)
-    $list.BackColor = C '#0F1218'
+    $list.BackColor = C $script:CLR.panel
     $list.ForeColor = C '#D6E2F5'
     $list.Font = New-Object System.Drawing.Font('Consolas', 10)
     $f.Controls.Add($list)
@@ -7182,71 +7188,31 @@ function Start-Flash($doUpload) {
 # ============================================================================
 
 function Layout-Header {
-
     if (-not $script:uiReady) { return }
-
     $w = $top.Width
-
     $x = $w - 14
-
-    $btnSerial.Location = New-Object System.Drawing.Point(($x - $btnSerial.Width), 15)
-
-    $x -= $btnSerial.Width + 8
-
-    $btnReboot.Location = New-Object System.Drawing.Point(($x - $btnReboot.Width), 15)
-
-    $x -= $btnReboot.Width + 8
-
-    $btnPult.Location = New-Object System.Drawing.Point(($x - $btnPult.Width), 15)
-
-    $x -= $btnPult.Width + 8
-
-    if ($null -ne $btnSnd) {
-
-        $btnSnd.Location = New-Object System.Drawing.Point(($x - $btnSnd.Width), 15)
-
-        $x -= $btnSnd.Width + 12
-
+    foreach ($b in @($script:btnTheme, $btnSerial, $btnReboot, $btnPult, $btnSnd)) {
+        if ($null -eq $b) { continue }
+        $b.Location = New-Object System.Drawing.Point(($x - $b.Width), 12)
+        $x -= ($b.Width + 8)
     }
-
-    $lblCom.Location = New-Object System.Drawing.Point(($x - $lblCom.Width), 20)
-
-    $x -= $lblCom.Width + 8
-
-    $lblHttp.Location = New-Object System.Drawing.Point(($x - $lblHttp.Width), 20)
-
-    $x -= $lblHttp.Width + 8
-
-    $lblFresh.Location = New-Object System.Drawing.Point(($x - $lblFresh.Width), 20)
-
-
-
-    # шильдик прошивки прижимаем к левому краю, а если места нет — убираем,
-
-    # чтобы он не наезжал на новый индикатор свежести данных
-
-    $avail = $lblFresh.Left - 8 - $lblFwChip.Left
-
-    if ($avail -lt 60) {
-
-        $lblFwChip.Visible = $false
-
-    } else {
-
-        $lblFwChip.Visible = $true
-
-        $fwW = [Math]::Min(130, $avail)
-
-        if ($lblFwChip.Width -ne $fwW) { $lblFwChip.Width = $fwW }
-
+    if ($null -ne $script:trkBright) {
+        $script:trkBright.Location = New-Object System.Drawing.Point(($w - 196), 50)
     }
+    if ($null -ne $script:lblBright) {
+        $script:lblBright.Location = New-Object System.Drawing.Point(($w - 58), 56)
+    }
+    if ($null -ne $lblFwChip) { $lblFwChip.Location = New-Object System.Drawing.Point(200, 48) }
+    if ($null -ne $lblFresh) { $lblFresh.Location = New-Object System.Drawing.Point(326, 50) }
+    if ($null -ne $script:lblClimate) { $script:lblClimate.Location = New-Object System.Drawing.Point(428, 51) }
+    if ($null -ne $script:dotCom) { $script:dotCom.Location = New-Object System.Drawing.Point(580, 55) }
+    if ($null -ne $lblCom) { $lblCom.Location = New-Object System.Drawing.Point(594, 47) }
 
-
+    # узкое окно: шильдик прошивки уступает место статусу связи
+    if ($null -ne $lblFwChip) { $lblFwChip.Visible = ($x -gt 300) }
 
     $lblFootRight.Size = New-Object System.Drawing.Size(($w - 420), 18)
-
     $lblFootRight.Location = New-Object System.Drawing.Point(400, 5)
-
 }
 
 
@@ -7268,6 +7234,144 @@ function Layout-All {
 }
 
 
+
+# ============================================================================
+
+#  ТЕМЫ: применение скина на лету (без перезапуска)
+
+# ============================================================================
+
+function Map-Hex([string]$h, $map) {
+    if ([string]::IsNullOrEmpty($h)) { return $null }
+    $u = $h.ToUpper()
+    if ($map.ContainsKey($u)) { return $map[$u] }
+    return $null
+}
+
+function Recolor-Ctl($c, $map) {
+    if ($null -eq $c) { return }
+    try {
+        # сначала дети: их наследуемый цвет ещё «старый», потом родитель
+        foreach ($ch in @($c.Controls)) { Recolor-Ctl $ch $map }
+
+        if (-not $c.BackColor.IsEmpty) {
+            $u = (HexOf $c.BackColor).ToUpper()
+            if ($map.ContainsKey($u)) { $c.BackColor = C $map[$u] }
+        }
+        if (-not $c.ForeColor.IsEmpty) {
+            $v = (HexOf $c.ForeColor).ToUpper()
+            if ($map.ContainsKey($v)) { $c.ForeColor = C $map[$v] }
+        }
+
+        if ($c -is [System.Windows.Forms.Button]) {
+            if ($c.Tag -is [string] -and ([string]$c.Tag) -match '^#[0-9A-Fa-f]{6}$') {
+                $tb = ([string]$c.Tag).ToUpper()
+                if ($map.ContainsKey($tb)) { $c.Tag = $map[$tb] }
+                try { $c.FlatAppearance.MouseOverBackColor = C (Get-HoverC ([string]$c.Tag)) } catch { }
+                try { $c.FlatAppearance.MouseDownBackColor = C (Get-HoverC ([string]$c.Tag)) } catch { }
+            } else {
+                $mo = (HexOf $c.FlatAppearance.MouseOverBackColor).ToUpper()
+                if ($map.ContainsKey($mo)) { $c.FlatAppearance.MouseOverBackColor = C $map[$mo] }
+            }
+        }
+
+        if ($c -is [System.Windows.Forms.DataGridView]) {
+            $bgm = Map-Hex (HexOf $c.BackgroundColor) $map
+            if ($bgm) { $c.BackgroundColor = C $bgm }
+            $gm = Map-Hex (HexOf $c.GridColor) $map
+            if ($gm) { $c.GridColor = C $gm }
+            $s1 = $c.ColumnHeadersDefaultCellStyle
+            $m1 = Map-Hex (HexOf $s1.BackColor) $map
+            if ($m1) { $s1.BackColor = C $m1 }
+            $m2 = Map-Hex (HexOf $s1.ForeColor) $map
+            if ($m2) { $s1.ForeColor = C $m2 }
+            $m3 = Map-Hex (HexOf $s1.SelectionBackColor) $map
+            if ($m3) { $s1.SelectionBackColor = C $m3 }
+            $d1 = $c.DefaultCellStyle
+            $n1 = Map-Hex (HexOf $d1.BackColor) $map
+            if ($n1) { $d1.BackColor = C $n1 }
+            $n2 = Map-Hex (HexOf $d1.ForeColor) $map
+            if ($n2) { $d1.ForeColor = C $n2 }
+            $n3 = Map-Hex (HexOf $d1.SelectionBackColor) $map
+            if ($n3) { $d1.SelectionBackColor = C $n3 }
+            $n4 = Map-Hex (HexOf $d1.SelectionForeColor) $map
+            if ($n4) { $d1.SelectionForeColor = C $n4 }
+            $a1 = $c.AlternatingRowsDefaultCellStyle
+            $k1 = Map-Hex (HexOf $a1.BackColor) $map
+            if ($k1) { $a1.BackColor = C $k1 }
+        }
+
+    } catch { }
+}
+
+function Apply-Theme([string]$name) {
+    try {
+        $old = $script:CLR
+        $new = Get-Skin $name
+        $map = @{}
+
+        # сначала «ручные» цвета из кода…
+        foreach ($k in @($script:LegacyRole.Keys)) {
+            $role = [string]$script:LegacyRole[$k]
+            if ($new.Contains($role)) { $map[$k.ToUpper()] = [string]$new[$role] }
+        }
+        # …потом текущая палитра — она главнее; роли в порядке важности,
+        # иначе в ЧБ-теме белый цвет «схлопывается» в один (последний) токен
+        $prio = @('card', 'bg', 'panel', 'text', 'dim', 'dim2', 'line', 'accent', 'header', 'nav',
+                  'footer', 'card2', 'ok', 'warn', 'err', 'lcdBg', 'lcdFg', 'temp', 'power',
+                  'money', 'good', 'bad', 'btnA', 'btnN', 'btnD', 'btnOk', 'shadow')
+        $roleMap = @{}
+        foreach ($role in $prio) {
+            if (-not $new.Contains($role) -or -not $old.Contains($role)) { continue }
+            $ov = [string]$old[$role]
+            if ($ov -notmatch '^#[0-9A-Fa-f]{6}$') { continue }
+            $key = $ov.ToUpper()
+            if (-not $roleMap.ContainsKey($key)) { $roleMap[$key] = [string]$new[$role] }
+        }
+        foreach ($key in @($roleMap.Keys)) { $map[$key] = $roleMap[$key] }
+
+        $form.SuspendLayout()
+        try { Recolor-Ctl $form $map } finally { $form.ResumeLayout($false) }
+
+        $script:CLR = $new
+        $script:cfg.theme = $new.skin
+
+        $script:draw = New-Draw
+
+        $form.BackColor = C $new.bg
+        $form.ForeColor = C $new.text
+        try { $chartScreen.BackColor = C $new.bg } catch { }
+        try { $chartHist.BackColor = C $new.bg } catch { }
+
+        try { Update-Header } catch { }
+        try { Update-ComBadge } catch { }
+        try { $form.Invalidate($true) } catch { }
+        try { $chartScreen.Invalidate() } catch { }
+        try { $chartHist.Invalidate() } catch { }
+        try { Enable-DoubleBufferAll $form } catch { }
+
+        if ($null -ne $script:tipMain -and $null -ne $script:btnTheme) {
+            $script:tipMain.SetToolTip($script:btnTheme, ('тема: ' + $script:SkinRu[$new.skin] + ' · клик — следующая'))
+        }
+
+        Save-Cfg
+        Add-Log ('тема интерфейса: ' + $script:SkinRu[$new.skin]) 'ok'
+    } catch {
+        Write-AppLog ('тема: ошибка ' + $_.Exception.Message)
+    }
+}
+
+function Switch-Theme {
+    try {
+        $cur = [string]$script:cfg.theme
+        $idx = [Array]::IndexOf($script:SkinOrder, $cur)
+        if ($idx -lt 0) { $idx = 1 }
+        $next = $script:SkinOrder[($idx + 1) % $script:SkinOrder.Count]
+        Apply-Theme $next
+    } catch {
+        Write-AppLog ('тема: ' + $_.Exception.Message)
+    }
+}
 
 # ============================================================================
 
@@ -7351,7 +7455,22 @@ $btnReboot.Add_Click({
 
     if ($r -ne 'Yes') { return }
 
-    if (Send-Serial 'reboot') { Add-Log 'команда: перезагрузка платы' }
+    # Раньше команда уходила только по serial, а плата работает по Wi-Fi —
+    # кнопка молча ничего не делала. Теперь сначала HTTP, serial — запасной путь.
+    $ip = [string]$script:cfg.boardIp
+    if (-not $ip) { $ip = '192.168.0.51' }
+    $ok = $false
+    try {
+        $null = Invoke-RestUi ('http://' + $ip + '/reboot') 15
+        $ok = $true
+        Add-Log ('перезагрузка платы по HTTP (' + $ip + ')')
+    } catch {
+        Add-Log ('HTTP-перезагрузка не удалась: ' + $_.Exception.Message) 'warn'
+    }
+    if (-not $ok) {
+        if (Send-Serial 'reboot') { Add-Log 'команда: перезагрузка платы (serial)' }
+        else { Add-Log 'перезагрузка не отправлена: нет ни HTTP, ни порта' 'err' }
+    }
 
 })
 
@@ -8807,9 +8926,9 @@ function Wiz-ApplyStep {
 
     }
 
-    if ($script:W.btnNext.Enabled) { $script:W.btnNext.BackColor = C '#1F7A46' }
+    if ($script:W.btnNext.Enabled) { $script:W.btnNext.BackColor = C (SkinC '#1F7A46') }
 
-    else { $script:W.btnNext.BackColor = C '#2A3240' }
+    else { $script:W.btnNext.BackColor = C (SkinC '#2A3240') }
 
     $script:W.dots.Text = ((1..5 | ForEach-Object { if ($_ -eq $script:W.step) { '●' } else { '○' } }) -join ' ')
 
@@ -9975,7 +10094,7 @@ function Show-SetupWizard([int]$step = 0) {
 
     $txt.WordWrap = $false
 
-    $txt.BackColor = C '#05070A'
+    $txt.BackColor = C (SkinC '#05070A')
 
     $txt.ForeColor = C '#9BE3B4'
 
@@ -10003,7 +10122,7 @@ function Show-SetupWizard([int]$step = 0) {
 
     $cmb.FlatStyle = 'Flat'
 
-    $cmb.BackColor = C '#12161C'
+    $cmb.BackColor = C (SkinC '#12161C')
 
     $cmb.ForeColor = C $script:CLR.text
 
@@ -10027,7 +10146,7 @@ function Show-SetupWizard([int]$step = 0) {
 
     $tp.UseSystemPasswordChar = $true
 
-    $tp.BackColor = C '#12161C'
+    $tp.BackColor = C (SkinC '#12161C')
 
     $tp.ForeColor = C $script:CLR.text
 
@@ -10571,6 +10690,9 @@ $form.Add_FormClosing({
 
 
 Write-AppLog 'форма готова, показываю'
+
+# двойная буферизация формы и панелей — без мерцания при перерисовке
+try { Enable-DoubleBufferAll $form } catch { Write-AppLog ('двойная буферизация: ' + $_.Exception.Message) }
 
 [void]$form.ShowDialog()
 
