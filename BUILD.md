@@ -1,0 +1,398 @@
+# Сборка и прошивка (CYD, ESP32-2432S028)
+
+> Актуально на **4.13** (11.11.2026): bin **1 426 528 Б** = 72 % от 1 966 080 Б,
+> страница 18 100 Б (HTTP), CSS 13 743 Б, JS 41 023 Б, TFT_eSPI 2.5.44.
+
+> Это инструкция для **CYD**: плата ESP32-2432S028, экран 2.8" 240×320,
+> тач XPT2046. Старая документация `02-ПРОШИВКА-ESP32.md` — про другую
+> плату (ESP32-C3 + OLED). Она **не подходит**.
+
+## 1. Что нужно
+
+### Железо
+
+| Что | Значение |
+|---|---|
+| Плата | **ESP32-2432S028** (CYD), ESP32-D0WD-V3, 4 МБ flash |
+| Экран | ILI9341, 2.8", 240×320 |
+| Тач | XPT2046 |
+| Карта | microSD, FAT32 (8–32 ГБ) |
+| Питание | USB 5 В, 1 А |
+| Кабель | USB с передачей данных, не «только зарядка» |
+
+### Софт
+
+| Компонент | Версия | Примечание |
+|---|---|---|
+| Arduino CLI | **1.5.1** | `C:\Program Files\Arduino CLI\arduino-cli.exe` |
+| Ядро `esp32:esp32` | **2.0.9** | на 3.x не собирается |
+| Библиотека `TFT_eSPI` | **2.5.44** | обязательно со своим `User_Setup.h` |
+| Python | 3.9+ | только для `web/build_page.py` |
+| Драйвер USB-UART | CH340/CP210x | если COM-порт не появляется |
+
+`ArduinoJson` **не нужен**: JSON разбирается вручную. `WebServer`, `SD`,
+`SPI`, `Preferences`, `HTTPClient`, `WiFiClientSecure`, `mbedtls` входят
+в ядро ESP32.
+
+## 2. Установка ядра и библиотеки
+
+```powershell
+arduino-cli config init
+arduino-cli core update-index
+arduino-cli core install esp32:esp32@2.0.9
+arduino-cli lib install TFT_eSPI@2.5.43
+```
+
+Проверка:
+
+```powershell
+arduino-cli core list
+arduino-cli lib list | Select-String TFT_eSPI
+```
+
+Должно быть `esp32:esp32 2.0.9` и `TFT_eSPI 2.5.44`.
+
+## 3. `User_Setup.h` — критично, лежит ВНЕ скетча
+
+`TFT_eSPI` берёт пины и драйвер не из папки прошивки, а из своей библиотеки:
+
+```
+%USERPROFILE%\Documents\Arduino\libraries\TFT_eSPI\User_Setup.h
+```
+
+Скопируйте файл из репозитория:
+
+```powershell
+Copy-Item firmware\hw\User_Setup.h `
+  "$env:USERPROFILE\Documents\Arduino\libraries\TFT_eSPI\User_Setup.h" -Force
+```
+
+Что внутри:
+
+```cpp
+#define ILI9341_2_DRIVER
+#define TFT_MISO 12
+#define TFT_MOSI 13
+#define TFT_SCLK 14
+#define TFT_CS   15
+#define TFT_DC    2
+#define TFT_RST  -1
+#define TFT_BL   21
+#define TFT_BACKLIGHT_ON HIGH
+```
+
+Без этого файла экран, скорее всего, будет чёрным: библиотека соберётся
+с «generic» настройками. После замены **удалите старую сборку** и соберите
+заново — иначе останется старый объектный файл:
+
+```powershell
+Remove-Item build -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+Не редактируйте `User_Setup_Select.h` «на всякий случай»: по умолчанию он
+подключает именно `User_Setup.h`.
+
+## 4. `secrets.h`
+
+```powershell
+cd firmware\cydv4
+Copy-Item secrets.example.h secrets.h
+notepad secrets.h
+```
+
+Заполните:
+
+```cpp
+#define WIFI_SSID      "ваша_сеть_2.4ghz"
+#define WIFI_PASS      "пароль"
+#define TUYA_DEVICE_ID "..."
+#define TUYA_LOCAL_KEY "..."
+#define TUYA_CLIENT_ID "..."
+#define TUYA_SECRET    "..."
+#define RELAY_IP       "192.168.1.25"
+#define PC_API_URL     "http://192.168.1.20:8090"
+#define WEATHER_LAT    "YOUR_LAT"
+#define WEATHER_LON    "YOUR_LON"
+#define WEATHER_CITY   "ВАШ ГОРОД"
+```
+
+- `secrets.h` уже в `.gitignore`, в репозиторий не попадёт.
+- Wi-Fi только **2,4 ГГц**.
+- Если отдельного PC-сервера нет, поставьте `PC_API_URL ""` — плата будет
+  пропускать этот шаг.
+- `WEATHER_LAT/LON` — координаты вашего города; можно оставить пустыми,
+  тогда погода будет «НЕТ ДАННЫХ».
+
+## 5. Сборка веб-страницы
+
+Исходник страницы — `firmware/cydv4/web/page.html`. Он вшивается в `.ino`
+между маркерами `PAGE_TMPL`:
+
+```powershell
+cd firmware\cydv4
+python web\build_page.py
+```
+
+Скрипт:
+
+- проверяет, что в HTML нет `)HTML"` (иначе сломается raw-строка);
+- проверяет 22 плейсхолдера (`__FW__`, `__MV__`, …);
+- заменяет блок в `cydv4.ino`.
+
+После правки страницы **всегда** запускайте сборку и коммитьте оба файла:
+`web/page.html` и `cydv4.ino`.
+
+## 6. Компиляция
+
+Из корня репозитория:
+
+```powershell
+$cli = "C:\Program Files\Arduino CLI\arduino-cli.exe"
+
+& $cli compile `
+  --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" `
+  --libraries "$env:USERPROFILE\Documents\Arduino\libraries" `
+  --build-path "build" `
+  "firmware\cydv4"
+```
+
+Почему `PartitionScheme=min_spiffs`:
+
+- прошивка занимает около **1,09 МБ** (1 426 528 байт);
+- в `min_spiffs` раздел приложения — **3 МБ**, занято **72 %**;
+- в стандартном `default` раздел 1,3 МБ, занято 108 % — запаса почти нет,
+  следующая правка может не влезть.
+
+Ожидаемый результат (Arduino CLI 1.5.1, ru):
+
+```
+Скетч использует 1142313 байт (36%) памяти устройства. Всего доступно 3145728 байт.
+Глобальные переменные используют 72928 байт (22%) динамической памяти, оставляя 254752 байт для локальных переменных. Максимум: 327680 байт.
+```
+
+(Точная цифра зависит от версии библиотек; главное — `min_spiffs` и отсутствие
+`Sketch too big`.)
+
+## 7. Прошивка
+
+Плата — в COM5 (проверьте в диспетчере устройств; если другой — замените).
+
+```powershell
+& $cli upload `
+  -p COM5 `
+  --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" `
+  --upload-property "upload.speed=921600" `
+  --input-dir "build" `
+  "firmware\cydv4"
+```
+
+Скорость **921600**, не 115200: на 115200 бывают срывы. Если порт не
+открывается:
+
+1. Проверьте кабель (не «только зарядка»).
+2. Поставьте драйвер CH340/CP210x.
+3. Зажмите **BOOT**, коротко нажмите **RST**, отпустите BOOT — и повторите.
+4. Убедитесь, что монитор порта не держит COM5.
+
+## 8. Проверка после прошивки
+
+Монитор порта на **115200**:
+
+```
+=== ДОМ 4.4 ===
+SD: ok, строк 10168
+веб: http://192.168.1.50/
+```
+
+Затем:
+
+```powershell
+# страница
+start http://192.168.1.50/
+
+# данные
+curl http://192.168.1.50/data
+```
+
+Ожидаемо: JSON с полями `v`, `temp`, `p`, `amp`, `e`, `r`, `tkwh`, `tcost`,
+`ykwh`, `ykost`, `mkwh`, `mcost`, `tariff`, `rssi`, `sdRows`.
+
+Если экран показывает «НЕТ ДАННЫХ»:
+
+- `NET` в serial — есть ли Wi-Fi/IP;
+- `DIAG` — `gSdOk`, `gTuyaOk`, `gRssi`;
+- `ping <IP реле>`, порт 6668;
+- `WCLR` — сбросить погоду и проверить заново.
+
+## 9. Частые ошибки
+
+| Ошибка | Причина | Решение |
+|---|---|---|
+| `secrets.h: No such file` | не скопирован шаблон | `Copy-Item secrets.example.h secrets.h` |
+| `Sketch too big` | собрано без `min_spiffs` | добавить `PartitionScheme=min_spiffs` |
+| `TFT_eSPI` ошибки `_spi_cmd` | не тот `User_Setup.h` | скопировать из `firmware/hw/` |
+| Экран чёрный, но serial работает | `User_Setup.h` / подсветка | проверить пины, `TFT_BL 21`, clean build |
+| `Failed to connect` | скорость/порт/BOOT | 921600, COM5, BOOT+RST |
+| Плата подключается к старой сети | старые `ssid/pass` в NVS | `esptool erase_region 0x9000 0x5000` |
+| `WebServer` не компилируется | ядро 3.x | `esp32:esp32@2.0.9` |
+| Страница пустая после правки | забыли `build_page.py` | пересобрать и перепрошить |
+
+## 10. Чего НЕ делать
+
+- Не собирать с `esp32c3` и не искать OLED — это другая плата.
+- Не ставить `PartitionScheme=default`.
+- Не копировать `User_Setup.h` в папку скетча: `TFT_eSPI` его там не ищет.
+- Не коммитить `secrets.h`, `build/`, `*.bin`.
+- Не прошивать 3.x ядром «на удачу».
+- Не публиковать порт 80 платы в интернет: у страницы нет пароля.
+
+## 11. Размер и запас
+
+| Параметр | Значение |
+|---|---|
+| Размер `.bin` | ~1,15 МБ (1 426 528 байт; код — 1 426 528 байт) |
+| Раздел `min_spiffs` | 3 МБ (3 145 728 байт) |
+| Занято | 72 % |
+| Свободно | ~1,9 МБ |
+| Раздел `default` | 1,3 МБ (1 310 720 байт), занято 108 % |
+
+Запас в `min_spiffs` нужен для строковых ресурсов, шрифтов и будущих правок.
+
+## Страница платы: `page_html.h`
+
+Веб-страница лежит отдельно — `firmware/cydv4/web/page.html`. Из неё собирается
+заголовок `page_html.h`, который подключает прошивка:
+
+```powershell
+cd firmware\cydv4\web
+python build_page.py          # перезапишет ../page_html.h
+```
+
+В репозитории `page_html.h` уже собран — **если страницу не меняли, этот шаг
+не нужен**. После правки `page.html` файл надо пересобрать, иначе плата
+отдаст старую страницу (проверка: откройте `http://<IP платы>/` и поищите
+свою правку).
+
+## Секреты и TFT
+
+1. `copy firmware\cydv4\secrets.example.h firmware\cydv4\secrets.h` и заполнить.
+2. `firmware\hw\User_Setup.h` скопировать в библиотеку `TFT_eSPI`
+   (иначе экран будет белым: не тот драйвер и не та распиновка).
+
+## ВАЖНО: TFT_eSPI — какой экран активен
+
+Библиотека `TFT_eSPI` одна на всю машину и переключается файлом
+`libraries/TFT_eSPI/User_Setup_Select.h`. Если там активен чужой Setup
+(например, `User_Setup_C3_ST7735.h` от ESP32-C3), прошивка **соберётся, но
+зависнет на `tft.init()`**: плата печатает баннер и уходит в перезагрузку по
+сторожу (`INT_WDT`), Wi-Fi не поднимается.
+
+Проверка (должна быть активна строка с `User_Setup.h`, а чужие — закомментированы):
+
+```powershell
+Select-String -Path "$env:USERPROFILE\Documents\Arduino\libraries\TFT_eSPI\User_Setup_Select.h" -Pattern '^#include <User_Setup'
+```
+
+Симптом в serial: `dbg: loadWifi ok` и дальше тишина — значит завис `tft.init()`.
+
+## Обновление прошивки по Wi-Fi (OTA)
+
+Плата умеет принимать прошивку по воздуху — USB-кабель нужен только для
+первой прошивки.
+
+```bash
+# из папки pc
+powershell -ExecutionPolicy Bypass -File flash-http.ps1 -Ip 192.168.1.51
+```
+
+Скрипт берёт самую свежую сборку из `%TEMP%\dommon-build-*` (или собирает
+заново с ключом `-Build`), отправляет `POST /update` и ждёт перезагрузку.
+В приложении DomMonitor то же самое делает кнопка **«Прошить по Wi-Fi»**
+на вкладке «Прошивка».
+
+Эндпоинты: `POST /update` (тело — .bin) и `GET /reboot`.
+
+## Уведомления и Telegram через реле GitHub
+
+Пороги задаются в `%APPDATA%\DomMonitor\settings.json`:
+
+| поле | по умолчанию | смысл |
+|---|---|---|
+| `alertOn` | `true` | уведомления включены |
+| `alertVMin` / `alertVMax` | `200` / `250` | порог по напряжению, В |
+| `alertTMax` | `55` | перегрев реле, °C |
+| `alertOffMin` | `3` | «плата молчит», минуты |
+| `alertSpikeW` / `alertSpikeX` | `500` / `2.0` | скачок мощности: Вт и во сколько раз выше среднего |
+| `tgRelay` | `false` | слать ли в Telegram |
+| `githubToken` | — | **личный** PAT, только локально, в репозиторий не попадает |
+| `tgRepo` | `<wifi-ssid>/Dom-Energy` | куда отправлять `repository_dispatch` |
+
+Куда приходят уведомления: тост в трее Windows, строка в журнале приложения
+(`app.log`), и — если включено — Telegram через реле.
+
+### Как устроено реле
+
+Telegram API из домашней сети недоступен, поэтому сообщение идёт так:
+
+```
+DomMonitor -> tg-relay.ps1 -> GitHub API (repository_dispatch)
+           -> .github/workflows/telegram-relay.yml -> api.telegram.org
+```
+
+В репозитории должны быть **секреты** (Settings -> Secrets and variables -> Actions):
+
+- `TELEGRAM_BOT_TOKEN` — токен бота от @BotFather
+- `TELEGRAM_CHAT_ID` — id чата
+
+Токен бота и chat_id в коде и в репозитории не хранятся.
+Токен GitHub (PAT) вводится только локально в `settings.json`.
+
+Проверка реле вручную: Actions -> **telegram-relay** -> Run workflow.
+
+## Прошивка 4.11: схема разделов и OTA
+
+С 4.11.0 используется **`PartitionScheme=min_spiffs`** — два слота приложения
+по 1.875 МБ. Только с ней работает обновление по Wi-Fi: в `min_spiffs` второй слот
+отсутствует, и `Update.begin()` падает (в `boots.log` это выглядело как `rr=PANIC`).
+
+```bash
+# первая прошивка (USB, один раз)
+arduino-cli upload -p COM5 \
+  --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs firmware/cydv4
+
+# дальше — по Wi-Fi
+powershell -ExecutionPolicy Bypass -File flash-http.ps1 -Ip 192.168.1.51
+```
+
+Проверка: `POST /update` отвечает `OK`, в `/boots.log` появляется `rr=OTA(11)`.
+
+## Защита: что где лежит
+
+| Порог | DP автомата Tuya | Наша плата (второй слой) |
+|---|---|---|
+| Перенапряжение | `alarm_set_2`, код 3, В | `gProtVMax` (NVS `prot/vmax`) |
+| Просадка | `alarm_set_2`, код 4, В | `gProtVMin` |
+| Перегруз | `alarm_set_2`, код 1, А | `gProtPMax` = А × 230 |
+| Перегрев | `alarm_set_1`, код 5, °C | `gProtTMax` |
+
+Запись: `GET /protect?apply=1&vmax=250&vmin=200&tmax=60&imax=25` — плата отправляет
+один облачный `POST /v1.0/devices/{id}/commands` с двумя DP и дублирует значения локально.
+Ответ содержит `{"apply":{"a1":1,"a2":1}}` при успехе.
+
+Формат `alarm_set_*`: base64, каждая запись 4 байта — `код`, `включено`, `значение` (big-endian).
+
+## Планировщик
+
+`GET /sched` — чтение; `GET /sched?set=07:30,on,127,1;23:30,off,127,1` — запись
+(`ЧЧ:ММ,действие,маска_дней,включено`); `GET /sched?allow=1` — разрешить выключение реле.
+
+Правила хранятся в NVS (`prot/sched`), проверяются раз в 20 секунд; выключение
+выполняется только при `allowOff=1`, иначе в MQTT уходит `schedule_off_blocked`.
+
+## Как читать quality-эндпоинты
+
+- `/gost` → `n`, `vmin`, `vmax`, `vavg`, `bad`, `badPct`, `events`
+- `/vlog` → `{"n":N,"items":[{"t":epoch,"v":В,"s":секунд,"k":0|1}]}` (0 — провал, 1 — всплеск)
+- `/tuya` → `a1`, `a2` (base64), температура, состояние реле
+
+Частота сети не измеряется: у реле Tuya нет такого DP, на плате нет датчика напряжения.

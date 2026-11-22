@@ -1,0 +1,57 @@
+name: telegram-relay
+
+# Реле для отправки сообщений в Telegram с серверов GitHub.
+# Секреты репозитория (Settings -> Secrets and variables -> Actions):
+#   TELEGRAM_BOT_TOKEN — токен бота от @BotFather
+#   TELEGRAM_CHAT_ID   — id чата/канала
+#
+# Запуск:
+#   1) repository_dispatch (event_type = notify) — так шлёт pc/tg-relay.ps1
+#   2) вручную: Actions -> telegram-relay -> Run workflow, поле «текст»
+
+on:
+  repository_dispatch:
+    types: [notify]
+  workflow_dispatch:
+    inputs:
+      text:
+        description: "Текст сообщения"
+        required: true
+        default: "Проверка связи с DOM MONITOR"
+
+permissions:
+  contents: read
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Проверка секретов
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TOKEN" ] || [ -z "$CHAT" ]; then
+            echo "::error::Не заданы TELEGRAM_BOT_TOKEN и/или TELEGRAM_CHAT_ID"
+            exit 1
+          fi
+          echo "секреты на месте"
+
+      - name: Отправка в Telegram
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEXT: ${{ github.event.client_payload.text || github.event.inputs.text }}
+        run: |
+          if [ -z "$TEXT" ]; then TEXT="DOM MONITOR: пустое сообщение"; fi
+          code=$(curl -sS -o /tmp/tg.json -w "%{http_code}" \
+            -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT}" \
+            --data-urlencode "text=${TEXT}" \
+            --data-urlencode "disable_web_page_preview=true")
+          echo "HTTP $code"
+          cat /tmp/tg.json
+          if [ "$code" != "200" ]; then
+            echo "::error::Telegram вернул $code"
+            exit 1
+          fi
