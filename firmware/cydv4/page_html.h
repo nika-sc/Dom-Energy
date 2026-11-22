@@ -1,0 +1,1149 @@
+#pragma once
+#include <Arduino.h>
+
+// Сгенерировано из web/page.html - НЕ ПРАВИТЬ ВРУЧНУЮ
+// (python web/build_page.py). CSS и JS — в assets.h.
+static const char PAGE_TMPL[] PROGMEM = R"HTML(
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark" data-boot-date="__DATE__" data-boot-hour="__HOUR__">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0a0f1a">
+<title>Дом — энергия</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2322d3ee'/%3E%3Cpath d='M18 6 9 18h6l-1 8 9-12h-6z' fill='%230a0f1a'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/app.css?v=414-p25c">
+</head>
+<body>
+<div class="wrap">
+<div class="top">
+  <span class="name"><i>◈</i> Дом — энергия</span><span class="ver">CYD-__FW__</span>
+  <span class="chips">
+    <span class="chip" id="cNet"><i class="dot __NETCLS__"></i><span>__NETTXT__</span></span>
+    <span class="chip" id="cRssi">__RSSI__ дБм</span><span class="chip" id="cUpd">обновлено 0 с</span>
+    <button class="iconbtn" id="themeBtn" type="button" title="скин">🌈 Радужная</button>
+    <a class="iconbtn" href="/sound.html" target="_blank" title="настройка звуков">♪ Звуки</a>
+  </span>
+</div>
+
+<div class="netbar" id="netbar"><b>Нет связи с платой.</b><span>проверьте Wi-Fi и питание</span><button type="button" id="retryBtn">Повторить</button></div>
+
+<!-- P1.2: компактная строка состояния. Источник и свежесть каждого показателя
+     берутся из /measure отдельно для локального реле и облака. Развёрнутая
+     панель — честные данные о плате, связи, времени и карте (LAN/WAN раздельно). -->
+<details class="statbox" id="statBox">
+  <summary>
+    <span class="sb-live" id="statLive">источник и свежесть: ожидание /measure</span>
+    <span class="sb-link" id="statLink">плата: ожидание · облако: —</span>
+    <span class="sb-hint">состояние и качество данных</span>
+  </summary>
+  <div class="sb-body">
+    <div class="sb-cols">
+      <div class="sb-card">
+        <div class="sb-head" id="sbLan">LAN · плата, Wi-Fi, реле, время, карта</div>
+        <div class="sb-row"><span>Плата отвечает</span><b id="sbBoard">—</b></div>
+        <div class="sb-row"><span>Wi-Fi</span><b id="sbRssi">—</b></div>
+        <div class="sb-row"><span>Реле</span><b id="sbRelay">—</b></div>
+        <div class="sb-row"><span>Время платы</span><b id="sbClock">—</b></div>
+        <div class="sb-row"><span>Карта SD</span><b id="sbSd">—</b></div>
+        <div class="sb-row"><span>Свободно на карте</span><b id="sbSdFree">—</b></div>
+        <div class="sb-row"><span>Запись на карту</span><b id="sbSdWrite">—</b></div>
+      </div>
+      <div class="sb-card">
+        <div class="sb-head">WAN · облако Tuya</div>
+        <div class="sb-row"><span>Интернет</span><b id="sbNet">—</b></div>
+        <div class="sb-row"><span>Облако: успешно</span><b id="sbCOk">—</b></div>
+        <div class="sb-row"><span>Подряд ошибок</span><b id="sbCFail">—</b></div>
+        <div class="sb-row"><span>Последняя попытка</span><b id="sbCAge">—</b></div>
+        <div class="sb-row"><span>Причина</span><b id="sbCWhy">—</b></div>
+      </div>
+    </div>
+    <div class="sb-fresh">
+      <div class="sb-head">Свежесть показателей · /measure <span id="sbMeasure">—</span></div>
+      <div class="sb-tblwrap">
+        <table class="sb-tbl">
+          <thead><tr><th>Показатель</th><th>Источник</th><th>Возраст</th><th>Значение</th><th>Локально</th><th>Облако</th><th>TTL</th></tr></thead>
+          <tbody id="sbFresh"><tr><td colspan="7" class="mut">нет ответа /measure</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</details>
+
+<div class="daybar" id="dayBar">
+  <span class="lbl" id="dayLbl">сегодня</span>
+  <span class="iconbtn" id="dayPrev" role="button" tabindex="0">‹ день</span>
+  <span class="iconbtn" id="dayNext" role="button" tabindex="0">день ›</span>
+  <span class="iconbtn" id="dayToday" role="button" tabindex="0">сегодня</span>
+  <span class="note" id="dayNote">Текущие показания — в разделе «Сейчас»; история — за выбранный день</span>
+</div>
+
+<h2 class="sect">Сейчас<span>напряжение, ток, температура, мощность, реле, счётчик</span></h2>
+
+<div class="detail">
+  <div class="card d">
+    <div class="head"><span class="ttl">Напряжение</span><span class="dnow" id="dVnow">получено —</span></div>
+    <div class="bigv c1"><span id="dVbig">—</span><small>В</small></div>
+    <div class="dsub">норма 207–253 В · ГОСТ 32144-2013</div>
+    <div class="dstats">
+      <div><span>мин</span><b id="dVmin">—</b><i id="dVminT">—</i></div>
+      <div><span>сред</span><b id="dVavg">—</b><i>за сутки</i></div>
+      <div><span>макс</span><b id="dVmax">—</b><i id="dVmaxT">—</i></div>
+    </div>
+    <svg class="dchart" id="dChartV" viewBox="0 0 300 64" preserveAspectRatio="none"></svg>
+  </div>
+  <div class="card d">
+    <div class="head"><span class="ttl">Ток</span><span class="dnow" id="dAnow">получено —</span></div>
+    <div class="bigv c3"><span id="dAbig">—</span><small>А</small></div>
+    <div class="dsub"><span id="pcos">cos φ —</span> · по мощности и напряжению</div>
+    <div class="dstats">
+      <div><span>мин</span><b id="dAmin">—</b><i id="dAminT">—</i></div>
+      <div><span>сред</span><b id="dAavg">—</b><i>за сутки</i></div>
+      <div><span>макс</span><b id="dAmax">—</b><i id="dAmaxT">—</i></div>
+    </div>
+    <svg class="dchart" id="dChartA" viewBox="0 0 300 64" preserveAspectRatio="none"></svg>
+  </div>
+  <div class="card d">
+    <div class="head"><span class="ttl">Темп. реле</span><span class="dnow" id="dTnow">получено —</span></div>
+    <div class="bigv c4"><span id="dTbig">—</span><small>°C</small></div>
+    <div class="dsub">корпус реле · перегрев выше 60 °C</div>
+    <div class="dstats">
+      <div><span>мин</span><b id="dTmin">—</b><i id="dTminT">—</i></div>
+      <div><span>сред</span><b id="dTavg">—</b><i>за сутки</i></div>
+      <div><span>макс</span><b id="dTmax">—</b><i id="dTmaxT">—</i></div>
+    </div>
+    <svg class="dchart" id="dChartT" viewBox="0 0 300 64" preserveAspectRatio="none"></svg>
+  </div>
+</div>
+
+<div class="hero">
+  <div class="card d"><div class="head"><span class="ttl">Мощность</span><span class="dnow"><i class="dot ok"></i> онлайн · <span id="liveAge">—</span></span><span class="dnow" id="gcap">шкала 300 Вт</span></div><div class="bigv c1"><span id="mp">__MP__</span><small>Вт</small></div><div class="pbar"><i id="pfill"></i></div><div class="dsub">шкала — по пику за сутки</div></div>
+  <div class="tiles" style="display:contents">
+    <div class="t"><div class="k">Реле</div><div class="v" id="rel"><i class="dot __RELCLS__"></i>__RELTXT__</div><div class="s">&nbsp;</div></div>
+    <div class="t"><div class="k">Тариф</div><div class="v c5"><span id="ptar">__TAR__</span><small>₽</small></div><div class="s">&nbsp;</div></div>
+    <div class="t"><div class="k">Счётчик · всего</div><div class="v c2"><span id="pe">__PE__</span><small>кВт·ч</small></div><div class="s">с начала учёта на плате</div><div class="s" id="peAge">—</div></div>
+  </div>
+</div>
+
+<h2 class="sect">Итоги<span>сегодня, стоимость, вчера, месяц</span></h2>
+
+<div class="row4">
+  <div class="t"><div class="k">Сегодня</div><div class="v c1"><span id="tkwh">__TKWH__</span><small>кВт·ч</small></div><div class="s" id="tkwhAge">—</div></div>
+  <div class="t"><div class="k">Стоимость</div><div class="v c2"><span id="tcost">__TCOST__</span><small>₽</small></div><div class="s">&nbsp;</div></div>
+  <div class="t"><div class="k">Вчера</div><div class="v"><span id="ykwh">__YKWH__</span><small>кВт·ч</small></div><div class="s"><span id="ykost">__YKOST__</span> ₽</div></div>
+  <div class="t"><div class="k">Месяц</div><div class="v"><span id="mkwh">__MKWH__</span><small>кВт·ч</small></div><div class="s" id="mkwhS">—</div><div class="s"><span id="mcost">__MCOST__</span> ₽</div></div>
+</div>
+
+<details class="card history-workspace" id="historyWorkspace" open>
+  <summary><span>Подробная статистика и таблица периода</span><span class="hs-hint" id="historyHint">сегодня · по часам</span></summary>
+  <div class="history-body">
+    <div id="printMeta"></div>
+    <div class="head">
+      <span class="ttl">Статистика за период</span>
+      <span class="nav"><input class="qin" type="date" id="historyDate" aria-label="Дата истории" style="width:auto"><button class="qbtn" type="button" id="historyReload">Показать</button></span>
+    </div>
+    <div class="qrow" id="historyModes" role="group" aria-label="Вид графика">
+      <button type="button" class="qbtn on" data-mode="hours" aria-pressed="true" title="столбики по часам — видно скачки за сутки">Часы</button>
+      <button type="button" class="qbtn" data-mode="days" aria-pressed="false" title="столбики по дням">Дни</button>
+      <button type="button" class="qbtn" data-mode="weeks" aria-pressed="false" title="столбики по неделям">Недели</button>
+      <button type="button" class="qbtn" id="historyDrill" hidden>Открыть подробнее</button>
+    </div>
+    <div class="mut" style="margin-top:10px">период: один день — по часам, до 2 месяцев — по дням, дольше — по неделям (вид можно переключить выше)</div>
+    <div class="pb" id="rngBtns" role="group" aria-label="Пресеты периода">
+      <button type="button" data-p="today">Сегодня</button>
+      <button type="button" data-p="yest">Вчера</button>
+      <button type="button" data-p="d2">Позавчера</button>
+      <button type="button" data-p="d7">7 дней</button>
+      <button type="button" data-p="d30">30 дней</button>
+      <button type="button" data-p="week">Неделя</button>
+      <button type="button" data-p="month">Месяц</button>
+      <button type="button" data-p="quarter">Квартал</button>
+      <button type="button" data-p="half">Полгода</button>
+      <button type="button" data-p="prev">Прошлый месяц</button>
+      <button type="button" data-p="year">Год</button>
+      <button type="button" data-p="ytd">С начала года</button>
+    </div>
+    <div id="rngControls">
+      <div class="qrow" id="rngRangeBar">
+        <span class="mut">свой диапазон</span>
+        <input class="qin" type="date" id="rngFrom" aria-label="Начало периода"> <span>—</span> <input class="qin" type="date" id="rngTo" aria-label="Конец периода">
+        <button class="qbtn" id="rngGo" type="button">Применить</button>
+        <button class="qbtn" id="rngCsv" type="button">CSV за период</button>
+        <button class="qbtn" id="rngPrint" type="button">Печать</button>
+        <button class="qbtn" id="gapBtn" type="button" title="добрать пропущенные строки из облака Tuya">Заполнить пропуски</button>
+      </div>
+      <div class="qrow" id="rngStatusRow"><span id="gapInfo">—</span><span class="mut">·</span><span id="rngNote">выбери период</span></div>
+    </div>
+    <div id="historySummary" aria-live="polite">раскройте блок, чтобы загрузить историю</div>
+    <div class="history-combined">
+      <div class="ccap" id="historyChartTitle">Показатели по часам</div>
+      <p class="mut">Высота — доля от максимального абсолютного значения каждого показателя. Точные значения — ниже; пустые промежутки означают отсутствие данных. Нажмите на название показателя, чтобы скрыть или показать его. Ячейки выбираются кликом; с клавиатуры — Tab, стрелки ← →, Enter (пробел тоже выбирает).</p>
+      <div class="history-legend" role="group" aria-label="Показатели графика"></div>
+      <svg viewBox="0 0 1000 260" role="listbox" aria-orientation="horizontal" aria-label="Показатели по часам: 24 ячейки, стрелки ← → переключают час, Enter выбирает"></svg>
+      <div class="mut" id="historyDayTotals" style="margin-top:8px"></div>
+    </div>
+    <div class="history-grid" id="historyMetrics"></div>
+    <div class="row4 period-only" style="margin-top:10px">
+      <div class="t"><div class="k">Расход</div><div class="v c1" id="rKwh">—</div><div class="s" id="rKwhS">—</div></div>
+      <div class="t"><div class="k">Стоимость</div><div class="v c2" id="rCost">—</div><div class="s" id="rCostS">—</div></div>
+      <div class="t"><div class="k">День / ночь</div><div class="v" id="rDN">—</div><div class="s" id="rDNS">—</div></div>
+      <div class="t"><div class="k">В среднем в сутки</div><div class="v c3" id="rAvg">—</div><div class="s" id="rAvgS">—</div></div>
+    </div>
+    <div class="rtwrap period-only"><table class="rt" id="rngTbl"><thead><tr>
+      <th>День</th><th>кВт·ч</th><th>₽</th><th>день</th><th>ночь</th><th>U мин–макс</th><th>t реле</th><th>пик</th><th>погода</th><th>t улицы</th>
+    </tr></thead><tbody><tr><td colspan="10" class="mut">нет данных</td></tr></tbody></table></div>
+    <!-- P2.1/P2.2: свёрнутые блоки под таблицей периода. Значения считает
+         встроенный скрипт внизу страницы из уже загруженных /range и /history. -->
+    <details class="statbox p2box" id="cmpBox">
+      <summary><span class="sb-live">Сравнение периодов</span><span class="sb-link" id="cmpSub">сегодня против вчера</span><span class="sb-hint">P2.1</span></summary>
+      <div class="sb-body">
+        <div id="cmpToday"></div>
+        <div id="cmpRange"></div>
+        <div id="cmpNote"></div>
+      </div>
+    </details>
+    <details class="statbox p2box" id="peakBox">
+      <summary><span class="sb-live">Пики нагрузки</span><span class="sb-link" id="peakSub">5 максимальных наблюдённых пиков</span><span class="sb-hint">P2.2</span></summary>
+      <div class="sb-body">
+        <div id="peakList"></div>
+        <div id="peakNote"></div>
+      </div>
+    </details>
+    <!-- P2.3: добровольный месячный лимит. Лимит хранится в localStorage этого
+         браузера, считается по уже полученным /data и /range. Нагрузка не
+         отключается, это не счёт поставщика. -->
+    <details class="statbox p2box" id="budgetBox">
+      <summary><span class="sb-live">Бюджет и прогноз</span><span class="sb-link" id="budSub">лимит не задан</span><span class="sb-hint">P2.3</span></summary>
+      <div class="sb-body">
+        <div id="budNow"></div>
+        <div class="qrow" id="budForm">
+          <span>месячный лимит:</span>
+          <input class="qin" type="number" id="budKwh" min="0" step="0.1" inputmode="decimal" aria-label="Лимит кВт·ч за месяц" title="Добровольный лимит кВт·ч за месяц">
+          <span>кВт·ч</span>
+          <input class="qin" type="number" id="budRub" min="0" step="1" inputmode="decimal" aria-label="Лимит рублей за месяц" title="Добровольный лимит ₽ за месяц">
+          <span>₽</span>
+          <button class="qbtn" type="button" id="budSave">Сохранить</button>
+          <button class="qbtn" type="button" id="budReset">Убрать</button>
+          <span class="mut">хранится только в этом браузере</span>
+        </div>
+        <div id="budState"></div>
+        <div id="budNote"></div>
+      </div>
+    </details>
+    <!-- P2.4: CSV по уже выбранному диапазону. Только скачивание, исходные
+         файлы на карте платы не меняются. -->
+    <details class="statbox p2box" id="exportBox">
+      <summary><span class="sb-live">Экспорт и перенос</span><span class="sb-link" id="expSub">CSV по выбранному диапазону</span><span class="sb-hint">P2.4</span></summary>
+      <div class="sb-body">
+        <div id="expInfo"></div>
+        <div class="qrow" id="expBtns">
+          <button class="qbtn" type="button" id="expDl">Скачать CSV</button>
+          <button class="qbtn" type="button" id="expCopy">Копировать как текст</button>
+          <span class="mut">файлы с карты платы не заменяются</span>
+        </div>
+        <div id="expState"></div>
+        <div id="expNote"></div>
+      </div>
+    </details>
+    <!-- P2.5b: климат рядом с энергией. Комнатный климат за выбранный период
+         берётся из /climatehist (AHT20/BMP280) ОДИН раз на смену периода from/to
+         и кэшируется; открытие/закрытие блока запросов не делает. Пустое
+         значение — «—», а не 0; связь не выдаётся за причину. Расчёт — во
+         встроенном скрипте ниже. -->
+    <details class="statbox p2box" id="climateBox">
+      <summary><span class="sb-live">Климат и энергия</span><span class="sb-link" id="climSub">комнатный климат за период — /climatehist</span><span class="sb-hint">P2.5</span></summary>
+      <div class="sb-body">
+        <div id="climNow"></div>
+        <div class="qrow" id="climRetryRow" style="display:none"><button class="qbtn" type="button" id="climRetry">Повторить</button><span>один повторный запрос за нажатие, автоматических повторов нет</span></div>
+        <div id="climCorr"></div>
+        <div id="climNote"></div>
+        <div class="rtwrap" id="climTableWrap" hidden>
+          <table class="rt" id="climTbl">
+            <thead><tr><th>День</th><th>t комнаты мин–макс, °C</th><th>t комнаты средняя</th><th>влажность мин–макс, %</th><th>давление, гПа</th><th>t реле мин–макс</th><th>t улицы мин–макс</th><th>кВт·ч</th><th>₽</th></tr></thead>
+            <tbody><tr><td colspan="9" class="mut">нет данных</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+  </div>
+</details>
+
+<!-- Скрытые графики дня: их рисует app.js (drawE/drawVT), а показываем историю
+     в свёрнутом блоке выше. Контейнер нужен только как приёмник данных. -->
+<div class="card" id="dayChartsLegacy" style="display:none" aria-hidden="true">
+  <div class="head"><span class="ttl">История</span>
+    <span class="nav"><button id="prev" type="button">‹</button><span class="date" id="dateLabel">—</span><button id="next" type="button">›</button></span>
+  </div>
+  <div class="head"><span class="ttl">Энергия и мощность по часам</span>
+    <span class="ctrl"><button id="unitBtn" type="button">кВт·ч</button><button id="numBtn" type="button" class="on">числа</button><button id="refBtn" type="button">обновить</button></span>
+  </div>
+  <div class="head" style="margin:-4px 0 4px"><span class="legend" style="margin-left:0"><span><i class="sw" style="background:var(--bar1)"></i>средняя</span><span><i class="sw" style="background:var(--bar2)"></i>пик, Вт</span></span></div>
+  <svg class="chart" id="chE" viewBox="0 0 900 190" preserveAspectRatio="none"></svg>
+  <div class="head" style="margin-top:12px"><span class="ttl">Напряжение и температура</span>
+    <span class="legend"><span><i class="sw" style="background:#60a5fa"></i>В</span><span><i class="sw" style="background:#f472b6"></i>°C</span></span>
+  </div>
+  <svg class="chart" id="chVT" viewBox="0 0 900 140" preserveAspectRatio="none"></svg>
+  <div class="gapbox" id="gapBox" style="display:none"><span id="gapTxt"></span><button class="iconbtn" id="gapDayBtn" type="button">подтянуть</button></div>
+</div>
+
+<h2 class="sect">Качество и защита<span>ГОСТ 32144 и пороги автомата</span></h2>
+
+<div class="qgrid two" style="margin-top:12px">
+  <div class="card">
+    <div class="head"><span class="ttl">Качество энергии · ГОСТ 32144</span><span class="legend" id="gostSrc">за сеанс</span></div>
+    <div class="qbig c1"><span id="gostAvg">—</span><small>В среднее</small></div>
+    <div class="pbar2"><i id="gostBar"></i></div>
+    <div class="qrow"><span>мин <b id="gostMin">—</b></span><span>макс <b id="gostMax">—</b></span><span>вне нормы <b id="gostBad">—</b></span></div>
+    <div class="qrow"><span>норма <b id="gostRange">207–253 В</b></span><span>замеров <b id="gostN">—</b></span></div>
+  </div>
+  <div class="card">
+    <div class="head"><span class="ttl">Защита реле</span><span class="legend">настройки автомата Tuya</span></div>
+    <div class="qrow"><span>перенапряжение &gt;</span><b><input class="qin" id="pvmax" value="250"> В</b>
+      <span>просадка &lt;</span><b><input class="qin" id="pvmin" value="200"> В</b></div>
+    <div class="qrow"><span>перегрев &gt;</span><b><input class="qin" id="ptmax" value="60"> °C</b>
+      <span>перегруз &gt;</span><b><input class="qin" id="pimax" value="25"> А</b></div>
+    <div class="qrow"><button class="qbtn" id="protApply" type="button">записать в автомат</button>
+      <button class="qbtn" id="protLocal" type="button">только в плату</button>
+      <span>срабатываний <b id="protTrig">0</b></span></div>
+    <div class="qrow"><span>в автомате:</span><b id="tuyaS">—</b></div>
+    <div class="qrow"><span>проверка:</span><input class="qin" id="ptestv" value="270"> <span>В</span>
+      <button class="qbtn" id="protTest" type="button">проверить</button><b id="ptestres">—</b></div>
+  </div>
+</div>
+
+
+
+<h2 class="sect">Климат в комнате<span>датчик AHT20 + BMP280 на шине I2C</span></h2>
+<div class="qgrid" id="envCards">
+  <div class="card d"><div class="k">Температура</div>
+    <div class="v c4"><span id="envT">—</span><small>°C</small></div>
+    <div class="s" id="envTS">датчик не найден</div></div>
+  <div class="card d"><div class="k">Влажность</div>
+    <div class="v c1"><span id="envH">—</span><small>%</small></div>
+    <div class="s">относительная</div></div>
+  <div class="card d"><div class="k">Давление</div>
+    <div class="v"><span id="envP">—</span><small>мм</small></div>
+    <div class="s" id="envPS">—</div></div>
+</div>
+
+<h2 class="sect">Погода и тарифы</h2>
+
+<div class="two">
+  <div class="card"><div class="head"><span class="ttl">Погода · Адлер</span></div>
+    <div class="kv"><span>Сейчас</span><b id="wxNow">—</b></div>
+    <div class="kv"><span>Завтра</span><b id="wxTom">—</b></div></div>
+  <div class="card"><div class="head"><span class="ttl">Тарифы и прогноз</span></div>
+    <div class="kv"><span>День · 06–23</span><b id="tarDay">__TARDAY__ ₽/кВт·ч</b></div>
+    <div class="kv"><span>Ночь · 23–06</span><b id="tarNight">__TARNIGHT__ ₽/кВт·ч</b></div>
+    <div class="kv"><span>Прогноз на месяц</span><b id="fc">—</b></div></div>
+
+  <div class="card" style="margin-top:12px;grid-column:1/-1">
+    <div class="head"><span class="ttl">Тариф</span><span class="nav"><button id="tarSave" type="button">сохранить</button></span></div>
+    <div class="qrow">
+      <span>День, ₽/кВт·ч <b><input class="qin" id="tarDayIn" type="number" step="0.01" min="0" max="99" value="__TARDAY__"></b></span>
+      <span>Ночь, ₽/кВт·ч <b><input class="qin" id="tarNightIn" type="number" step="0.01" min="0" max="99" value="__TARNIGHT__"></b></span>
+      <span>ночь с <b><input class="qin" id="tarFromIn" type="number" min="0" max="23" value="23"></b> ч</span>
+      <span>по <b><input class="qin" id="tarToIn" type="number" min="0" max="23" value="6"></b> ч</span>
+      <span>итог <b id="tarMsg">—</b></span>
+    </div>
+  </div>
+</div>
+
+<h2 class="sect">Устройство<span>экран, подсветка, гашение</span></h2>
+
+<div class="card" style="margin-top:12px">
+  <div class="head"><span class="ttl">Экран платы</span><span class="nav"><button id="scrBtn" type="button">Экран</button></span></div>
+  <div class="kv"><span>Подсветка</span><b id="scrState">—</b></div>
+  <div class="kv"><span>Яркость</span><b><input id="scrBrightRange" type="range" min="5" max="100" step="5" value="100"> <span id="scrBright">—</span></b></div>
+  <div class="kv"><span>Гасить через</span><b><input id="scrIdle" type="number" min="0" max="60" step="1" value="2"> мин</b></div>
+  <div class="kv"><span>Экономия</span><b id="scrEco">—</b></div>
+  <div class="kv"><span>Плата</span><b><button class="iconbtn" id="rebootBtn" type="button">⟳ перезагрузить</button>
+    <span id="rebootMsg"></span></b></div>
+</div>
+
+<div class="card" style="margin-top:12px">
+  <div class="head"><span class="ttl">Звуки включения</span><span class="nav"><a class="iconbtn" href="/sound.html" target="_blank">Все звуки</a></span></div>
+  <div class="kv"><span>Загрузка платы</span><b>
+    <select id="sndBoot"></select> <button class="iconbtn" id="sndBootPlay" type="button" title="прослушать">▶</button></b></div>
+  <div class="kv"><span>Перезагрузка</span><b>
+    <select id="sndReboot"></select> <button class="iconbtn" id="sndRebootPlay" type="button" title="прослушать">▶</button></b></div>
+  <div class="kv"><span>Тихие часы не глушат загрузку</span><b>по умолчанию</b></div>
+</div>
+
+<h2 class="sect">Диагностика<span>версия, облако, карта, журнал — без секретов</span></h2>
+
+<details class="statbox" id="diagBox">
+  <summary>
+    <span class="sb-live" id="dgLive">диагностика: ожидание /data</span>
+    <span class="sb-hint">центр диагностики</span>
+  </summary>
+  <div class="sb-body">
+    <div class="sb-cols diag-cols">
+      <div class="sb-card">
+        <div class="sb-head">Плата · LAN/WAN из /data</div>
+        <div class="sb-row"><span>Версия</span><b id="dgVer">—</b></div>
+        <div class="sb-row"><span>Сборка</span><b id="dgBuild">—</b></div>
+        <div class="sb-row"><span>Uptime</span><b id="dgUp">—</b></div>
+        <div class="sb-row"><span>Время платы</span><b id="dgClock">—</b></div>
+        <div class="sb-row"><span>LAN</span><b id="dgLan">—</b></div>
+        <div class="sb-row"><span>WAN</span><b id="dgWan">—</b></div>
+      </div>
+      <div class="sb-card">
+        <div class="sb-head">Показатели · источник и возраст (/measure)</div>
+        <div class="sb-row"><span>Напряжение V</span><b id="dgV">—</b></div>
+        <div class="sb-row"><span>Мощность P</span><b id="dgP">—</b></div>
+        <div class="sb-row"><span>Ток I</span><b id="dgI">—</b></div>
+        <div class="sb-row"><span>Темп. реле T</span><b id="dgT">—</b></div>
+        <div class="sb-head" style="margin-top:8px">SD · /storage</div>
+        <div class="sb-row"><span>Ошибки записи</span><b id="dgSdFail">—</b></div>
+        <div class="sb-row"><span>Последняя запись</span><b id="dgSdAge">—</b></div>
+        <div class="sb-row"><span>Архив</span><b id="dgSdArch">—</b></div>
+        <div class="sb-row"><span>Свободно</span><b id="dgSdFree">—</b></div>
+      </div>
+      <div class="sb-card">
+        <div class="sb-head">Последний gapfill · /gapfill/status</div>
+        <div class="sb-row"><span>Стадия</span><b id="dgGapStage">—</b></div>
+        <div class="sb-row"><span>Код</span><b id="dgGapCode">—</b></div>
+        <div class="sb-row"><span>В облаке данных нет</span><b id="dgGapNo">—</b></div>
+        <div class="sb-row"><span>Сообщение</span><b id="dgGapMsg">—</b></div>
+        <div class="sb-head" style="margin-top:8px">Облако · последние строки /clog</div>
+        <div class="diag-clog" id="dgClog">ожидание /clog</div>
+      </div>
+    </div>
+    <div class="qrow diag-actions">
+      <button class="qbtn" id="repBtn" type="button">Скопировать отчёт</button>
+      <span class="mut" id="repMsg">обезличенный отчёт: предпросмотр перед копированием, без IP, MAC, SSID, токенов, device id</span>
+    </div>
+    <div class="rep-prev" id="repPrev" hidden>
+      <pre id="repPre"></pre>
+      <div class="qrow">
+        <button class="qbtn on" id="repCopy" type="button">Скопировать</button>
+        <button class="qbtn" id="repClose" type="button">Закрыть</button>
+        <span class="mut" id="repCopyMsg"></span>
+      </div>
+    </div>
+  </div>
+</details>
+<h2 class="sect">События и автоматика<span>провалы, всплески, планировщик</span></h2>
+
+<div class="card" style="margin-top:12px">
+  <div class="head"><span class="ttl">События напряжения</span>
+    <span class="legend"><span id="evCnt">0</span> · провалы и всплески · <a href="/csv" style="color:var(--c1)">CSV</a></span>
+    <span class="ctrl"><button class="qbtn" id="weekBtn" type="button">7 дней</button></span>
+  </div>
+  <svg class="chart" id="chW" viewBox="0 0 900 150" preserveAspectRatio="none" style="display:none"></svg>
+  <div class="evlist" id="evList"><div class="ev"><span>пока событий нет</span></div></div>
+</div>
+
+
+<details class="statbox" id="evBox">
+  <summary>
+    <span class="sb-live" id="evLive">события: ожидание /vlog, /boots, /data</span>
+    <span class="sb-link" id="evObs">данные наблюдаются с —</span>
+    <span class="sb-hint">хронология</span>
+  </summary>
+  <div class="sb-body">
+    <div class="ev-state" id="evState">ожидание данных</div>
+    <div class="qrow" style="justify-content:space-between;padding-top:8px">
+      <span class="mut">только реальные сообщения платы — без событий «за время простоя»</span>
+      <button class="qbtn" id="evReload" type="button">обновить</button>
+    </div>
+    <div class="evlist ev-hist" id="evHistList"><div class="ev"><span>ожидание /vlog, /boots, /data</span></div></div>
+    <div class="mut ev-foot" id="evFoot">Пока страница закрыта, события напряжения не восстанавливаются; перезагрузки — из /boots.log на карте.</div>
+  </div>
+</details>
+
+<div class="card" style="margin-top:12px">
+  <div class="head"><span class="ttl">Планировщик реле</span>
+    <span class="legend"><span class="qbtn danger" id="allowBtn" type="button">выключение: запрещено</span></span>
+  </div>
+  <div class="sch" id="schList"><div class="r"><span>правил пока нет</span></div></div>
+  <div class="qrow" style="margin-top:8px">
+    <input class="qin" id="schTime" value="07:30" style="width:76px">
+    <select class="qbtn" id="schAct"><option value="on">включить</option><option value="off">выключить</option></select>
+    <input class="qin" id="schDays" value="127" style="width:56px" title="маска дней: 127 = все, 31 = пн-пт">
+    <button class="qbtn" id="schAdd" type="button">добавить</button>
+    <span class="small">маска дней: 127 — все, 31 — пн–пт, 96 — сб+вс</span>
+  </div>
+</div>
+
+
+<div class="build">CYD-__FW__ · страница с платы · данные с карты памяти</div>
+</div>
+<div id="tip" class="tip"></div>
+<script>
+/* P2.1/P2.2 — общий код страницы (инлайн: app.js у предела 63 КБ). */
+/* P2.1/P2.2: сравнение периодов и пики нагрузки. Источники — уже полученные
+   /data (сегодня/вчера), /range (RNG.rows) и /history (S.hist). Предыдущий
+   период такой же длины догружается один раз на смену периода и кешируется. */
+var P2={seq:0,rc:{},hc:{},prev:null,range:null,pend:null,tm:null};
+function p2HM(){var h=G("historyWorkspace");return !!(h&&h.classList&&h.classList.contains("hours-mode"))}
+function p2M(r){return !!r&&(r.rows!=null?+r.rows>0:(r.kwh!=null||r.vvalid===true||+r.pmax>0))}
+function p2Med(a){if(!a.length)return null;a=a.slice().sort(function(x,y){return x-y});var m=a.length>>1;return a.length%2?a[m]:(a[m-1]+a[m])/2}
+function p2N(v,d){return v==null||!isFinite(+v)?"—":num(v,d)}
+function p2S(v,d){return v==null||!isFinite(+v)?"—":(v>0?"+":"")+num(v,d)}
+function p2Cmp(a,b,d){return a==null||b==null||!isFinite(+b)||+b===0?"—":p2S(+a-+b,d)+" · "+p2S((+a-+b)/+b*100,0)+" %"}
+function p2Row(k,v,m){return '<div class="p2row"><span>'+k+'</span><b>'+v+'</b><span class="p2m">'+(m||"")+'</span></div>'}
+function p2Put(e,h){if(e&&e.__h!==h){e.__h=h;e.innerHTML=h}}
+function p2Txt(i,t){var e=G(i);if(e&&e.textContent!==t)e.textContent=t}
+function p2Nt(a){return a.map(function(x){return '<p class="p2note">'+escapeText(x)+'</p>'}).join("")}
+function p2H(j){var o={n:0,p:[],pk:[]};((j&&j.hours)||[]).forEach(function(r){if(!r||r.h==null||!(r.n!=null?+r.n>0:r.kwh!=null))return;o.n++;if(r.p!=null&&isFinite(+r.p))o.p.push(+r.p);if(r.pmax!=null&&isFinite(+r.pmax))o.pk.push({h:+r.h,v:+r.pmax,t:r.pmaxT||"",n:r.n})});return o}
+function p2T(s){var t={kwh:null,cost:null,days:0,tot:(s||[]).length,miss:0,unk:0,live:false};(s||[]).forEach(function(r){if(!p2M(r)){t.miss++;return}t.days++;if(r.kwh!=null&&isFinite(+r.kwh))t.kwh=(t.kwh==null?0:t.kwh)+(+r.kwh);else t.unk++;if(r.cost!=null&&isFinite(+r.cost))t.cost=(t.cost==null?0:t.cost)+(+r.cost);if(S.today&&r.d>=S.today)t.live=true});t.part=t.miss>0||t.unk>0||t.live;return t}
+function p2Why(t){var w=[];if(t.miss)w.push("нет измерений: "+t.miss+" из "+t.tot+" сут");if(t.unk)w.push("без суммы кВт·ч: "+t.unk+" сут");if(t.live)w.push("текущие сутки не закончились");return w.join("; ")}
+function p2Sim(c,p,k,d,u){return (c.part?"≥ ":"")+p2N(c[k],d)+(p?" против "+(p.part?"≥ ":"")+p2N(p[k],d)+" "+u:"")}
+function p2CmpBox(){
+ var eT=G("cmpToday"),eR=G("cmpRange"),eN=G("cmpNote");if(!eT)return;
+ var d=S.data||{},live=!!S.today,tK=d.tkwh==null?null:+d.tkwh,yK=d.ykwh==null?null:+d.ykwh,tC=d.tcost==null?null:+d.tcost,yC=d.ykost==null?null:+d.ykost,yd=(S.days&&S.days[1])||"",hT=p2H(P2.hc[S.today]).n,hY=p2H(P2.hc[yd]).n,a="",nt=[];
+ if(tK==null&&yK==null)a=p2Row("Сегодня против вчера","нет данных /data","");
+ else{
+  a=p2Row("Сегодня против вчера",(live?"≥ ":"")+p2N(tK,2)+" против "+p2N(yK,2)+" кВт·ч",p2Cmp(tK,yK,2))
+   +p2Row("Стоимость",(live?"≥ ":"")+p2N(tC,2)+" против "+p2N(yC,2)+" ₽",p2Cmp(tC,yC,2))
+   +p2Row("Часы с данными",(hT?hT+" из 24":"—")+" против "+(hY?hY+" из 24":"—"),"по /history");
+  if(live)nt.push("сегодня идут сутки: текущее значение — минимум (≥), сравнивается с полными вчерашними");
+  if(!yd)nt.push("вчерашняя дата пока неизвестна: /days ещё не пришёл");
+ }
+ p2Put(eT,a);
+ var cur=!p2HM()&&P2.range&&P2.range.rows&&P2.range.rows.length?p2T(P2.range.rows):null,pv=P2.prev,pt=pv&&pv.rows?p2T(pv.rows):null,r="";
+ p2Txt("cmpSub",!cur?"сегодня против вчера":pt?P2.range.from+" — "+P2.range.to+" против "+pv.from+" — "+pv.to:P2.range.from+" — "+P2.range.to+" · сравнение");
+ if(!cur)r='<p class="p2note">Сравнение с непосредственно предшествующим периодом такой же длины: выберите период от 2 дней («7 дней», «Месяц» или свой диапазон).</p>';
+ else if(pv&&pv.error)r=p2Row("Выбранный период",(cur.part?"≥ ":"")+p2N(cur.kwh,2)+" кВт·ч · "+cur.days+" из "+cur.tot+" сут","")+'<p class="p2note">прошлый период не загрузился ('+escapeText(pv.error)+') — повторная загрузка периода попробует снова</p>';
+ else if(!pt)r=p2Row("Выбранный период",(cur.part?"≥ ":"")+p2N(cur.kwh,2)+" кВт·ч · "+cur.days+" из "+cur.tot+" сут","")+'<p class="p2note">загружаю предыдущий период такой же длины…</p>';
+ else{
+  r=p2Row("кВт·ч",p2Sim(cur,pt,"kwh",2,"кВт·ч"),p2Cmp(cur.kwh,pt.kwh,2))
+   +p2Row("Стоимость",p2Sim(cur,pt,"cost",2,"₽"),p2Cmp(cur.cost,pt.cost,2))
+   +p2Row("Сутки с данными",cur.days+" из "+cur.tot+" против "+pt.days+" из "+pt.tot,pv.from+" — "+pv.to);
+  if(cur.part)nt.push("выбранный период неполный: "+p2Why(cur)+" — сумма показана как минимум (≥)");
+  if(pt.part)nt.push("прошлый период неполный: "+p2Why(pt)+" — сравнение приблизительное");
+  if(pt.kwh===0||pt.cost===0)nt.push("у прошлого периода нулевой итог — процент не считается, в разнице стоит «—»");
+ }
+ p2Put(eR,r);p2Put(eN,p2Nt(nt));
+}
+function p2PeakBox(){
+ var eL=G("peakList"),eN=G("peakNote");if(!eL)return;
+ var hm=p2HM(),j=S.hist,day=j&&j.date||"",h=[],med=null,hN=0,sub="",a="",nt=[];
+ if(hm){
+  if(!j||!j.hours)a='<p class="p2note">загружаю почасовые данные…</p>';
+  else{
+   var hh=p2H(j);hN=hh.n;med=p2Med(hh.p);h=hh.pk.slice().sort(function(x,y){return y.v-x.v}).slice(0,5);
+   sub="почасовые пики за "+fmtDate(day);
+   if(!hN)a='<p class="p2note">нет наблюдённых часов: в /history за '+fmtDate(day)+' нет измерений</p>';
+   else if(!h.length)a='<p class="p2note">нет наблюдённых пиков: у часов с данными нет поля пика</p>';
+   else{
+    a=h.map(function(x){return '<button class="p2pk" type="button" data-day="'+day+'" data-h="'+x.h+'" title="выбрать этот час в графике"><span>'+("0"+x.h).slice(-2)+':00–'+("0"+(+x.h+1)).slice(-2)+':00</span><b>'+num(x.v,0)+' Вт</b><span class="p2m">'+(x.t?"пик в "+escapeText(x.t):(+x.n>0&&+x.n<60?"неполный час":"наблюдённый"))+'</span></button>'}).join("")
+     +p2Row("Медиана часовой средней",med==null?"—":p2N(med,0)+" Вт","базовая нагрузка по "+hN+" ч")
+     +p2Row("Часов с данными",hN+" из 24",hN<5?"мало выборок":"");
+    if(h.length<5)nt.push("максимум среди полученных: пиков "+h.length+" из 5");
+    if(hN<5)nt.push("мало выборок ("+hN+" ч): медиана и порядок пиков приблизительные");
+    if(h.some(function(x){return +x.n>0&&+x.n<60}))nt.push("мало замеров в часе — он помечен «неполный час»");
+   }
+  }
+ }else{
+  var rows=((P2.range&&P2.range.rows)||[]).filter(function(r){return p2M(r)&&r.pmax!=null&&isFinite(+r.pmax)&&+r.pmax>0}).sort(function(x,y){return y.pmax-x.pmax});h=rows.slice(0,5);
+  sub="суточные пики"+(P2.range?" · "+P2.range.from+" — "+P2.range.to:"");
+  if(!h.length)a='<p class="p2note">'+(P2.range&&P2.range.rows.length?"нет наблюдённых пиков за период":"выберите период от 2 дней: пики появятся из уже загруженного /range")+'</p>';
+  else{
+   a=h.map(function(x){return '<button class="p2pk" type="button" data-day="'+x.d+'" title="открыть день в графике по часам"><span>'+fmtDate(x.d)+'</span><b>'+num(x.pmax,0)+' Вт</b><span class="p2m">пик суток</span></button>'}).join("")
+    +p2Row("Медиана часовой средней","—","нужны почасовые данные: откройте день")
+    +p2Row("Часов с данными","—","/range отдаёт сутки, а не часы");
+   nt.push("/range отдаёт суточный максимум мощности, а не час: откройте день, чтобы выбрать час пика");
+   if(h.length<5)nt.push("максимум среди полученных: суток с пиком "+h.length+" из 5");
+  }
+ }
+ p2Put(eL,a);p2Put(eN,p2Nt(nt));p2Txt("peakSub",sub);
+}
+function p2Render(){p2CmpBox();p2PeakBox();p34Render();if(window.p25Render)p25Render()}
+function p2Day(s){return new Date(s+"T12:00:00")}
+function p2Chunk(from,to){var c=[],cur=from,g=0;while(cur<=to&&g++<40){var e=iso(addDays(p2Day(cur),30));if(e>to)e=to;c.push([cur,e]);cur=iso(addDays(p2Day(e),1))}return c}
+function p2RangeRows(from,to){
+ var ch=p2Chunk(from,to),all=[],i=0,until=Date.now()+180000,f=0;
+ function go(c){
+  function att(){
+   return fetch("/range?from="+c[0]+"&to="+c[1],{cache:"no-store",timeoutMs:15000}).then(function(r){return r.json().catch(function(){return{}}).then(function(j){return{s:r.status,j:j||{}}})}).then(function(x){
+    if(x.s===202||x.j.pending){if(Date.now()>=until)throw Error("плата слишком долго считает период");return new Promise(function(res){setTimeout(res,Math.max(700,Math.min(3000,+x.j.retryMs||900)))}).then(att)}
+    if(x.s>=500)throw Error(x.j.err||"HTTP "+x.s);
+    if(x.j.ok===false)throw Error(x.j.err||"HTTP "+x.s);
+    return x.j;
+   }).catch(function(e){if(Date.now()<until&&f<4){var d=600*++f;return new Promise(function(res){setTimeout(res,d)}).then(att)}throw e});
+  }
+  return att();
+ }
+ function step(){if(i>=ch.length)return Promise.resolve(all);var c=ch[i++];return go(c).then(function(j){all=all.concat(j.rows||[]);return i<ch.length?new Promise(function(res){setTimeout(res,80)}).then(step):all})}
+ return step();
+}
+function p2Reset(){P2.seq++;P2.prev=null;P2.range=null;p2CmpBox()}
+function p2Prev(from,to){
+ if(!/^\d{4}-\d{2}-\d{2}$/.test(from||"")||!to)return;
+ var n=Math.round((p2Day(to)-p2Day(from))/86400000)+1;if(!(n>0))return;
+ var pto=iso(addDays(p2Day(from),-1)),pfr=iso(addDays(p2Day(pto),-(n-1))),key=pfr+"|"+pto,seq=++P2.seq;
+ if(P2.rc[key]){P2.prev={from:pfr,to:pto,rows:P2.rc[key]};p2CmpBox();return}
+ P2.prev={from:pfr,to:pto};p2CmpBox();
+ p2RangeRows(pfr,pto).then(function(rows){if(seq!==P2.seq)return;P2.rc[key]=rows;P2.prev={from:pfr,to:pto,rows:rows};p2CmpBox()},function(e){if(seq!==P2.seq)return;P2.prev={from:pfr,to:pto,error:e&&e.message||"нет ответа"};p2CmpBox()});
+}
+function p2Pick(day,h){
+ var plot=document.querySelector("#historyWorkspace .history-combined svg");
+ if(!plot||!p2HM()||!S.hist||S.hist.date!==day)return false;
+ var g=plot.querySelector('[data-index="'+h+'"]');if(!g)return false;
+ try{g.dispatchEvent(new MouseEvent("click",{bubbles:true}))}catch(e){}
+ try{g.scrollIntoView({block:"center"})}catch(e){}
+ return true;
+}
+function p2Tick(){var p=P2.pend;if(!p||Date.now()>p.until)return p2Stop();if(p2Pick(p.day,p.h)){P2.pend=null;p2Stop()}}
+function p2Stop(){P2.pend=null;if(P2.tm){clearInterval(P2.tm);P2.tm=null}}
+function p2Sel(day,h){
+ if(p2Pick(day,h))return;
+ P2.pend={day:day,h:h,until:Date.now()+20000};
+ if(window.historyLoadRange)window.historyLoadRange(day,day);
+ if(!P2.tm)P2.tm=setInterval(p2Tick,250);
+ var host=G("historyWorkspace");if(host&&host.scrollIntoView)try{host.scrollIntoView({block:"start"})}catch(e){}
+}
+function p2Init(){
+ var l=G("peakList");
+ if(l&&l.addEventListener)l.addEventListener("click",function(e){
+  var b=e.target&&e.target.closest?e.target.closest(".p2pk"):null;if(!b)return;
+  var d=b.getAttribute("data-day")||"",h=b.getAttribute("data-h");
+  if(!d)return;
+  if(h!=null)p2Sel(d,+h);
+  else if(window.historyLoadRange){window.historyLoadRange(d,d);var host=G("historyWorkspace");if(host&&host.scrollIntoView)try{host.scrollIntoView({block:"start"})}catch(x){}}
+ });
+ ["cmpBox","peakBox"].forEach(function(id){var b=G(id);if(b&&b.addEventListener)b.addEventListener("toggle",function(){if(b.open)p2Render()})});
+ var host=G("historyWorkspace");
+ if(host&&window.MutationObserver)try{new MutationObserver(function(){p2Render()}).observe(host,{attributes:true,attributeFilter:["class"]})}catch(e){}
+ p2Render();
+}
+/* Инлайн, а не в app.js: app.js уже 56 КБ при лимите build_page.py 63 КБ
+   на ресурс, а PAGE_TMPL с этим кодом — 41 КБ, запас есть. */
+if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",p2Init);else p2Init();
+function p2OnHist(j){if(j&&j.date)P2.hc[j.date]=j;p2Render()}
+function p2OnData(){if(S.hist&&S.hist.date)P2.hc[S.hist.date]=S.hist;p2Render()}
+function p2OnRange(from,to,rows){P2.range={from:from,to:to,rows:rows||[]};p2Render();setTimeout(p2Render,0);if(from&&to)p2Prev(from,to)}
+/* ---------- P2.3: бюджет месяца и оценка конца месяца ----------
+   Данные только из уже загруженных /data (S.data) и /range (RNG.rows):
+   блок не делает ни одного своего запроса. Лимит — добровольный, лежит в
+   localStorage браузера; прогноз всегда для ТЕКУЩЕГО месяца по браузеру. */
+var P34={key:"domEnergy.budget.v1",kwh:null,rub:null,ok:false};
+var P34MON=["январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"];
+function p34p2(n){return (n<10?"0":"")+n}
+function p34iso(d){return d.getFullYear()+"-"+p34p2(d.getMonth()+1)+"-"+p34p2(d.getDate())}
+function p34n(v,d){return v==null||!isFinite(+v)?"—":num(v,d==null?2:d)}
+function p34M(r){return !!r&&(r.rows!=null?+r.rows>0:(r.kwh!=null||r.vvalid===true||+r.pmax>0))}
+function p34Month(){
+  var n=new Date(),y=n.getFullYear(),m=n.getMonth();
+  var first=new Date(y,m,1),last=new Date(y,m+1,0),yest=new Date(y,m,n.getDate()-1);
+  return{first:p34iso(first),last:p34iso(last),today:p34iso(n),yest:p34iso(yest),
+    dim:last.getDate(),full:n.getDate()-1,name:P34MON[m],ym:y+"-"+p34p2(m+1)};
+}
+function p34Lim(v){
+  if(v==null)return null;
+  if(typeof v==="string"){v=v.trim().replace(",",".");if(v==="")return null}
+  var n=+v;return isFinite(n)&&n>=0?n:null;
+}
+function p34In(el){
+  if(!el)return{ok:true,v:null};
+  var s=(el.value==null?"":""+el.value).trim();
+  if(s==="")return{ok:true,v:null};
+  var n=+(s.replace(",","."));
+  return isFinite(n)&&n>=0?{ok:true,v:n}:{ok:false,v:null};
+}
+function p34Say(id,t){var e=G(id);if(e&&e.textContent!==t)e.textContent=t}
+function p34Load(){
+  P34.ok=false;P34.kwh=null;P34.rub=null;
+  try{
+    var s=window.localStorage?localStorage.getItem(P34.key):null;
+    if(s){var j=JSON.parse(s)||{};P34.kwh=p34Lim(j.kwh);P34.rub=p34Lim(j.rub)}
+    P34.ok=true;
+  }catch(e){P34.ok=false}
+}
+function p34Save(){
+  var a=p34In(G("budKwh")),b=p34In(G("budRub"));
+  if(!a.ok||!b.ok){p34Say("budState","лимит — неотрицательное число или пустое поле, введённое не сохранено");return}
+  P34.kwh=a.v;P34.rub=b.v;
+  try{localStorage.setItem(P34.key,JSON.stringify({kwh:P34.kwh,rub:P34.rub}));P34.ok=true;
+    p34Say("budState","лимит сохранён в этом браузере");
+  }catch(e){P34.ok=false;p34Say("budState","браузер не разрешил localStorage — лимит останется только до перезагрузки")}
+  p34Render();
+}
+function p34Reset(){
+  P34.kwh=null;P34.rub=null;
+  var k=G("budKwh"),r=G("budRub");if(k)k.value="";if(r)r.value="";
+  try{localStorage.removeItem(P34.key)}catch(e){}
+  p34Say("budState","лимит убран");
+  p34Render();
+}
+function p34Fact(M){
+  var d=S.data||{},r={kwh:null,cost:null,src:"",costEst:false,stale:false,tariff:null};
+  var t=+d.tariff;if(d.tariff!=null&&isFinite(t)&&t>0)r.tariff=t;
+  var board=d.now?String(d.now).slice(0,7):"",same=!board||board===M.ym;
+  if(!same)r.stale=true;
+  if(same&&d.mkwh!=null&&isFinite(+d.mkwh)){r.kwh=+d.mkwh;r.src="данным платы /data"}
+  if(same&&d.mcost!=null&&isFinite(+d.mcost))r.cost=+d.mcost;
+  if(r.kwh==null){
+    var rows=(window.RNG&&RNG.rows)||[],sum=0,n=0,cost=0,cn=0;
+    for(var i=0;i<rows.length;i++){var x=rows[i];if(!x||!(x.d>=M.first&&x.d<=M.today)||!p34M(x))continue;
+      if(x.kwh!=null&&isFinite(+x.kwh)){sum+=+x.kwh;n++}
+      if(x.cost!=null&&isFinite(+x.cost)){cost+=+x.cost;cn++}}
+    if(n){r.kwh=sum;r.src="загруженным суткам периода";if(cn)r.cost=cost}
+  }
+  if(r.cost==null&&r.kwh!=null&&r.tariff!=null){r.cost=r.kwh*r.tariff;r.costEst=true}
+  return r;
+}
+function p34Fore(M){
+  var rows=(window.RNG&&RNG.rows)||[];
+  if(!rows.length)return{why:"noRange"};
+  if(M.full<=0)return{why:"monthStart"};
+  var by={},i;for(i=0;i<rows.length;i++){var r=rows[i];if(r&&r.d)by[r.d]=r}
+  var loaded=0,dat=0,sum=0,empty=0,d,first=new Date(M.first+"T12:00:00");
+  for(d=new Date(first.getTime());p34iso(d)<=M.yest;d.setDate(d.getDate()+1)){
+    var x=by[p34iso(d)];
+    if(x===undefined)continue;      /* сутки не входят в загруженный период */
+    loaded++;
+    if(!p34M(x)){empty++;continue}
+    if(x.kwh!=null&&isFinite(+x.kwh)){dat++;sum+=+x.kwh}else empty++;
+  }
+  var inToday=!!(by[M.today]&&p34M(by[M.today]));
+  if(!loaded)return{why:"noMonth",inToday:inToday};
+  if(!dat)return{why:"noDays",loaded:loaded,empty:empty,inToday:inToday};
+  var avg=sum/dat;
+  return{ok:true,avg:avg,kwh:avg*M.dim,dat:dat,full:M.full,loaded:loaded,empty:empty,inToday:inToday};
+}
+function p34Bar(pct,over){
+  var w=pct==null?0:Math.max(0,Math.min(100,+pct));
+  return '<div class="p34bar'+(over?" over":"")+'"><i style="width:'+w.toFixed(1)+'%"></i></div>';
+}
+function p34LimRow(label,unit,fact,lim){
+  if(lim==null)return p2Row(label,"не задан","задайте лимит — появится прогресс месяца");
+  if(lim===0){
+    var over0=fact!=null&&isFinite(+fact)&&+fact>0;
+    return p2Row(label,"0 "+unit+" · любой расход выше лимита",fact==null?"факт неизвестен":(over0?"факт уже больше нуля":"факт 0"))+p34Bar(100,true);
+  }
+  if(fact==null||!isFinite(+fact))return p2Row(label,"лимит "+p34n(lim)+" "+unit,"факт неизвестен — процент не считается")+p34Bar(0,false);
+  var v=+fact,pct=v/lim*100,over=v>lim+1e-9;
+  return p2Row(label,p34n(v)+" / "+p34n(lim)+" "+unit+" · "+num(pct,0)+" %"+(over?" · превышен на "+p34n(v-lim)+" "+unit:""),
+    over?"осталось 0 "+unit:"осталось "+p34n(lim-v)+" "+unit)+p34Bar(pct,over);
+}
+function p34Budget(){
+  var host=G("budNow");if(!host)return;
+  if(!P34.ok)p34Load();
+  var M=p34Month(),f=p34Fact(M),fc=p34Fore(M),out="",notes=[],sub="";
+  out+=p2Row("Факт за "+M.name,(f.kwh==null?"—":p34n(f.kwh)+" кВт·ч")+" · "+(f.cost==null?"—":p34n(f.cost)+" ₽"),
+    f.src?"по "+f.src:"нет данных текущего месяца");
+  out+=p34LimRow("Лимит кВт·ч за месяц","кВт·ч",f.kwh,P34.kwh);
+  out+=p34LimRow("Лимит ₽ за месяц","₽",f.cost,P34.rub);
+  if(fc.ok){
+    var fcost=f.tariff==null?null:fc.kwh*f.tariff;
+    out+=p2Row("Прогноз на конец месяца (оценка)",p34n(fc.kwh)+" кВт·ч"+(fcost==null?"":" · "+p34n(fcost)+" ₽"),
+      "среднее по "+fc.dat+" полным суткам с данными × "+M.dim+" дней");
+    out+=p2Row("Покрытие прогноза",fc.dat+" из "+M.full+" полных суток",
+      (fc.dat<fc.full?"в загруженном периоде "+fc.loaded+" из "+fc.full:"все сутки периода")+(fc.empty?" · "+fc.empty+" без данных":""));
+    if(fc.inToday)notes.push("сегодняшние сутки ещё идут: в факте они неполные (≥), в среднее для прогноза не включены");
+    if(fc.dat<fc.full)notes.push("прогноз по неполному покрытию: суток с данными "+fc.dat+" из "+fc.full+" полных — оценка смещена, если расход дней различается");
+    if(fc.avg===0)notes.push("все полные сутки с данными показали 0 кВт·ч — оценка 0, это не «нет данных»");
+    if(fcost!=null)notes.push("₽ прогноза — по текущему тарифу платы "+p34n(f.tariff)+" ₽/кВт·ч, прошлые дни могли считаться по другому");
+    sub="оценка "+p34n(fc.kwh,1)+" кВт·ч к концу "+M.name;
+  }else{
+    out+=p2Row("Прогноз на конец месяца (оценка)","—","оценка не построена");
+    var why=fc.why;
+    notes.push(why==="noRange"?"прогноз появится после загрузки периода: нажмите «Месяц» или «30 дней»"
+      :why==="monthStart"?"месяц только начался: полных суток ещё нет, оценивать не по чему"
+      :why==="noMonth"?"в загруженном периоде нет полных суток "+M.name+" — нажмите «Месяц», чтобы оценить конец месяца"
+      :"нет полных суток текущего месяца с суммой кВт·ч — оценка не строится");
+    sub="лимит"+(P34.kwh!=null||P34.rub!=null?"":" не задан");
+  }
+  if(f.stale)notes.push("дата платы и браузера в разных месяцах — месячный итог /data не используется, факт по загруженным суткам");
+  if(f.costEst)notes.push("₽ в факте посчитаны по текущему тарифу: плата не прислала стоимость месяца");
+  if(P34.kwh==null&&P34.rub==null)notes.push("лимит не задан — задайте добровольный месячный лимит кВт·ч и/или ₽ выше. Достижение лимита нагрузку не отключает.");
+  notes.push("это оценка по фактическим дням, а не счёт поставщика: периоды расчёта, округление и льготы могут отличаться");
+  p2Put(host,out);
+  p2Put(G("budNote"),p2Nt(notes));
+  if(P34.kwh!=null&&f.kwh!=null&&P34.kwh>0)sub="факт "+p34n(f.kwh)+" из "+p34n(P34.kwh)+" кВт·ч · "+num(f.kwh/P34.kwh*100,0)+" %";
+  else if(P34.rub!=null&&f.cost!=null&&P34.rub>0)sub="факт "+p34n(f.cost)+" из "+p34n(P34.rub)+" ₽ · "+num(f.cost/P34.rub*100,0)+" %";
+  else if(P34.kwh===0||P34.rub===0)sub="лимит 0 — любой расход выше";
+  else if(P34.kwh==null&&P34.rub==null)sub="лимит не задан";
+  p2Txt("budSub",sub);
+}
+/* ---------- P2.4: экспорт CSV по выбранному диапазону ----------
+   Только скачивание: файлы на карте платы не читаются повторно и не
+   меняются. Пустое поле = пропуск (не ноль и не "null"). */
+function p34Csv(){
+  var rows=(window.RNG&&RNG.rows)||[],from=(window.RNG&&RNG.from)||"",to=(window.RNG&&RNG.to)||"";
+  if(!rows.length)return{err:"нет данных за период"};
+  var head=["date","timezone","kwh_kWh","cost_RUB","day_kWh","night_kWh","day_RUB","night_RUB","vmin_V","vmax_V","tmin_C","tmax_C","pmax_W","rows","weather"];
+  var out=[head.join(";")],i;
+  function v(r,k,good){var x=r[k];return good&&x!=null&&isFinite(+x)?String(+x):""}
+  for(i=0;i<rows.length;i++){
+    var r=rows[i]||{},ok=p34M(r),vf=ok&&r.vvalid!==false,tf=ok&&r.tvalid!==false;
+    var w=ok&&r.w?String(r.w).replace(/[;\r\n]+/g," ").replace(/\s+/g," ").trim():"";
+    var nrows=(r.rows!=null&&isFinite(+r.rows))?String(+r.rows):"";
+    out.push([r.d||"","device-local",v(r,"kwh",ok),v(r,"cost",ok),v(r,"dayKwh",ok),v(r,"nightKwh",ok),
+      v(r,"dayCost",ok),v(r,"nightCost",ok),v(r,"vmin",vf),v(r,"vmax",vf),v(r,"tmin",tf),v(r,"tmax",tf),
+      v(r,"pmax",ok),nrows,w].join(";"));
+  }
+  return{name:"energy-"+from+"_"+to+".csv",text:"\ufeff"+out.join("\r\n")+"\r\n"};
+}
+function p34Download(){
+  var c=p34Csv();
+  if(c.err){p34Say("expState","экспорт не сделан: "+c.err);return false}
+  try{
+    var blob=new Blob([c.text],{type:"text/csv;charset=utf-8"});
+    var u=URL.createObjectURL(blob),a=document.createElement("a");
+    a.href=u;a.download=c.name;document.body.appendChild(a);a.click();document.body.removeChild(a);
+    setTimeout(function(){try{URL.revokeObjectURL(u)}catch(e){}},4000);
+  }catch(e){
+    var a2=document.createElement("a");
+    a2.href="data:text/csv;charset=utf-8,"+encodeURIComponent(c.text);a2.download=c.name;a2.click();
+  }
+  p34Say("expState","скачано: "+c.name+" · суток в файле "+((window.RNG&&RNG.rows&&RNG.rows.length)||0));
+  return true;
+}
+function p34Copy(){
+  var c=p34Csv();
+  if(c.err){p34Say("expState","копировать нечего: "+c.err);return false}
+  var t=c.text.replace(/^\ufeff/,"");
+  function done(ok){p34Say("expState",ok?"CSV скопирован как текст в буфер обмена":"браузер не дал доступ к буферу обмена — скачайте файл")}
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(function(){done(true)},function(){
+      try{
+        var ta=document.createElement("textarea");ta.value=t;ta.style.position="fixed";ta.style.opacity="0";
+        document.body.appendChild(ta);ta.select();var ok=document.execCommand("copy");
+        document.body.removeChild(ta);done(!!ok);
+      }catch(e){done(false)}
+    });
+  }else done(false);
+}
+function p34ExportInfo(){
+  var host=G("expInfo");if(!host)return;
+  var rows=(window.RNG&&RNG.rows)||[],from=(window.RNG&&window.RNG.from)||"",to=(window.RNG&&window.RNG.to)||"",met=0,i;
+  for(i=0;i<rows.length;i++)if(p34M(rows[i]))met++;
+  var h="";
+  if(from&&to&&rows.length){
+    h+=p2Row("Диапазон",fmtDate(from)+" — "+fmtDate(to),rows.length+" сут · с данными "+met);
+    h+=p2Row("Файл","energy-"+from+"_"+to+".csv","имя содержит весь диапазон");
+  }else if(from&&to)h+=p2Row("Диапазон",fmtDate(from)+" — "+fmtDate(to),"суток с данными нет — файл был бы пустым");
+  else h+=p2Row("Диапазон","не выбран","выберите период кнопками выше или задайте свои даты");
+  p2Put(host,h);
+  var ok=!!(from&&to&&rows.length),b=G("expDl"),cp=G("expCopy");
+  if(b)b.disabled=!ok;if(cp)cp.disabled=!ok;
+  p2Txt("expSub",ok?"CSV · "+rows.length+" сут · "+met+" с данными":"CSV по выбранному диапазону");
+  p2Put(G("expNote"),p2Nt([
+    "Колонки и единицы: date;timezone;kwh_kWh;cost_RUB;day_kWh;night_kWh;day_RUB;night_RUB;vmin_V;vmax_V;tmin_C;tmax_C;pmax_W;rows;weather.",
+    "Пустое поле означает пропуск, а не ноль. BOM UTF-8 и разделитель «;» — чтобы Excel открыл русский файл.",
+    "Время — по плате (device-local), а не по часовому поясу браузера.",
+    "Только скачивание: файлы на карте платы не меняются, повторный экспорт тех же суток даёт тот же файл."]));
+}
+function p34Render(){
+  try{p34Budget();p34ExportInfo()}
+  catch(e){p34Say("budState","ошибка расчёта бюджета: "+(e&&e.message||e))}
+}
+function p34Init(){
+  p34Load();
+  var k=G("budKwh"),r=G("budRub");
+  if(k)k.value=P34.kwh==null?"":String(P34.kwh);
+  if(r)r.value=P34.rub==null?"":String(P34.rub);
+  var s=G("budSave"),rs=G("budReset"),dl=G("expDl"),cp=G("expCopy");
+  if(s)s.addEventListener("click",p34Save);
+  if(rs)rs.addEventListener("click",p34Reset);
+  if(dl)dl.addEventListener("click",p34Download);
+  if(cp)cp.addEventListener("click",p34Copy);
+  [k,r].forEach(function(el){if(el&&el.addEventListener)el.addEventListener("keydown",function(ev){if(ev.key==="Enter"){ev.preventDefault();p34Save()}})});
+  ["budgetBox","exportBox"].forEach(function(id){var b=G(id);if(b&&b.addEventListener)b.addEventListener("toggle",function(){if(b.open)p34Render()})});
+  p34Render();
+}
+if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",p34Init);else p34Init();
+window.p34Csv=p34Csv;window.p34Download=p34Download;
+/* ---------- P2.5b: климат рядом с энергией ----------
+   Комнатный климат за выбранный период — из /climatehist (AHT20/BMP280, /climate.csv):
+   {"ok":true,"from":..,"to":..,"days":[{"d","n","tmin","tmax","tavg","hmin","hmax","havg","pavg"}]}.
+   Запрос ровно ОДИН на смену периода from/to, ответ кэшируется (LRU на 8 периодов,
+   как в приложении Windows): открытие/закрытие блока, печать и перерисовки новых
+   запросов не делают. Смена периода отменяет предыдущий in-flight запрос
+   (AbortController), а не только 12-секундный таймер. При ошибке кнопка
+   «Повторить» делает ОДИН ручной повтор, без автоповторов. Дни от платы
+   дедуплицируются по дате и сортируются по возрастанию; итоги считаются по
+   уникальным дням. Дубли дня не удваивают суммы: остаётся запись с большим n.
+   Пустое значение — «—», а не 0: в ответе t=0.0 пропуск (прошивка его не считает),
+   а hmin/hmax=0 и pavg=0 значат, что валидных часов влажности/давления в этот день
+   не было. Температура реле (7-я колонка /energy.csv) и температура улицы (прогноз
+   weather.csv, середина суточных мин–макс) остаются отдельными подписями: это НЕ
+   комната. Коэффициент Пирсона показывает только совместное изменение —
+   «связь не означает причину». Порогов тепла/холода и прогнозов здесь нет. */
+var P25={minN:5,MAXD:400,MAXC:8,cache:{},ord:[],key:"",from:"",to:"",days:null,st:"nodates",err:"",m:0,seq:0,ctl:null,tm:null};
+function p25Iso(s){return /^\d{4}-\d{2}-\d{2}$/.test(s||"")}
+function p25Date(s){var p=String(s||"").split("-");return new Date(+p[0],(+p[1])-1,+p[2],12,0,0)}
+function p25Span(from,to){return Math.round((p25Date(to)-p25Date(from))/86400000)+1}
+/* LRU: на странице не больше 8 периодов, как в приложении Windows. */
+function p25CachePut(key,a){
+  if(P25.cache[key]!=null){var i=P25.ord.indexOf(key);if(i>=0)P25.ord.splice(i,1)}
+  P25.ord.push(key);P25.cache[key]=a;
+  while(P25.ord.length>P25.MAXC)delete P25.cache[P25.ord.shift()];
+}
+/* Смена периода отменяет ровно предыдущий in-flight запрос климата. */
+function p25Abort(){
+  if(P25.tm){clearTimeout(P25.tm);P25.tm=null}
+  if(P25.ctl){try{P25.ctl.abort()}catch(e){}P25.ctl=null}
+  P25.seq++;
+}
+function p25Clim(x){
+  if(!x||!p25Iso(x.d))return null;
+  var n=+x.n;
+  if(!(n>0))return null;                     /* n=0 — день без валидных часов, не данные */
+  var o={d:x.d,n:n},k,v,i;
+  for(i=0;i<7;i++){k=["tmin","tmax","tavg","hmin","hmax","havg","pavg"][i];v=x[k];
+    o[k]=(v!=null&&isFinite(+v))?+v:null}
+  if(o.tmin==null||o.tmax==null||o.tavg==null)return null;
+  if(o.hmin!=null&&o.hmin<=0)o.hmin=null;     /* 0 — пропуск, а не 0 % */
+  if(o.hmax!=null&&o.hmax<=0)o.hmax=null;
+  if(o.havg!=null&&o.havg<=0)o.havg=null;
+  if(o.pavg!=null&&o.pavg<=0)o.pavg=null;     /* 0 — пропуск, а не 0 гПа */
+  return o;
+}
+/* Суточная строка /range — датчик реле (t) и прогноз улицы (wt); это НЕ климат AHT20. */
+function p25Range(r){
+  if(!r||!p2M(r))return null;
+  var tmin=(r.tmin!=null&&isFinite(+r.tmin))?+r.tmin:null;
+  var tmax=(r.tmax!=null&&isFinite(+r.tmax))?+r.tmax:null;
+  var rt=(r.tvalid!==false&&tmin!=null&&tmax!=null&&tmax>=tmin)?(tmin+tmax)/2:null;
+  var wtmin=(r.wtmin!=null&&isFinite(+r.wtmin))?+r.wtmin:null;
+  var wtmax=(r.wtmax!=null&&isFinite(+r.wtmax))?+r.wtmax:null;
+  var wok=!!(r.wvalid||(r.w!=null&&String(r.w).replace(/\s+/g,"")!==""))&&wtmin!=null&&wtmax!=null&&wtmax>=wtmin;
+  return {d:r.d||"",tmin:(rt==null?null:tmin),tmax:(rt==null?null:tmax),rt:rt,
+    wtmin:(wok?wtmin:null),wtmax:(wok?wtmax:null),ot:(wok?(wtmin+wtmax)/2:null),
+    kwh:(r.kwh!=null&&isFinite(+r.kwh))?+r.kwh:null,
+    cost:(r.cost!=null&&isFinite(+r.cost))?+r.cost:null};
+}
+function p25Load(from,to){
+  if(!p25Iso(from)||!p25Iso(to)){p25Abort();P25.key="";P25.st="nodates";P25.days=null;P25.m=0;return}
+  var key=from+"|"+to;
+  if(P25.key===key)return;                   /* этот период уже запрошен/загружен/ошибка */
+  p25Abort();                                /* период сменился — прошлый запрос отменяем */
+  var seq=P25.seq;
+  P25.key=key;P25.from=from;P25.to=to;P25.err="";P25.days=null;
+  var m=p25Span(from,to);
+  if(!(m>0)){P25.st="badrange";P25.m=0;return}
+  P25.m=m;
+  if(P25.cache[key]){p25CachePut(key,P25.cache[key]);P25.st="ok";P25.days=P25.cache[key];return}
+  if(m>P25.MAXD){P25.st="toolong";return}
+  P25.st="load";
+  var ctl=null;
+  try{ctl=new AbortController()}catch(e){}
+  P25.ctl=ctl;
+  if(ctl)P25.tm=setTimeout(function(){try{ctl.abort()}catch(e){}},12000);
+  fetch("/climatehist?from="+encodeURIComponent(from)+"&to="+encodeURIComponent(to),
+        {cache:"no-store",signal:ctl?ctl.signal:undefined})
+   .then(function(r){return r.json()})
+   .then(function(j){
+     if(P25.tm){clearTimeout(P25.tm);P25.tm=null}
+     if(seq!==P25.seq)return;                /* период сменился, ответ устарел */
+     P25.ctl=null;
+     if(!j||j.ok!==true||!(j.days instanceof Array)){
+       P25.st="error";P25.err="плата не вернула дни климата";
+       try{p25Render()}catch(e){}return;
+     }
+     var a=[],i,d,seen={},k;
+     for(i=0;i<j.days.length;i++){
+       d=p25Clim(j.days[i]);if(!d)continue;
+       k=seen[d.d];
+       if(k!=null){if(d.n>a[k].n)a[k]=d;continue}  /* дубль дня: один раз, запись с большим n */
+       seen[d.d]=a.length;a.push(d);
+     }
+     a.sort(function(x,y){return x.d<y.d?-1:x.d>y.d?1:0});
+     p25CachePut(key,a);P25.days=a;P25.st="ok";P25.err="";
+     try{p25Render()}catch(e){}
+   },function(e){
+     if(P25.tm){clearTimeout(P25.tm);P25.tm=null}
+     if(seq!==P25.seq)return;
+     P25.ctl=null;
+     P25.st="error";P25.days=null;
+     P25.err=(e&&e.name==="AbortError")?"/climatehist не ответил за 12 с":"нет читаемого ответа /climatehist";
+     try{p25Render()}catch(x){}
+   });
+}
+/* «Повторить»: одна ручная попытка вместо ожидания смены периода. */
+function p25Retry(){
+  if(P25.st!=="error")return;
+  p25Abort();
+  P25.key="";P25.err="";P25.st="load";
+  try{p25Render()}catch(e){}
+}
+function p25Stats(days){
+  var s={days:0,n:0,tmin:null,tmax:null,tsum:0,hmin:null,hmax:null,hsum:0,hn:0,psum:0,pn:0},i,d;
+  for(i=0;i<days.length;i++){d=days[i];s.days++;s.n+=d.n;s.tsum+=d.tavg*d.n;
+    if(s.tmin==null||d.tmin<s.tmin)s.tmin=d.tmin;
+    if(s.tmax==null||d.tmax>s.tmax)s.tmax=d.tmax;
+    if(d.hmin!=null&&(s.hmin==null||d.hmin<s.hmin))s.hmin=d.hmin;
+    if(d.hmax!=null&&(s.hmax==null||d.hmax>s.hmax))s.hmax=d.hmax;
+    if(d.havg!=null){s.hsum+=d.havg;s.hn++}
+    if(d.pavg!=null){s.psum+=d.pavg;s.pn++}
+  }
+  s.tavg=s.n?s.tsum/s.n:null;
+  s.havg=s.hn?s.hsum/s.hn:null;
+  s.pavg=s.pn?s.psum/s.pn:null;
+  return s;
+}
+function p25Mean(a){var s=0,i;if(!a||!a.length)return null;for(i=0;i<a.length;i++)s+=a[i];return s/a.length}
+function p25R(xs,ys){
+  var n=xs.length,i,sx=0,sy=0;
+  if(n<2)return{n:n,r:null,why:"меньше двух дней"};
+  for(i=0;i<n;i++){sx+=xs[i];sy+=ys[i]}
+  var mx=sx/n,my=sy/n,sxy=0,sxx=0,syy=0;
+  for(i=0;i<n;i++){var dx=xs[i]-mx,dy=ys[i]-my;sxy+=dx*dy;sxx+=dx*dx;syy+=dy*dy}
+  if(sxx<1e-9&&syy<1e-9)return{n:n,r:null,why:"ни t, ни расход не меняются"};
+  if(sxx<1e-9)return{n:n,r:null,why:"t одинаковая во все дни"};
+  if(syy<1e-9)return{n:n,r:null,why:"расход одинаковый во все дни"};
+  return{n:n,r:sxy/Math.sqrt(sxx*syy),why:""};
+}
+function p25Pairs(days,k){var out=[],i,d;for(i=0;i<days.length;i++){d=days[i];if(d[k]!=null&&d.kwh!=null)out.push([d[k],d.kwh])}return out}
+function p25Scatter(pts){
+  if(!pts||pts.length<2)return "";
+  var x0=pts[0][0],x1=x0,y0=pts[0][1],y1=y0,i;
+  for(i=1;i<pts.length;i++){if(pts[i][0]<x0)x0=pts[i][0];if(pts[i][0]>x1)x1=pts[i][0];if(pts[i][1]<y0)y0=pts[i][1];if(pts[i][1]>y1)y1=pts[i][1]}
+  if(x1-x0<1e-9){x0-=0.5;x1+=0.5}
+  if(y1-y0<1e-9){y0-=0.5;y1+=0.5}
+  var W=300,H=120,pl=40,pr=8,pt=8,pb=20;
+  var X=function(v){return pl+(v-x0)/(x1-x0)*(W-pl-pr)};
+  var Y=function(v){return H-pb-(v-y0)/(y1-y0)*(H-pb-pt)};
+  var s='<svg class="p25plot" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="точки дней: температура по горизонтали, расход по вертикали">';
+  s+='<line x1="'+pl+'" y1="'+(H-pb)+'" x2="'+(W-pr)+'" y2="'+(H-pb)+'" stroke="var(--grid)"/>';
+  s+='<line x1="'+pl+'" y1="'+pt+'" x2="'+pl+'" y2="'+(H-pb)+'" stroke="var(--grid)"/>';
+  for(i=0;i<pts.length;i++)s+='<circle cx="'+X(pts[i][0]).toFixed(1)+'" cy="'+Y(pts[i][1]).toFixed(1)+'" r="2.8" fill="var(--c4)"/>';
+  s+='<text class="p25ax" x="'+(W-pr)+'" y="'+(H-6)+'" text-anchor="end">t, °C · '+num(x0,1)+'…'+num(x1,1)+'</text>';
+  s+='<text class="p25ax" x="2" y="'+(pt+8)+'">кВт·ч '+num(y0,2)+'…'+num(y1,2)+'</text>';
+  return s+'</svg>';
+}
+function p25CorrRow(name,pts,why){
+  if(!pts.length)return p2Row(name,"—",why||"нет дней, где есть и t, и расход");
+  if(pts.length<P25.minN)return p2Row(name,"мало данных для оценки связи","N="+pts.length+" из "+P25.minN+" дней — коэффициент не считаем");
+  var xs=[],ys=[],i;for(i=0;i<pts.length;i++){xs.push(pts[i][0]);ys.push(pts[i][1])}
+  var c=p25R(xs,ys);
+  if(c.r==null)return p2Row(name,"r не определён","N="+c.n+" · "+c.why);
+  return p2Row(name,"r="+(c.r>0?"+":"")+num(c.r,2)+" · N="+c.n,"связь не означает причину");
+}
+function p25StatusMeta(){
+  if(P25.st==="nodates")return "период по дням не загружен: выберите «7 дней», «Месяц» или свой диапазон";
+  if(P25.st==="badrange")return "некорректные границы периода";
+  if(P25.st==="toolong")return "период "+P25.m+" дн. больше "+P25.MAXD+" — плата климат за него не отдаёт";
+  if(P25.st==="load")return "запрашиваю /climatehist один раз за период…";
+  if(P25.st==="error")return P25.err+"; прочерки, а не выдуманные числа — нажмите «Повторить»";
+  if(!P25.days||!P25.days.length)return "/climatehist вернул пустой список дней — климата за период нет";
+  return "";
+}
+function p25Render(){
+  var eNow=G("climNow");if(!eNow)return;
+  var rows=(window.RNG&&window.RNG.rows)||[];
+  var from=(window.RNG&&window.RNG.from)||"",to=(window.RNG&&window.RNG.to)||"";
+  p25Load(from,to);
+  var rr=G("climRetryRow");if(rr)rr.style.display=(P25.st==="error"?"":"none");
+  var todayIso=(window.S&&window.S.today)||"";
+  var i,j,rdays=[],rooms=[],outs=[],kwhs=[],costs=[];
+  for(i=0;i<rows.length;i++){var d=p25Range(rows[i]);if(!d)continue;rdays.push(d);
+    if(d.rt!=null)rooms.push(d.rt);if(d.ot!=null)outs.push(d.ot);
+    if(d.kwh!=null)kwhs.push(d.kwh);if(d.cost!=null)costs.push(d.cost)}
+  var sumK=null,sumC=null;
+  for(i=0;i<kwhs.length;i++)sumK=(sumK==null?0:sumK)+kwhs[i];
+  for(i=0;i<costs.length;i++)sumC=(sumC==null?0:sumC)+costs[i];
+  var kpd=(kwhs.length?sumK/kwhs.length:null),cpd=(costs.length?sumC/costs.length:null);
+  var tmin=null,tmax=null;
+  for(i=0;i<rdays.length;i++){if(rdays[i].tmin!=null&&(tmin==null||rdays[i].tmin<tmin))tmin=rdays[i].tmin;
+    if(rdays[i].tmax!=null&&(tmax==null||rdays[i].tmax>tmax))tmax=rdays[i].tmax}
+  var ravg=p25Mean(rooms),oavg=p25Mean(outs),sd=(window.S&&window.S.data)||{},now;
+  if(sd.eok===1||sd.eok===true)now=p2N(sd.et,1)+" °C · "+p2N(sd.eh,0)+" %";
+  else if(sd.eok===0||sd.eok===false)now="датчик AHT20 не найден";
+  else now="нет данных /data";
+  var days=(P25.st==="ok"&&P25.days)?P25.days:null,s=days?p25Stats(days):null,a="";
+  var todayN=null;
+  if(days)for(i=0;i<days.length;i++)if(todayIso&&days[i].d===todayIso&&days[i].n<24)todayN=days[i].n;
+  a+=p2Row("Сейчас в комнате · AHT20",now,"текущее значение, не среднее");
+  if(s&&days&&days.length){
+    a+=p2Row("Комната за период · температура",
+      s.tavg==null?"—":p2N(s.tavg,1)+" °C в среднем",
+      s.tavg==null?"нет дней с валидной t":("мин "+p2N(s.tmin,1)+" · макс "+p2N(s.tmax,1)+" °C · взвешенно по "+s.n+" ч с данными"));
+    a+=p2Row("Комната за период · влажность",
+      s.havg==null?"—":p2N(s.havg,0)+" % в среднем",
+      s.havg==null?"нет валидных часов влажности":("мин "+p2N(s.hmin,0)+" · макс "+p2N(s.hmax,0)+" % · по "+s.hn+" дн. с данными"));
+    a+=p2Row("Комната за период · давление",
+      s.pavg==null?"—":p2N(s.pavg,0)+" гПа в среднем",
+      s.pavg==null?"нет валидных часов давления":("по "+s.pn+" дн. с данными · взвешивать нечем, среднее по дням"));
+    a+=p2Row("Покрытие климата",days.length+" из "+P25.m+" дней периода",
+      "дни без данных плата не присылает — пустых суток в ответе нет");
+  }else{
+    a+=p2Row("Комната за период","—",p25StatusMeta());
+  }
+  a+=p2Row("Температура реле за период",(ravg==null?"—":p2N(ravg,1)+" °C в среднем"),
+    (ravg==null?"нет суток с измеренной t":"мин "+p2N(tmin,1)+" · макс "+p2N(tmax,1)+" °C · суточные мин–макс, "+rooms.length+" из "+rows.length+" сут"));
+  a+=p2Row("Уличная t за период",(oavg==null?"—":p2N(oavg,1)+" °C в среднем"),
+    (oavg==null?"нет в /range: weather.csv без полей":"прогноз, середина суточных мин–макс · "+outs.length+" из "+rows.length+" сут"));
+  a+=p2Row("Расход и стоимость",(kpd==null?"—":p2N(kpd,2)+" кВт·ч/сут"+(cpd==null?"":" · "+p2N(cpd,2)+" ₽/сут")),
+    (kpd==null?"нет суток с суммой кВт·ч":kwhs.length+" из "+rows.length+" сут с расходом"));
+  p2Put(eNow,a);
+  var kwhBy={};
+  for(i=0;i<rows.length;i++){var rr=rows[i];if(rr&&p25Iso(rr.d)&&rr.kwh!=null&&isFinite(+rr.kwh))kwhBy[rr.d]=+rr.kwh}
+  var roomPts=[];
+  if(days)for(i=0;i<days.length;i++){var dm=days[i];if(dm.tavg!=null&&kwhBy[dm.d]!=null)roomPts.push([dm.tavg,kwhBy[dm.d]])}
+  var pr=p25Pairs(rdays,"rt"),po=p25Pairs(rdays,"ot");
+  var roomWhy;
+  if(P25.st==="load")roomWhy="климат за период ещё загружается";
+  else if(P25.st==="error")roomWhy="климат недоступен: "+P25.err;
+  else if(P25.st==="toolong")roomWhy="период больше "+P25.MAXD+" дней — климат не запрашивался";
+  else if(P25.st==="nodates")roomWhy="период по дням не загружен";
+  else if(days&&!days.length)roomWhy="/climatehist вернул пустой список дней";
+  else roomWhy="нет дней, где есть и t комнаты, и расход";
+  var c="";
+  c+=p25CorrRow("t комнаты дня (средняя) — кВт·ч дня",roomPts,roomWhy);
+  c+=p25CorrRow("t реле дня — кВт·ч дня",pr);
+  c+=p25CorrRow("t улицы дня — кВт·ч дня",po);
+  c+='<p class="p2note">Коэффициент Пирсона r (от −1 до +1) показывает только совместное изменение, а не влияние климата на расход: «связь не означает причину». Порогов тепла/холода и прогнозов здесь нет.</p>';
+  var pl="";
+  if(roomPts.length>=2)pl+='<div class="p25sc"><span>t комнаты дня → кВт·ч дня</span>'+p25Scatter(roomPts)+'</div>';
+  if(pr.length>=2)pl+='<div class="p25sc"><span>t реле дня → кВт·ч дня</span>'+p25Scatter(pr)+'</div>';
+  if(po.length>=2)pl+='<div class="p25sc"><span>t улицы дня → кВт·ч дня</span>'+p25Scatter(po)+'</div>';
+  if(pl)c+='<div class="p25plots">'+pl+'</div>';
+  p2Put(G("climCorr"),c);
+  var nt=["Комнатный климат — из /climatehist: один запрос на смену периода, ответ кэшируется; открытие/закрытие блока и печать новых запросов не делает.",
+    "Средняя t комнаты взвешена по часам с данными (n в ответе). Влажность и давление плата взвешивать не даёт — это среднее по дням, где валидные часы были.",
+    "0 в ответе — пропуск, а не измерение: t=0.0 прошивка не считает, hmin/hmax/pavg=0 значит валидных часов влажности/давления в этот день не было.",
+    "t реле — датчик реле из /range (это не комната). Уличная t — прогноз weather.csv, середина суточных мин–макс — оценка, а не измерение.",
+    "Корреляция — только по дням, где есть и t, и расход; при N < "+P25.minN+" коэффициент не считаем. Пустое значение — «—», не ноль."];
+  if(P25.st==="toolong")nt.push("Плата отдаёт климат максимум за "+P25.MAXD+" дней: выберите период короче (или он не запрашивается).");
+  if(P25.st==="error")nt.push("Ошибка /climatehist: "+P25.err+". Выше — прочерки, выдуманных чисел нет; нажмите «Повторить» — это ОДИН повторный запрос, автоматических повторов нет; смена периода тоже запросит заново.");
+  if(P25.st==="nodates")nt.push("Период по дням не загружен: в режиме «Часы» приходит один день. Выберите «7 дней», «Месяц» или свой диапазон — тогда климат запросится один раз.");
+  if(P25.st==="ok"&&days&&!days.length)nt.push("/climatehist ответил без дней: за этот период в /climate.csv нет валидных измерений климата.");
+  if(P25.st==="ok"&&days&&days.length&&days.length<P25.m)nt.push("Покрытие "+days.length+" из "+P25.m+" дней: за остальные дни в /climate.csv не было валидных измерений — это честные пропуски, а не нули.");
+  if(todayN!=null)nt.push("Сегодняшние сутки ещё не закрыты: за "+todayIso+" в /climatehist "+todayN+" из 24 ч, поэтому средняя, мин/макс и влажность этого дня неполные. В итог периода они входят как есть (по "+todayN+" ч), без экстраполяции до 24 ч.");
+  p2Put(G("climNote"),p2Nt(nt));
+  var tb=G("climTbl")?G("climTbl").getElementsByTagName("tbody")[0]:null;
+  var map={},order=[];
+  function take(dd){if(!map[dd]){map[dd]={d:dd};order.push(dd)}return map[dd]}
+  for(i=0;i<rows.length;i++){var x=p25Range(rows[i]);if(!x)continue;var e=take(x.d);e.rt=x.rt;e.rtmin=x.tmin;e.rtmax=x.tmax;e.wtmin=x.wtmin;e.wtmax=x.wtmax;e.ot=x.ot;e.kwh=x.kwh;e.cost=x.cost}
+  if(days)for(i=0;i<days.length;i++){var q=take(days[i].d);q.ctmin=days[i].tmin;q.ctmax=days[i].tmax;q.ctavg=days[i].tavg;q.chmin=days[i].hmin;q.chmax=days[i].hmax;q.cpavg=days[i].pavg;q.cn=days[i].n}
+  order.sort(function(p,q2){return p<q2?-1:p>q2?1:0});
+  var h="";
+  for(i=0;i<order.length;i++){var z=map[order[i]],dc=fmtDate(z.d);
+    if(todayIso&&z.d===todayIso&&z.cn!=null&&z.cn<24)dc+=" · сегодня: "+z.cn+" из 24 ч";
+    h+="<tr><td>"+dc+"</td><td>"+(z.ctmin==null?"—":num(z.ctmin,1)+"–"+num(z.ctmax,1))+"</td><td>"+(z.ctavg==null?"—":num(z.ctavg,1))+"</td><td>"+(z.chmin==null?"—":num(z.chmin,0)+"–"+num(z.chmax,0))+"</td><td>"+(z.cpavg==null?"—":num(z.cpavg,0))+"</td><td>"+(z.rt==null?"—":num(z.rtmin,1)+"–"+num(z.rtmax,1))+"</td><td>"+(z.ot==null?"—":num(z.wtmin,1)+"–"+num(z.wtmax,1))+"</td><td>"+(z.kwh==null?"—":num(z.kwh,2))+"</td><td>"+(z.cost==null?"—":num(z.cost,2))+"</td></tr>";
+  }
+  if(!h)h="<tr><td colspan='9' class='mut'>нет суток с данными за период</td></tr>";
+  if(tb)tb.innerHTML=h;
+  if(G("climTableWrap"))G("climTableWrap").hidden=!order.length;
+  var sub,cr=(function(){if(roomPts.length<P25.minN)return null;var xs=[],ys=[];for(j=0;j<roomPts.length;j++){xs.push(roomPts[j][0]);ys.push(roomPts[j][1])}var r2=p25R(xs,ys);return r2.r})();
+  if(P25.st==="nodates")sub="климат: период по дням не загружен";
+  else if(P25.st==="toolong")sub=P25.from+" — "+P25.to+" · "+P25.m+" дн. > "+P25.MAXD+": климат не запрашивается";
+  else if(P25.st==="load")sub=P25.from+" — "+P25.to+" · запрашиваю /climatehist…";
+  else if(P25.st==="error")sub=P25.from+" — "+P25.to+" · климат недоступен: "+P25.err;
+  else if(!days||!days.length)sub=P25.from+" — "+P25.to+" · /climatehist: дней с климатом нет";
+  else sub=P25.from+" — "+P25.to+" · климат "+days.length+" из "+P25.m+" дн."+(cr==null?"":" · r(комн., кВт·ч)="+(cr>0?"+":"")+num(cr,2));
+  p2Txt("climSub",sub);
+}
+function p25Init(){
+  var b=G("climateBox");
+  if(b&&b.addEventListener)b.addEventListener("toggle",function(){if(b.open)p25Render()});
+  var rb=G("climRetry");
+  if(rb&&rb.addEventListener)rb.addEventListener("click",p25Retry);
+  p25Render();
+}
+if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",p25Init);else p25Init();
+window.p25Render=p25Render;window.p25State=P25;
+</script>
+<script src="/control.js?v=414-p25c" defer></script>
+<script src="/app.js?v=414-p25c" defer></script>
+<script src="/history.js?v=414-p25c" defer></script>
+</body>
+</html>
+)HTML";

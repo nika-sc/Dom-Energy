@@ -1,0 +1,16 @@
+name: repo-hygiene
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (полная история)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Проверка публичного репозитория
+        run: python3 tests/check-public-repo.py
